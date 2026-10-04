@@ -12,8 +12,10 @@ defmodule Sovite.Test.FakeNameserver do
 
       InetRes.lookup("example.com", :mx, nameservers: [FakeNameserver.address(ns)])
 
-  Record data uses `:inet_dns` formats (charlists for names). An entry can
-  also be `:servfail` or `:refused`. Names missing from the table get
+  Record data uses `:inet_dns` formats (charlists for names); TLSA
+  records use type `52` and raw binary data. An entry can also be
+  `:servfail` or `:refused`, or `{:secure, data}` to answer with the
+  DNSSEC AD (authenticated data) bit set. Names missing from the table get
   NXDOMAIN, and names present with other types get NODATA.
   """
 
@@ -43,7 +45,10 @@ defmodule Sovite.Test.FakeNameserver do
   @impl true
   def handle_info({:udp, socket, ip, port, packet}, state) do
     with {:ok, query} <- :inet_dns.decode(packet) do
-      :ok = :gen_udp.send(socket, ip, port, :inet_dns.encode(answer(query, state.records)))
+      {msg, secure} = answer(query, state.records)
+      <<head::binary-3, flags, rest::binary>> = :inet_dns.encode(msg)
+      flags = if secure, do: Bitwise.bor(flags, 0x20), else: flags
+      :ok = :gen_udp.send(socket, ip, port, <<head::binary, flags, rest::binary>>)
     end
 
     {:noreply, state}
@@ -54,8 +59,14 @@ defmodule Sovite.Test.FakeNameserver do
     name = question |> :inet_dns.dns_query(:domain) |> List.to_string() |> String.downcase()
     type = :inet_dns.dns_query(question, :type)
 
-    {rcode, answers} =
+    {entry, secure} =
       case Map.fetch(records, {name, type}) do
+        {:ok, {:secure, data}} -> {{:ok, data}, true}
+        other -> {other, false}
+      end
+
+    {rcode, answers} =
+      case entry do
         {:ok, error} when is_atom(error) -> {Map.fetch!(@rcodes, error), []}
         {:ok, data} -> {0, Enum.map(data, &rr(name, type, &1))}
         :error -> if known_name?(records, name), do: {0, []}, else: {@rcodes.nxdomain, []}
@@ -66,7 +77,7 @@ defmodule Sovite.Test.FakeNameserver do
       |> :inet_dns.msg(:header)
       |> :inet_dns.make_header(qr: true, aa: true, ra: true, rcode: rcode)
 
-    :inet_dns.make_msg(header: header, qdlist: [question], anlist: answers)
+    {:inet_dns.make_msg(header: header, qdlist: [question], anlist: answers), secure}
   end
 
   defp known_name?(records, name), do: Enum.any?(Map.keys(records), &match?({^name, _}, &1))

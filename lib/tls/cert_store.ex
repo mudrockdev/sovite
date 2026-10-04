@@ -205,12 +205,12 @@ defmodule Sovite.TLS.CertStore do
     end
   end
 
-  defp sni_fun(certificates) do
-    fn hostname ->
-      case for(c <- certificates, Certificate.matches?(c, to_string(hostname)), do: c) do
-        [] -> :undefined
-        matching -> [certs_keys: Enum.map(matching, &Certificate.certs_keys/1)]
-      end
+  defp sni_fun(certificates), do: &select(certificates, to_string(&1))
+
+  defp select(certificates, hostname) do
+    case for(c <- certificates, Certificate.matches?(c, hostname), do: c) do
+      [] -> :undefined
+      matching -> [certs_keys: Enum.map(matching, &Certificate.certs_keys/1)]
     end
   end
 end

@@ -11,11 +11,23 @@ defmodule Sovite.Core.Config do
   """
 
   alias Sovite.Core.Config.{Error, Schema}
+  alias Sovite.Core.Repo
 
   @default_path "/etc/sovite/sovite.toml"
 
+  @tls_levels [:none, :may, :encrypt, :verify, :dane]
+
   @schema [
     {:server, {:section, [{:hostname, :hostname, default: &__MODULE__.system_hostname/0}]}, []},
+    {:database,
+     {:section,
+      [
+        {:adapter, {:enum, [:sqlite, :postgres, :mysql]}, default: :sqlite},
+        {:path, :absolute_path, default: "/var/lib/sovite/sovite.db"},
+        {:url, {:url, ["postgres", "postgresql", "ecto", "mysql"]}, []},
+        {:pool_size, {:integer, 1, 1000}, default: 5},
+        {:ssl, :boolean, default: false}
+      ]}, []},
     {:queue,
      {:section,
       [
@@ -30,8 +42,42 @@ defmodule Sovite.Core.Config do
       {:section,
        [
          {:address, :ip_address, default: "0.0.0.0"},
-         {:port, {:integer, 0, 65_535}, default: 25}
+         {:port, {:integer, 0, 65_535}, []},
+         {:mode, {:enum, [:smtp, :submission, :submissions]}, default: :smtp},
+         {:auth, :boolean, []},
+         {:require_tls, :boolean, []},
+         {:require_auth, :boolean, []},
+         {:tls_min_version, :tls_version, []},
+         {:tls_ciphers, :ciphers, []}
        ]}}, default: [%{}]},
+    {:tls,
+     {:section,
+      [
+        {:certificate,
+         {:list,
+          {:section,
+           [
+             {:cert_file, :absolute_path, required: true},
+             {:key_file, :absolute_path, required: true}
+           ]}}, default: []},
+        {:min_version, :tls_version, default: "1.2"},
+        {:ciphers, :ciphers, []},
+        {:reload_interval, :duration, default: "1m"},
+        {:acme,
+         {:section,
+          [
+            {:enabled, :boolean, default: false},
+            {:directory_url, {:url, ["https", "http"]},
+             default: "https://acme-v02.api.letsencrypt.org/directory"},
+            {:email, :mailbox, []},
+            {:domains, {:list, :hostname}, default: []},
+            {:accept_terms, :boolean, default: false},
+            {:storage, :absolute_path, default: "/var/lib/sovite/acme"},
+            {:http_address, :ip_address, default: "0.0.0.0"},
+            {:http_port, {:integer, 0, 65_535}, default: 80},
+            {:renew_before, :duration, default: "30d"}
+          ]}, []}
+      ]}, []},
     {:smtp,
      {:section,
       [
@@ -63,8 +109,52 @@ defmodule Sovite.Core.Config do
         {:max_recipients, {:integer, 1, 100_000}, default: 50},
         {:max_addresses, {:integer, 1, 100}, default: 5},
         {:ip_versions, {:list, {:enum, [:ipv6, :ipv4]}}, default: ["ipv6", "ipv4"]},
-        {:connect_timeout, :duration, default: "30s"}
+        {:connect_timeout, :duration, default: "30s"},
+        {:tls, {:enum, @tls_levels}, default: :may},
+        {:tls_policy, {:map, :tls_destination, {:enum, @tls_levels}}, default: %{}},
+        {:tls_ca_file, :absolute_path, []},
+        {:relayhost_username, :string, []},
+        {:relayhost_password, :string, []}
       ]}, []},
+    {:auth,
+     {:section,
+      [
+        {:backend, {:enum, [:database, :file, :ldap, :dovecot]}, default: :database},
+        {:mechanisms, {:list, {:enum, [:"SCRAM-SHA-256", :PLAIN, :LOGIN, :OAUTHBEARER]}}, []},
+        {:plaintext, :boolean, default: false},
+        {:max_failures, {:integer, 1, 100_000}, default: 10},
+        {:failure_window, :duration, default: "10m"},
+        {:ban_time, :duration, default: "1h"},
+        {:failure_delay, :duration, default: "1s"},
+        {:sender_check, :boolean, default: true},
+        {:senders, {:map, :string, {:list, :sender_pattern}}, default: %{}},
+        {:file, {:section, [{:path, :absolute_path, []}]}, []},
+        {:ldap,
+         {:section,
+          [
+            {:servers, {:list, :hostname}, default: []},
+            {:port, {:integer, 1, 65_535}, []},
+            {:security, {:enum, [:starttls, :ldaps, :none]}, default: :starttls},
+            {:base, :string, []},
+            {:filter, :ldap_filter, default: "(mail=%u)"},
+            {:dn_template, :string, []},
+            {:bind_dn, :string, []},
+            {:bind_password, :string, []},
+            {:timeout, :duration, default: "10s"}
+          ]}, []},
+        {:dovecot, {:section, [{:socket, :string, []}, {:timeout, :duration, default: "30s"}]},
+         []},
+        {:oauth,
+         {:section,
+          [
+            {:introspection_url, {:url, ["https", "http"]}, []},
+            {:client_id, :string, []},
+            {:client_secret, :string, []},
+            {:username_claim, :string, default: "username"},
+            {:required_scope, :string, []}
+          ]}, []}
+      ]}, []},
+    {:submission, {:section, [{:strip_headers, {:list, :string}, default: ["Return-Path"]}]}, []},
     {:bounce, {:section, [{:double_bounce_recipient, :mailbox, []}]}, []},
     {:log,
      {:section,
@@ -81,10 +171,32 @@ defmodule Sovite.Core.Config do
       ]}, []}
   ]
 
-  defstruct [:server, :queue, :listener, :smtp, :domains, :delivery, :bounce, :log]
+  defstruct [
+    :server,
+    :database,
+    :queue,
+    :listener,
+    :tls,
+    :smtp,
+    :domains,
+    :delivery,
+    :auth,
+    :submission,
+    :bounce,
+    :log
+  ]
+
+  @type tls_level :: :none | :may | :encrypt | :verify | :dane
 
   @type t :: %__MODULE__{
           server: %{hostname: String.t()},
+          database: %{
+            adapter: :sqlite | :postgres | :mysql,
+            path: Path.t(),
+            url: String.t() | nil,
+            pool_size: pos_integer(),
+            ssl: boolean()
+          },
           queue: %{
             directory: Path.t(),
             max_lifetime: pos_integer(),
@@ -92,7 +204,25 @@ defmodule Sovite.Core.Config do
             max_backoff: pos_integer(),
             delay_warning: pos_integer() | nil
           },
-          listener: [%{address: :inet.ip_address(), port: :inet.port_number()}],
+          listener: [
+            %{
+              address: :inet.ip_address(),
+              port: :inet.port_number(),
+              mode: :smtp | :submission | :submissions,
+              auth: boolean(),
+              require_tls: boolean(),
+              require_auth: boolean(),
+              tls_min_version: :"tlsv1.2" | :"tlsv1.3" | nil,
+              tls_ciphers: [String.t()] | nil
+            }
+          ],
+          tls: %{
+            certificate: [%{cert_file: Path.t(), key_file: Path.t()}],
+            min_version: :"tlsv1.2" | :"tlsv1.3",
+            ciphers: [String.t()] | nil,
+            reload_interval: pos_integer(),
+            acme: map()
+          },
           smtp: %{
             max_message_size: pos_integer(),
             max_recipients: pos_integer(),
@@ -118,8 +248,15 @@ defmodule Sovite.Core.Config do
             max_recipients: pos_integer(),
             max_addresses: pos_integer(),
             ip_versions: [:ipv6 | :ipv4, ...],
-            connect_timeout: pos_integer()
+            connect_timeout: pos_integer(),
+            tls: tls_level(),
+            tls_policy: %{String.t() => tls_level()},
+            tls_ca_file: Path.t() | nil,
+            relayhost_username: String.t() | nil,
+            relayhost_password: String.t() | nil
           },
+          auth: map(),
+          submission: %{strip_headers: [String.t()]},
           bounce: %{double_bounce_recipient: String.t() | nil},
           log: Sovite.Core.Logging.config()
         }
@@ -165,6 +302,7 @@ defmodule Sovite.Core.Config do
   @spec validate(map()) :: {:ok, t()} | {:error, [Error.t()]}
   def validate(map) do
     with {:ok, values} <- Schema.validate(map, @schema),
+         values = listener_defaults(values),
          :ok <- check(values) do
       # Like Postfix's mydestination, the server is its own final
       # destination unless told otherwise.
@@ -175,6 +313,52 @@ defmodule Sovite.Core.Config do
         end)
 
       {:ok, struct!(__MODULE__, values)}
+    end
+  end
+
+  # Unset listener keys get the defaults of the listener's mode.
+  @mode_defaults %{
+    smtp: %{port: 25, auth: false, require_tls: false, require_auth: false},
+    submission: %{port: 587, auth: true, require_tls: true, require_auth: true},
+    submissions: %{port: 465, auth: true, require_tls: true, require_auth: true}
+  }
+
+  defp listener_defaults(values),
+    do: update_in(values.listener, &Enum.map(&1, fn listener -> with_mode_defaults(listener) end))
+
+  defp with_mode_defaults(listener) do
+    Map.merge(listener, Map.fetch!(@mode_defaults, listener.mode), fn
+      _key, nil, default -> default
+      _key, value, _default -> value
+    end)
+  end
+
+  @doc "Returns whether any listener offers AUTH."
+  @spec auth_enabled?(t() | map()) :: boolean()
+  def auth_enabled?(config), do: Enum.any?(config.listener, & &1.auth)
+
+  @doc "Returns whether TLS certificates are configured (files or ACME)."
+  @spec tls_enabled?(t() | map()) :: boolean()
+  def tls_enabled?(config), do: config.tls.certificate != [] or config.tls.acme.enabled
+
+  @doc """
+  The SASL mechanisms to offer: `auth.mechanisms`, or by default those
+  the backend supports.
+  """
+  @spec auth_mechanisms(t() | map()) :: [String.t()]
+  def auth_mechanisms(%{auth: auth}) do
+    case auth.mechanisms do
+      nil ->
+        base =
+          if auth.backend == :ldap,
+            do: ["PLAIN", "LOGIN"],
+            else: ["SCRAM-SHA-256", "PLAIN", "LOGIN"]
+
+        base = if auth.backend == :dovecot, do: ["PLAIN", "LOGIN"], else: base
+        if auth.oauth.introspection_url, do: base ++ ["OAUTHBEARER"], else: base
+
+      mechanisms ->
+        Enum.map(mechanisms, &Atom.to_string/1)
     end
   end
 
@@ -190,11 +374,144 @@ defmodule Sovite.Core.Config do
         values.delivery.ip_versions == [] &&
           %Error{path: ["delivery", "ip_versions"], reason: "must not be empty"},
         Enum.uniq(values.delivery.ip_versions) != values.delivery.ip_versions &&
-          %Error{path: ["delivery", "ip_versions"], reason: "must not repeat a version"}
+          %Error{path: ["delivery", "ip_versions"], reason: "must not repeat a version"},
+        (values.delivery.relayhost_username != nil and values.delivery.relayhost == nil) &&
+          %Error{path: ["delivery", "relayhost_username"], reason: "needs delivery.relayhost"}
       ]
+      |> Kernel.++(database_errors(values.database))
+      |> Kernel.++(listener_errors(values))
+      |> Kernel.++(auth_errors(values))
+      |> Kernel.++(acme_errors(values.tls.acme))
       |> Enum.filter(& &1)
 
     if errors == [], do: :ok, else: {:error, errors}
+  end
+
+  defp database_errors(%{adapter: :sqlite}), do: []
+
+  defp database_errors(database) do
+    [
+      database.url == nil &&
+        %Error{path: ["database", "url"], reason: "is required for #{database.adapter}"},
+      Repo.module(database.adapter) == nil &&
+        %Error{
+          path: ["database", "adapter"],
+          reason:
+            "#{inspect(Atom.to_string(database.adapter))} needs the #{inspect(Repo.driver(database.adapter))} dependency, which this build does not include"
+        }
+    ]
+  end
+
+  defp listener_errors(values) do
+    tls = tls_enabled?(values)
+
+    values.listener
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {listener, index} ->
+      for {field, reason} <- listener_problems(listener, tls, values.auth.plaintext),
+          do: %Error{path: ["listener", "[#{index}]", field], reason: reason}
+    end)
+  end
+
+  defp listener_problems(listener, tls, plaintext) do
+    Enum.filter(
+      [
+        implicit_tls_problem(listener, tls),
+        require_tls_problem(listener, tls),
+        auth_problem(listener, tls, plaintext),
+        require_auth_problem(listener)
+      ],
+      & &1
+    )
+  end
+
+  defp implicit_tls_problem(%{mode: :submissions}, false),
+    do: {"mode", ~s("submissions" needs a certificate in [tls])}
+
+  defp implicit_tls_problem(_listener, _tls), do: nil
+
+  defp require_tls_problem(%{require_tls: true, mode: mode}, false) when mode != :submissions,
+    do: {"require_tls", "needs a certificate in [tls]"}
+
+  defp require_tls_problem(_listener, _tls), do: nil
+
+  defp auth_problem(%{auth: true}, false, false),
+    do:
+      {"auth",
+       "needs a certificate in [tls], since AUTH is only offered over TLS (see auth.plaintext)"}
+
+  defp auth_problem(_listener, _tls, _plaintext), do: nil
+
+  defp require_auth_problem(%{require_auth: true, auth: false}),
+    do: {"require_auth", "needs auth = true"}
+
+  defp require_auth_problem(_listener), do: nil
+
+  defp auth_errors(values) do
+    if auth_enabled?(values),
+      do: backend_errors(values.auth) ++ mechanism_errors(values.auth.backend, values),
+      else: []
+  end
+
+  defp backend_errors(%{backend: :file, file: %{path: nil}}),
+    do: [%Error{path: ["auth", "file", "path"], reason: ~s(is required with backend = "file")}]
+
+  defp backend_errors(%{backend: :ldap, ldap: ldap}) do
+    [
+      ldap.servers == [] &&
+        %Error{path: ["auth", "ldap", "servers"], reason: ~s(is required with backend = "ldap")},
+      (ldap.base == nil and ldap.dn_template == nil) &&
+        %Error{
+          path: ["auth", "ldap", "base"],
+          reason: "is required unless auth.ldap.dn_template is set"
+        }
+    ]
+  end
+
+  defp backend_errors(%{backend: :dovecot, dovecot: %{socket: nil}}),
+    do: [
+      %Error{
+        path: ["auth", "dovecot", "socket"],
+        reason: ~s(is required with backend = "dovecot")
+      }
+    ]
+
+  defp backend_errors(_auth), do: []
+
+  # Dovecot runs the mechanisms itself.
+  defp mechanism_errors(:dovecot, _values), do: []
+
+  defp mechanism_errors(backend, values) do
+    mechanisms = auth_mechanisms(values)
+
+    [
+      ("OAUTHBEARER" in mechanisms and values.auth.oauth.introspection_url == nil) &&
+        %Error{
+          path: ["auth", "mechanisms"],
+          reason: "OAUTHBEARER needs auth.oauth.introspection_url"
+        },
+      (backend == :ldap and "SCRAM-SHA-256" in mechanisms) &&
+        %Error{
+          path: ["auth", "mechanisms"],
+          reason: "SCRAM-SHA-256 does not work with the ldap backend"
+        }
+    ]
+  end
+
+  defp acme_errors(%{enabled: false}), do: []
+
+  defp acme_errors(acme) do
+    [
+      acme.domains == [] &&
+        %Error{path: ["tls", "acme", "domains"], reason: "is required when ACME is enabled"},
+      acme.email == nil &&
+        %Error{path: ["tls", "acme", "email"], reason: "is required when ACME is enabled"},
+      not acme.accept_terms &&
+        %Error{
+          path: ["tls", "acme", "accept_terms"],
+          reason: "must be true: you must agree to the CA's terms of service to use ACME"
+        }
+    ]
   end
 
   @doc "Stores `config` as the running configuration."

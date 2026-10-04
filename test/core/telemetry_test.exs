@@ -35,7 +35,8 @@ defmodule Sovite.Core.TelemetryTest do
       end)
 
     assert log =~ ~s(reason="x\\r\\n12:00:00 [info] fake line")
-    assert log |> String.split("\n", trim: true) |> length() == 1
+    # Count only this event's lines: other tests' processes may log too.
+    assert log |> String.split("\n", trim: true) |> Enum.count(&(&1 =~ "fake line")) == 1
   end
 
   test "logs other events at debug" do
@@ -71,6 +72,50 @@ defmodule Sovite.Core.TelemetryTest do
         })
       end)
 
-    assert log |> String.split("\n", trim: true) |> length() == 1
+    assert log |> String.split("\n", trim: true) |> Enum.count(&(&1 =~ "reason=delivered")) == 1
+  end
+
+  test "logs failed logins as warnings, ready for fail2ban" do
+    log =
+      capture_log([level: :warning, metadata: [:remote_ip]], fn ->
+        :telemetry.execute([:sovite, :auth, :failure], %{}, %{
+          session_id: "S1",
+          remote_ip: {192, 0, 2, 7},
+          mechanism: "PLAIN",
+          username: "alice",
+          reason: :invalid_credentials
+        })
+      end)
+
+    assert log =~ "[warning]"
+    assert log =~ "remote_ip=192.0.2.7"
+    assert log =~ "auth.failure: mechanism=PLAIN, reason=invalid_credentials, username=alice"
+  end
+
+  test "formats certificates, bans, and handshake failures" do
+    log =
+      capture_log([level: :info], fn ->
+        :telemetry.execute([:sovite, :tls, :certificate, :loaded], %{}, %{
+          cert_file: "/etc/mx.pem",
+          names: ["mx.example.com", "mail.example.com"],
+          not_after: ~U[2027-01-01 00:00:00Z]
+        })
+
+        :telemetry.execute([:sovite, :abuse, :penalty, :banned], %{failures: 10}, %{
+          penalty: Sovite.Core.AuthPenalty,
+          key: {0x2001, 0xDB8, 0, 0, 0, 0, 0, 0},
+          ban_time: 3_600_000
+        })
+
+        :telemetry.execute([:sovite, :smtp, :server, :tls, :stop], %{duration: 0}, %{
+          session_id: "S1",
+          remote_ip: {192, 0, 2, 7},
+          error: {:tls_alert, {:handshake_failure, ~c"no shared cipher"}}
+        })
+      end)
+
+    assert log =~ "names=mx.example.com mail.example.com, not_after=2027-01-01T00:00:00Z"
+    assert log =~ "key=2001:db8::"
+    assert log =~ "smtp.server.tls.stop:"
   end
 end

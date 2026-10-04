@@ -71,7 +71,19 @@ defmodule Sovite.Core.ConfigTest do
 
   test "defaults to one SMTP listener and no relaying" do
     assert {:ok, config} = Config.parse(~s([server]\nhostname = "MX.Example.org"))
-    assert config.listener == [%{address: {0, 0, 0, 0}, port: 25}]
+    assert [listener] = config.listener
+
+    assert listener == %{
+             address: {0, 0, 0, 0},
+             port: 25,
+             mode: :smtp,
+             auth: false,
+             require_tls: false,
+             require_auth: false,
+             tls_min_version: nil,
+             tls_ciphers: nil
+           }
+
     assert config.smtp.trusted_networks == []
     assert config.smtp.max_message_size == 25 * 1024 * 1024
     assert config.smtp.command_timeout == 300_000
@@ -102,7 +114,7 @@ defmodule Sovite.Core.ConfigTest do
 
     assert {:ok, config} = Config.parse(toml)
 
-    assert config.listener == [
+    assert Enum.map(config.listener, &Map.take(&1, [:address, :port])) == [
              %{address: {0, 0, 0, 0, 0, 0, 0, 0}, port: 2525},
              %{address: {192, 0, 2, 1}, port: 25}
            ]
@@ -136,7 +148,12 @@ defmodule Sovite.Core.ConfigTest do
              max_recipients: 50,
              max_addresses: 5,
              ip_versions: [:ipv6, :ipv4],
-             connect_timeout: 30_000
+             connect_timeout: 30_000,
+             tls: :may,
+             tls_policy: %{},
+             tls_ca_file: nil,
+             relayhost_username: nil,
+             relayhost_password: nil
            }
 
     assert config.bounce == %{double_bounce_recipient: nil}
@@ -326,5 +343,209 @@ defmodule Sovite.Core.ConfigTest do
 
   test "the shipped example config is valid" do
     assert {:ok, _} = Config.load("rel/overlays/etc/sovite.toml.example")
+  end
+
+  describe "Phase 3 settings" do
+    @tls """
+    [[tls.certificate]]
+    cert_file = "/etc/sovite/mx.crt"
+    key_file = "/etc/sovite/mx.key"
+    """
+
+    defp errors(toml) do
+      {:error, errors} = Config.parse(toml)
+      Enum.map(errors, &Exception.message/1)
+    end
+
+    test "defaults: SQLite, no TLS, database auth, opportunistic outbound TLS" do
+      {:ok, config} = Config.parse("")
+
+      assert config.database == %{
+               adapter: :sqlite,
+               path: "/var/lib/sovite/sovite.db",
+               url: nil,
+               pool_size: 5,
+               ssl: false
+             }
+
+      assert config.tls.certificate == []
+      assert config.tls.min_version == :"tlsv1.2"
+      refute Config.tls_enabled?(config)
+      refute Config.auth_enabled?(config)
+      assert config.auth.backend == :database
+      assert Config.auth_mechanisms(config) == ["SCRAM-SHA-256", "PLAIN", "LOGIN"]
+      assert config.submission.strip_headers == ["Return-Path"]
+    end
+
+    test "submission listeners default to their port, TLS, and auth" do
+      {:ok, config} =
+        Config.parse(
+          @tls <>
+            """
+            [[listener]]
+            mode = "submission"
+            [[listener]]
+            mode = "submissions"
+            [[listener]]
+            mode = "smtp"
+            port = 2525
+            auth = true
+            tls_min_version = "1.3"
+            tls_ciphers = ["TLS_AES_256_GCM_SHA384"]
+            """
+        )
+
+      assert [sub, subs, smtp] = config.listener
+      assert %{port: 587, auth: true, require_tls: true, require_auth: true} = sub
+      assert %{port: 465, auth: true, require_auth: true} = subs
+
+      assert %{
+               port: 2525,
+               auth: true,
+               require_tls: false,
+               require_auth: false,
+               tls_min_version: :"tlsv1.3"
+             } = smtp
+
+      assert Config.auth_enabled?(config)
+    end
+
+    test "refuses submission without certificates, and weak ciphers" do
+      assert errors(~s([[listener]]\nmode = "submissions"))
+             |> Enum.any?(&(&1 =~ ~s(listener[0].mode: "submissions" needs a certificate)))
+
+      assert errors(~s([[listener]]\nmode = "submission"))
+             |> Enum.any?(&(&1 =~ "listener[0].auth: needs a certificate"))
+
+      # Allowed, if the admin explicitly accepts passwords in the clear.
+      assert {:ok, _} =
+               Config.parse(
+                 ~s([[listener]]\nmode = "submission"\nrequire_tls = false\n[auth]\nplaintext = true\n)
+               )
+
+      assert errors(@tls <> ~s([tls]\nmin_version = "1.1"\n)) != []
+
+      assert errors(~s([tls]\nciphers = ["AES128-SHA"])) == [
+               ~s(tls.ciphers: "AES128-SHA" is not allowed: only ECDHE with AES-GCM or ChaCha20-Poly1305, and TLS 1.3 suites)
+             ]
+
+      assert errors(~s([[listener]]\nrequire_auth = true)) == [
+               "listener[0].require_auth: needs auth = true"
+             ]
+    end
+
+    test "checks auth backends" do
+      sub = @tls <> ~s([[listener]]\nmode = "submission"\n)
+      assert {:ok, _} = Config.parse(sub)
+
+      assert errors(sub <> ~s([auth]\nbackend = "file")) == [
+               ~s(auth.file.path: is required with backend = "file")
+             ]
+
+      assert errors(sub <> ~s([auth]\nbackend = "ldap")) == [
+               ~s(auth.ldap.servers: is required with backend = "ldap"),
+               "auth.ldap.base: is required unless auth.ldap.dn_template is set"
+             ]
+
+      assert errors(sub <> ~s([auth]\nbackend = "dovecot")) == [
+               ~s(auth.dovecot.socket: is required with backend = "dovecot")
+             ]
+
+      assert errors(sub <> ~s([auth]\nmechanisms = ["OAUTHBEARER"])) == [
+               "auth.mechanisms: OAUTHBEARER needs auth.oauth.introspection_url"
+             ]
+
+      {:ok, config} =
+        Config.parse(
+          sub <> ~s([auth.oauth]\nintrospection_url = "https://idp.example/introspect")
+        )
+
+      assert Config.auth_mechanisms(config) == ["SCRAM-SHA-256", "PLAIN", "LOGIN", "OAUTHBEARER"]
+
+      {:ok, config} =
+        Config.parse(
+          sub <>
+            ~s|[auth]\nbackend = "ldap"\n[auth.ldap]\nservers = ["ldap.example"]\nbase = "dc=example"\nfilter = "(uid=%n)"|
+        )
+
+      assert Config.auth_mechanisms(config) == ["PLAIN", "LOGIN"]
+
+      assert errors(
+               sub <>
+                 ~s([auth]\nbackend = "ldap"\n[auth.ldap]\nservers = ["l"]\nbase = "x"\nfilter = "uid=%n")
+             ) ==
+               [~s(auth.ldap.filter: "uid=%n" is not a valid LDAP filter)]
+    end
+
+    test "parses sender maps and TLS policies" do
+      {:ok, config} =
+        Config.parse("""
+        [auth.senders]
+        "alice@example.com" = ["Alice@Example.com", "@example.org"]
+        bob = ["*"]
+
+        [delivery]
+        tls = "dane"
+        tls_policy = { "Bank.example" = "verify", "[192.0.2.1]" = "encrypt", "[IPv6:2001:db8::1]" = "none" }
+        """)
+
+      assert config.auth.senders == %{
+               "alice@example.com" => ["alice@example.com", "@example.org"],
+               "bob" => ["*"]
+             }
+
+      assert config.delivery.tls == :dane
+
+      assert config.delivery.tls_policy == %{
+               "bank.example" => :verify,
+               "[192.0.2.1]" => :encrypt,
+               "[IPv6:2001:db8::1]" => :none
+             }
+
+      assert errors(~s([auth.senders]\nbob = ["not an address"])) == [
+               ~s(auth.senders.bob[0]: "not an address" is not an address, "@domain", or "*")
+             ]
+
+      assert errors(~s([delivery]\ntls_policy = { "a b" = "verify" })) == [
+               ~s(delivery.tls_policy.a b: "a b" is not a domain or address literal)
+             ]
+
+      assert errors(~s([delivery]\ntls_policy = { "x.example" = "maybe" })) |> hd() =~
+               "delivery.tls_policy.x.example: expected one of"
+    end
+
+    test "checks the database and ACME settings" do
+      assert errors(~s([database]\nadapter = "postgres")) == [
+               "database.url: is required for postgres"
+             ]
+
+      assert {:ok, %{database: %{adapter: :postgres}}} =
+               Config.parse(
+                 ~s([database]\nadapter = "postgres"\nurl = "postgres://u:p@db/sovite")
+               )
+
+      assert errors(~s([database]\nadapter = "mysql"\nurl = "ftp://x/y")) == [
+               ~s(database.url: "ftp://x/y" must use postgres:// or postgresql:// or ecto:// or mysql://)
+             ]
+
+      assert errors(~s([tls.acme]\nenabled = true)) == [
+               "tls.acme.domains: is required when ACME is enabled",
+               "tls.acme.email: is required when ACME is enabled",
+               "tls.acme.accept_terms: must be true: you must agree to the CA's terms of service to use ACME"
+             ]
+
+      {:ok, config} =
+        Config.parse(
+          ~s([tls.acme]\nenabled = true\ndomains = ["mx.example.com"]\nemail = "a@example.com"\naccept_terms = true\n[[listener]]\nmode = "submissions")
+        )
+
+      assert Config.tls_enabled?(config)
+    end
+
+    test "relayhost credentials need a relay host" do
+      assert errors(~s([delivery]\nrelayhost_username = "u")) == [
+               "delivery.relayhost_username: needs delivery.relayhost"
+             ]
+    end
   end
 end

@@ -20,7 +20,8 @@ defmodule Sovite.Message.Received do
           required(:protocol) => String.t(),
           optional(:id) => String.t() | nil,
           optional(:for) => String.t() | nil,
-          optional(:date) => DateTime.t()
+          optional(:date) => DateTime.t(),
+          optional(:tls) => String.t() | nil
         }
 
   @doc """
@@ -28,7 +29,12 @@ defmodule Sovite.Message.Received do
 
   `:for` is the recipient to show. Leave it out for messages with several
   recipients, so they are not disclosed to each other. `:date` defaults to
-  now.
+  now. `:tls` describes the encryption, as `Sovite.TLS.describe/1` does,
+  and is shown in a comment like Postfix does:
+
+      Received: from client.example.net ([192.0.2.7])
+              (using TLSv1.3 with cipher TLS_AES_256_GCM_SHA384 (256/256 bits))
+              by mx.example.com with ESMTPS id 0Q7c3XbK2mA9fZ; ...
   """
   @spec build(fields()) :: String.t()
   def build(fields) do
@@ -37,7 +43,10 @@ defmodule Sovite.Message.Received do
     id = if fields[:id], do: " id #{fields.id}", else: ""
     recipient = if fields[:for], do: "\r\n\tfor <#{fields.for}>", else: ""
 
+    tls = if fields[:tls], do: "\t(using #{fields.tls})\r\n", else: ""
+
     "Received: from #{fields.helo} (#{address_literal(fields.remote_ip)})\r\n" <>
+      tls <>
       "\tby #{fields.by} with #{fields.protocol}#{id}#{recipient}; #{Date.format(date)}\r\n"
   end
 

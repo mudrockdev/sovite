@@ -47,7 +47,7 @@ These apply to every component and are checked in code review.
 5. **SMTP smuggling.** Only `<CRLF>.<CRLF>` ends DATA. Bare LF and bare CR are rejected or normalized by an explicit policy, never interpreted inconsistently.
 6. **STARTTLS injection.** Any plaintext buffered after the `STARTTLS` command is discarded once the handshake completes, on both server and client side.
 7. **Secrets are never logged** (see [Logging](logging.md)) and never appear in crash reports. Processes holding secrets use `:sensitive` process flags or keep secrets out of their state.
-8. **Credential checks are constant-time.** Password storage uses Argon2id, bcrypt, or salted SCRAM.
+8. **Credential checks are constant-time.** Passwords are stored salted and stretched: `SCRAM-SHA-256` (PBKDF2, RFC 7677) by default, or SHA-crypt. Unknown users cost as much time as wrong passwords, and `SCRAM-SHA-256` answers them with a stable fake salt, so neither timing nor the exchange reveals which users exist.
 9. **Modern TLS only.** TLS 1.2 and 1.3 with BCP 195 (RFC 9325) cipher suites. Certificates are verified wherever the policy says so.
 10. **Untrusted text is escaped in logs and headers.** Values from the network cannot inject log lines or header fields (CR/LF in `EHLO` names, addresses, and similar).
 11. **Least data.** Message bodies are streamed, not held in memory, and are not copied into crash dumps or logs.
@@ -62,10 +62,15 @@ These apply to every component and are checked in code review.
 | Lost mail on crash | `fsync` before `250`, delivery results `fsync`ed before they count, crash recovery | 1–2 |
 | Hostile remote servers | Bounded reply parsing (line length and count), timeouts on every wait, remote text sanitized before it goes into notifications or logs | 2 |
 | Mail loops | Notifications sent from `<>` and never answered; double-bounce reports never reported again; MX hosts at or below this server's preference skipped; a server greeting with our own name treated as a loop | 2 |
-| Credential theft in transit | AUTH only after TLS by default | 3 |
-| Brute-force AUTH | Failure rate limits and temporary bans | 3 |
+| Credential theft in transit | `AUTH` offered only after TLS by default; submission listeners require TLS; relay host credentials only sent over TLS; SASL data never logged | 3 |
+| Weak or downgraded inbound TLS | TLS 1.2+ only, forward-secret AEAD suites only, server cipher order, no client renegotiation (testssl.sh: A+ with a trusted certificate) | 3 |
+| STARTTLS command injection (CVE-2011-0411 class) | Input received after `STARTTLS` and before the handshake is discarded; the session restarts after it; the client discards pre-TLS server data | 3 |
+| Brute-force AUTH | Failed logins counted per address (per /64 for IPv6) with temporary bans; delay after each failure; session closed after 3 failures | 3 |
 | Sender spoofing by authenticated users | Sender login maps | 3 |
-| Downgrade and MITM on outbound TLS | DANE, MTA-STS | 7 |
+| Directory and database injection | LDAP filters parsed before user names are inserted; database access only through Ecto with bound parameters; empty LDAP passwords refused (anonymous bind) | 3 |
+| A broken certificate renewal taking TLS down | Certificates reloaded only when the new pair loads and matches; otherwise the old one stays | 3 |
+| Downgrade and MITM on outbound TLS | Per-destination TLS policy (`encrypt`, `verify`), DANE with DNSSEC-validated TLSA records | 3 |
+| Downgrade on outbound TLS without DNSSEC | MTA-STS | 7 |
 | Spam and bot traffic | postscreen-style checks, DNSBL, rate limits | 8 |
 | Compromised accounts | Outbound volume and bounce-rate detection | 8 |
 

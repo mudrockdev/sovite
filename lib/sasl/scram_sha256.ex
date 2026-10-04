@@ -17,7 +17,7 @@ defmodule Sovite.SASL.ScramSHA256 do
   """
 
   alias Sovite.SASL
-  alias Sovite.SASL.Server
+  alias Sovite.SASL.Credentials
 
   @nonce_bytes 18
   @max_iterations 1_000_000
@@ -50,7 +50,7 @@ defmodule Sovite.SASL.ScramSHA256 do
 
   defp server_first(context, gs2, bare, username, client_nonce) do
     {credentials, identity, failure} =
-      case Server.scram_credentials(context, username) do
+      case Credentials.scram_credentials(context, username) do
         {:ok, credentials, identity} -> {credentials, identity, nil}
         {:fake, credentials, reason} -> {credentials, nil, reason}
         {:error, :temporary} -> {nil, nil, :temporary}

@@ -19,6 +19,12 @@ defmodule Sovite.Test.FakeMTA do
     * `:hostname` - the name in the greeting and EHLO reply.
     * `:extensions` - EHLO keywords to advertise.
     * `:responses` - per-stage reply overrides, see below.
+    * `:tls` - `:ssl` server options: offer `STARTTLS`.
+    * `:implicit_tls` - with `:tls`, run the handshake before the greeting.
+    * `:auth` - a map of user name to password: offer `AUTH PLAIN LOGIN`.
+
+  Messages also carry `:tls` (the `Sovite.TLS.info()` of the connection,
+  or `nil`) and `:auth` (the authenticated user, or `nil`).
 
   ## Responses
 
@@ -67,7 +73,10 @@ defmodule Sovite.Test.FakeMTA do
       server: self(),
       hostname: Keyword.get(opts, :hostname, "fake-mta.test"),
       extensions: Keyword.get(opts, :extensions, @default_extensions),
-      responses: Keyword.get(opts, :responses, %{})
+      responses: Keyword.get(opts, :responses, %{}),
+      tls: Keyword.get(opts, :tls),
+      implicit_tls: Keyword.get(opts, :implicit_tls, false),
+      auth: Keyword.get(opts, :auth)
     }
 
     acceptor = spawn_link(fn -> accept_loop(listen, config) end)
@@ -82,7 +91,7 @@ defmodule Sovite.Test.FakeMTA do
   defp accept_loop(listen, config) do
     case :gen_tcp.accept(listen) do
       {:ok, socket} ->
-        pid = spawn_link(fn -> serve(socket, config) end)
+        pid = spawn_link(fn -> serve({:gen_tcp, socket}, config) end)
         :ok = :gen_tcp.controlling_process(socket, pid)
         send(pid, :go)
         accept_loop(listen, config)
@@ -99,42 +108,119 @@ defmodule Sovite.Test.FakeMTA do
 
     send(config.owner, {:fake_mta, config.server, :connected})
 
+    {socket, tls} =
+      if config.implicit_tls, do: upgrade(socket, config), else: {socket, nil}
+
     greeting = respond(config, :greeting, nil, "220 #{config.hostname} ESMTP fake")
 
-    if reply(socket, greeting) == :ok do
-      session(socket, config, new_transaction(nil))
+    if socket && reply(socket, greeting) == :ok do
+      session(socket, config, new_transaction(nil, %{tls: tls, auth: nil}))
     end
   end
 
-  defp new_transaction(helo), do: %{helo: helo, mail_from: nil, mail_args: nil, rcpt_to: []}
+  defp upgrade({:gen_tcp, raw}, config) do
+    case :ssl.handshake(raw, config.tls ++ [mode: :binary, packet: :line, active: false], 5_000) do
+      {:ok, ssl} ->
+        {:ok, tls} = Sovite.TLS.info(ssl)
+        {{:ssl, ssl}, tls}
+
+      {:error, reason} ->
+        send(config.owner, {:fake_mta, config.server, {:tls_failed, reason}})
+        :gen_tcp.close(raw)
+        {nil, nil}
+    end
+  end
+
+  defp new_transaction(helo, session),
+    do: %{
+      helo: helo,
+      mail_from: nil,
+      mail_args: nil,
+      rcpt_to: [],
+      tls: session.tls,
+      auth: session.auth
+    }
 
   defp session(socket, config, txn) do
-    case :gen_tcp.recv(socket, 0, @recv_timeout) do
+    case recv(socket) do
       {:ok, line} ->
         {verb, arg} = split_command(String.trim_trailing(line, "\r\n"))
 
         case handle_command(verb, arg, socket, config, txn) do
           {:continue, txn} -> session(socket, config, txn)
-          :stop -> :gen_tcp.close(socket)
+          :stop -> io_close(socket)
         end
 
       {:error, _} ->
-        :gen_tcp.close(socket)
+        io_close(socket)
     end
   end
 
-  defp handle_command("EHLO", arg, socket, config, _txn) do
-    lines = [config.hostname | config.extensions]
+  defp handle_command("EHLO", arg, socket, config, txn) do
+    starttls = if config.tls && txn.tls == nil, do: ["STARTTLS"], else: []
+    auth = if config.auth, do: ["AUTH PLAIN LOGIN"], else: []
+    lines = [config.hostname | config.extensions] ++ starttls ++ auth
     default = lines |> Enum.with_index(1) |> Enum.map_join("\r\n", &ehlo_line(&1, length(lines)))
-    send_reply(socket, respond(config, :ehlo, arg, default), new_transaction(arg))
+    send_reply(socket, respond(config, :ehlo, arg, default), new_transaction(arg, txn))
   end
 
-  defp handle_command("HELO", arg, socket, config, _txn) do
+  defp handle_command("HELO", arg, socket, config, txn) do
     send_reply(
       socket,
       respond(config, :helo, arg, "250 #{config.hostname}"),
-      new_transaction(arg)
+      new_transaction(arg, txn)
     )
+  end
+
+  defp handle_command("STARTTLS", _arg, socket, %{tls: tls} = config, %{tls: nil} = txn)
+       when tls != nil do
+    reply = respond(config, :starttls, nil, "220 2.0.0 Ready to start TLS")
+
+    if String.starts_with?(reply, "220") do
+      :ok = reply(socket, reply)
+
+      case upgrade(socket, config) do
+        {nil, nil} ->
+          :stop
+
+        {socket, tls} ->
+          send(config.owner, {:fake_mta, config.server, {:tls, tls}})
+          # Restart the loop with a fresh session over TLS.
+          session(socket, config, new_transaction(nil, %{tls: tls, auth: nil}))
+          :stop
+      end
+    else
+      send_reply(socket, reply, txn)
+    end
+  end
+
+  defp handle_command("AUTH", arg, socket, %{auth: users} = config, txn) when is_map(users) do
+    case String.split(arg, " ") do
+      ["PLAIN", initial] ->
+        check_auth(socket, config, txn, Base.decode64!(initial))
+
+      ["PLAIN"] ->
+        :ok = reply(socket, "334 ")
+        {:ok, line} = recv(socket)
+        check_auth(socket, config, txn, Base.decode64!(String.trim(line)))
+
+      ["LOGIN"] ->
+        :ok = reply(socket, "334 VXNlcm5hbWU6")
+        {:ok, user} = recv(socket)
+        :ok = reply(socket, "334 UGFzc3dvcmQ6")
+        {:ok, pass} = recv(socket)
+        user = Base.decode64!(String.trim(user))
+
+        check_auth(
+          socket,
+          config,
+          txn,
+          <<0, user::binary, 0, Base.decode64!(String.trim(pass))::binary>>
+        )
+
+      _ ->
+        send_reply(socket, "504 5.5.4 Unrecognized authentication type", txn)
+    end
   end
 
   defp handle_command("MAIL", arg, socket, config, txn) do
@@ -171,7 +257,11 @@ defmodule Sovite.Test.FakeMTA do
   end
 
   defp handle_command("RSET", _arg, socket, config, txn) do
-    send_reply(socket, respond(config, :rset, nil, "250 2.0.0 OK"), new_transaction(txn.helo))
+    send_reply(
+      socket,
+      respond(config, :rset, nil, "250 2.0.0 OK"),
+      new_transaction(txn.helo, txn)
+    )
   end
 
   defp handle_command("NOOP", _arg, socket, config, txn) do
@@ -187,8 +277,21 @@ defmodule Sovite.Test.FakeMTA do
     send_reply(socket, "500 5.5.2 Command not recognized", txn)
   end
 
+  defp check_auth(socket, config, txn, message) do
+    [_authzid, user, password] = String.split(message, <<0>>)
+
+    if Map.get(config.auth, user) == password do
+      send_reply(socket, respond(config, :auth, user, "235 2.7.0 Authentication successful"), %{
+        txn
+        | auth: user
+      })
+    else
+      send_reply(socket, "535 5.7.8 Authentication credentials invalid", txn)
+    end
+  end
+
   defp receive_data(socket, config, txn, acc \\ []) do
-    case :gen_tcp.recv(socket, 0, @recv_timeout) do
+    case recv(socket) do
       {:ok, ".\r\n"} ->
         data = acc |> Enum.reverse() |> IO.iodata_to_binary()
         reply = respond(config, :data_end, data, "250 2.0.0 OK queued")
@@ -198,7 +301,7 @@ defmodule Sovite.Test.FakeMTA do
           send(config.owner, {:fake_mta, config.server, {:message, message}})
         end
 
-        send_reply(socket, reply, new_transaction(txn.helo))
+        send_reply(socket, reply, new_transaction(txn.helo, txn))
 
       {:ok, <<".", rest::binary>>} ->
         receive_data(socket, config, txn, [rest | acc])
@@ -230,7 +333,11 @@ defmodule Sovite.Test.FakeMTA do
   end
 
   defp reply(_socket, :close), do: :close
-  defp reply(socket, reply), do: :gen_tcp.send(socket, [reply, "\r\n"])
+  defp reply(socket, reply), do: io_send(socket, [reply, "\r\n"])
+
+  defp recv({transport, raw}), do: transport.recv(raw, 0, @recv_timeout)
+  defp io_send({transport, raw}, data), do: transport.send(raw, data)
+  defp io_close({transport, raw}), do: transport.close(raw)
 
   defp positive?(reply), do: is_binary(reply) and String.starts_with?(reply, "2")
 

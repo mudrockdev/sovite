@@ -4,6 +4,7 @@ defmodule Sovite.Core.CLITest do
   import ExUnit.CaptureIO
 
   alias Sovite.Core.CLI
+  alias Sovite.SASL.Password
 
   @moduletag :tmp_dir
 
@@ -35,5 +36,102 @@ defmodule Sovite.Core.CLITest do
 
   test "help prints usage" do
     assert capture_io(fn -> assert CLI.run(["help"]) == 0 end) =~ "config check [PATH]"
+  end
+
+  describe "users" do
+    setup %{tmp_dir: dir} do
+      path = Path.join(dir, "sovite.toml")
+      File.write!(path, ~s([database]\npath = "#{Path.join(dir, "sovite.db")}"\n))
+      %{config: path}
+    end
+
+    defp cli(config, args, input \\ "") do
+      ref = make_ref()
+      parent = self()
+
+      stdout =
+        capture_io(input, fn ->
+          stderr =
+            capture_io(:stderr, fn ->
+              send(parent, {ref, CLI.run(["--config", config | args])})
+            end)
+
+          send(parent, {ref, :stderr, stderr})
+        end)
+
+      assert_received {^ref, status}
+      assert_received {^ref, :stderr, stderr}
+      {status, stdout, stderr}
+    end
+
+    test "manages users and sender addresses", %{config: config} do
+      assert {0, "created alice@example.com\n", _} =
+               cli(config, ["user", "add", "Alice@Example.com"], "secret\n")
+
+      assert {1, "", stderr} = cli(config, ["user", "add", "alice@example.com"], "x\n")
+      assert stderr =~ "error: username has already been taken"
+
+      assert {0, _, _} =
+               cli(config, ["user", "sender", "add", "alice@example.com", "@example.org"])
+
+      assert {1, _, stderr} =
+               cli(config, ["user", "sender", "add", "alice@example.com", "nonsense"])
+
+      assert stderr =~ "address must be"
+
+      assert {0, "alice@example.com  enabled  senders: @example.org\n", _} =
+               cli(config, ["user", "list"])
+
+      assert {0, _, _} = cli(config, ["user", "disable", "alice@example.com"])
+
+      assert {0, "alice@example.com  disabled  senders: @example.org\n", _} =
+               cli(config, ["user", "list"])
+
+      assert {0, _, _} = cli(config, ["user", "enable", "alice@example.com"])
+      assert {0, _, _} = cli(config, ["user", "passwd", "alice@example.com"], "new\n")
+
+      assert {0, _, _} =
+               cli(config, ["user", "sender", "remove", "alice@example.com", "@example.org"])
+
+      assert {0, _, _} = cli(config, ["user", "delete", "alice@example.com"])
+
+      assert {1, _, "error: no such user\n"} =
+               cli(config, ["user", "delete", "alice@example.com"])
+
+      assert {0, "", _} = cli(config, ["user", "list"])
+    end
+
+    test "refuses an empty password", %{config: config} do
+      assert {1, _, stderr} = cli(config, ["user", "add", "bob@example.com"], "\n")
+      assert stderr =~ "error: empty password"
+      assert {1, _, _} = cli(config, ["user", "add", "bob@example.com"])
+    end
+
+    test "reports config errors", %{tmp_dir: dir} do
+      bad = Path.join(dir, "bad.toml")
+      File.write!(bad, "[database]\nadapter = \"oracle\"\n")
+      assert {1, _, stderr} = cli(bad, ["user", "list"])
+      assert stderr =~ "database.adapter"
+    end
+  end
+
+  test "hash-password prints a hash usable in a users file" do
+    output =
+      capture_io("pw\n", fn ->
+        capture_io(:stderr, fn -> assert CLI.run(["hash-password"]) == 0 end)
+      end)
+
+    assert "{SCRAM-SHA-256}" <> _ = hash = String.trim(output)
+    assert Password.verify(hash, "pw") == :ok
+
+    output =
+      capture_io("pw\n", fn ->
+        capture_io(:stderr, fn -> CLI.run(["hash-password", "sha512-crypt"]) end)
+      end)
+
+    assert "$6$" <> _ = String.trim(output)
+
+    assert capture_io(:stderr, fn -> assert CLI.run(["hash-password", "md5"]) == 64 end) =~
+             "Usage"
   end
 end

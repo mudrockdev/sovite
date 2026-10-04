@@ -69,9 +69,16 @@ All keys are in the [configuration reference](configuration.md#log).
 
 Reusable components never write logs. They emit `:telemetry` events named `[:sovite, component, ...]`, and the host application decides what to do with them. Sovite itself attaches `Sovite.Core.Telemetry`, which logs each event:
 
-- message lifecycle events (enqueue, delivery result per recipient, deferral, notifications sent, removal) at `info`
-- corrupt queue files and notifications that could not be sent anywhere (double bounces) at `warning`
-- SMTP commands that were rejected (4xx/5xx replies), with the command, its argument, and the reply, at `info`
+- message lifecycle events (enqueue, delivery result per recipient with the TLS used, deferral, notifications sent, removal) at `info`
+- successful logins, certificates loaded, ACME certificates issued, and failed TLS handshakes at `info`
+- corrupt queue files, notifications that could not be sent anywhere (double bounces), failed logins, bans, certificate errors, and failed ACME orders at `warning`
+- SMTP commands that were rejected (4xx/5xx replies), with the command, its argument, and the reply, at `info`. For `AUTH` the argument is the mechanism; SASL data (passwords, tokens) is never logged
 - everything else at `debug`
+
+Failed logins look like this, ready for fail2ban:
+
+```
+2026-10-04 12:00:00.000 [warning] session_id=... remote_ip=192.0.2.7 event=auth.failure auth.failure: mechanism=PLAIN, reason=invalid_credentials, username=alice@example.com
+```
 
 The full event catalog, with measurements and metadata, is in the `Sovite.Core.Telemetry` module docs. Metrics exporters (Prometheus, OpenTelemetry; roadmap Phase 12) attach to the same events.

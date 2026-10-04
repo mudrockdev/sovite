@@ -143,7 +143,15 @@ defmodule Sovite.Core.QueueManager do
       families: families,
       max_addresses: opts.max_addresses,
       client:
-        [helo: hostname, connect_timeout: opts.connect_timeout] ++ Map.get(opts, :client, [])
+        [helo: hostname, connect_timeout: opts.connect_timeout] ++ Map.get(opts, :client, []),
+      tls: %{
+        default: Map.get(opts, :tls) || :may,
+        policy: Map.get(opts, :tls_policy) || %{},
+        cacerts: Map.get(opts, :tls_cacerts)
+      },
+      relay_auth:
+        opts[:relayhost_username] &&
+          %{username: opts.relayhost_username, password: opts[:relayhost_password] || ""}
     }
 
     {:ok, task_supervisor} = Task.Supervisor.start_link()

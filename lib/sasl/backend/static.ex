@@ -31,33 +31,33 @@ defmodule Sovite.SASL.Backend.Static do
   @impl true
   def verify_password(username, password, opts) do
     with {:ok, users} <- users(opts) do
-      case Map.fetch(users, normalize(username)) do
-        {:ok, hash} ->
-          case Password.verify(hash, password) do
-            :ok -> {:ok, normalize(username)}
-            {:error, _} -> {:error, :invalid}
-          end
-
-        :error ->
-          Password.dummy_verify(password)
-          {:error, :unknown_user}
-      end
+      check_password(Map.fetch(users, normalize(username)), normalize(username), password)
     end
+  end
+
+  defp check_password({:ok, hash}, username, password) do
+    case Password.verify(hash, password) do
+      :ok -> {:ok, username}
+      {:error, _} -> {:error, :invalid}
+    end
+  end
+
+  defp check_password(:error, _username, password) do
+    Password.dummy_verify(password)
+    {:error, :unknown_user}
   end
 
   @impl true
   def scram_credentials(username, opts) do
-    with {:ok, users} <- users(opts) do
-      case Map.fetch(users, normalize(username)) do
-        {:ok, hash} ->
-          case Password.scram_credentials(hash) do
-            {:ok, credentials} -> {:ok, credentials, normalize(username)}
-            :error -> {:error, :unavailable}
-          end
-
-        :error ->
-          {:error, :unknown_user}
+    with {:ok, users} <- users(opts),
+         {:ok, hash} <- Map.fetch(users, normalize(username)) do
+      case Password.scram_credentials(hash) do
+        {:ok, credentials} -> {:ok, credentials, normalize(username)}
+        :error -> {:error, :unavailable}
       end
+    else
+      :error -> {:error, :unknown_user}
+      {:error, _} = error -> error
     end
   end
 

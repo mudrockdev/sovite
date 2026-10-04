@@ -102,9 +102,12 @@ defmodule Sovite.MixProject do
         Net: [~r/^Sovite\.Net/],
         Message: [~r/^Sovite\.Message/],
         DNS: [~r/^Sovite\.DNS/],
+        SASL: [~r/^Sovite\.SASL/],
         Queue: [~r/^Sovite\.Queue/],
         Listener: [~r/^Sovite\.Listener/],
         SMTP: [~r/^Sovite\.SMTP/],
+        TLS: [~r/^Sovite\.TLS/],
+        Abuse: [~r/^Sovite\.Abuse/],
         DSN: [~r/^Sovite\.DSN/],
         Core: [~r/^Sovite\.Core/, Sovite]
       ]

@@ -22,6 +22,29 @@ defmodule Sovite.Core.Delivery do
 
   A server that greets with this server's own host name is a mail loop,
   and the job fails with `5.4.6`.
+
+  ## TLS
+
+  Each destination has a TLS level, from `delivery.tls_policy` or else
+  `delivery.tls`:
+
+    * `:none` - never use TLS.
+    * `:may` - opportunistic TLS (RFC 7435): `STARTTLS` when offered,
+      without checking the certificate. If the handshake fails, the
+      address is tried again without TLS.
+    * `:encrypt` - TLS is required; the certificate is not checked.
+    * `:verify` - TLS is required, and the certificate must be valid for
+      the MX (or relay) host name, from a trusted CA.
+    * `:dane` - DANE (RFC 7672): when the host has DNSSEC-authenticated
+      TLSA records, TLS is required and the certificate must match them;
+      otherwise as `:may`. A failed TLSA lookup skips the host.
+
+  When TLS is required and fails, the address is skipped with `4.7.4`
+  (not offered) or `4.7.5` (handshake or certificate failure). Relay
+  hosts on port 465 get implicit TLS.
+
+  With `delivery.relayhost_username` set, the client authenticates to the
+  relay host, but only over TLS.
   """
 
   alias Sovite.Core.Router
@@ -29,6 +52,8 @@ defmodule Sovite.Core.Delivery do
   alias Sovite.Message.Received
   alias Sovite.Queue.{Record, Spool}
   alias Sovite.SMTP.{Client, Reply}
+  alias Sovite.TLS
+  alias Sovite.TLS.DANE
 
   @typedoc "Work for one delivery: built by the queue manager."
   @type job :: %{
@@ -53,6 +78,10 @@ defmodule Sovite.Core.Delivery do
     * `:families` - `[:aaaa, :a]` and similar, see `Sovite.DNS.MX.resolve/3`.
     * `:max_addresses` - addresses to try per job.
     * `:client` - options for `Sovite.SMTP.Client.connect/3`.
+    * `:tls` - `%{default, policy, cacerts}`: the default level, a map of
+      destination (domain, relay host, or address literal) to level, and
+      the CAs for `:verify` (`nil` for the system's).
+    * `:relay_auth` - `%{username, password}` for the relay host, or `nil`.
   """
   @type opts :: %{
           hostname: String.t(),
@@ -60,8 +89,16 @@ defmodule Sovite.Core.Delivery do
           port: :inet.port_number(),
           families: [:a | :aaaa, ...],
           max_addresses: pos_integer(),
-          client: keyword()
+          client: keyword(),
+          tls: %{
+            default: tls_level(),
+            policy: %{String.t() => tls_level()},
+            cacerts: [binary()] | nil
+          },
+          relay_auth: %{username: String.t(), password: String.t()} | nil
         }
+
+  @type tls_level :: :none | :may | :encrypt | :verify | :dane
 
   @typedoc "An open connection and the host it goes to, for reuse."
   @type connection :: {Client.t(), String.t()}
@@ -84,6 +121,9 @@ defmodule Sovite.Core.Delivery do
     {results, remote, connection} = deliver(job, connection, opts)
     duration = System.monotonic_time() - started
 
+    tls =
+      with {client, _host} <- connection, %{} = info <- Client.tls(client), do: TLS.describe(info)
+
     for {recipient, status, details} <- results do
       :telemetry.execute(
         [:sovite, :smtp, :client, :delivery, :stop],
@@ -93,7 +133,8 @@ defmodule Sovite.Core.Delivery do
           relay: remote || relay,
           recipient: recipient,
           status: status,
-          reply: details.reply
+          reply: details.reply,
+          tls: tls
         }
       )
     end
@@ -128,9 +169,10 @@ defmodule Sovite.Core.Delivery do
     remote = remote_name(host, ip)
 
     result =
-      case Client.connect(ip, port, opts.client) do
-        {:ok, client} -> connected(job, client, remote, opts)
-        {:error, error} -> {:retry, connect_error(remote, port, error)}
+      with {:ok, plan} <- tls_plan(job.destination, host, port, opts),
+           {:ok, client} <- open(ip, port, remote, plan, opts),
+           {:ok, client} <- relay_auth(client, job.destination, remote, opts) do
+        connected(job, client, remote, opts)
       end
 
     case result do
@@ -138,6 +180,163 @@ defmodule Sovite.Core.Delivery do
       result -> result
     end
   end
+
+  ## TLS
+
+  defp tls_plan(destination, host, port, opts) do
+    literal = String.starts_with?(host, "[")
+    plan(tls_level(destination, opts.tls), host, literal, port, opts)
+  end
+
+  defp plan(:none, _host, _literal, _port, _opts), do: {:ok, :none}
+
+  defp plan(:may, host, literal, _port, _opts),
+    do: {:ok, {:may, TLS.client_options(hostname: sni(host, literal))}}
+
+  defp plan(:encrypt, host, literal, _port, _opts),
+    do: {:ok, {:required, "encrypt", TLS.client_options(hostname: sni(host, literal))}}
+
+  defp plan(:verify, host, true, _port, _opts),
+    do: {:retry, {"4.7.5", "cannot verify a certificate for address literal #{host}"}}
+
+  defp plan(:verify, host, false, _port, opts) do
+    cacerts = opts.tls.cacerts || :public_key.cacerts_get()
+
+    {:ok,
+     {:required, "verify", TLS.client_options(verify: :peer, hostname: host, cacerts: cacerts)}}
+  end
+
+  # DANE needs a host name to look up TLSA records for.
+  defp plan(:dane, _host, true, _port, _opts), do: {:ok, {:may, TLS.client_options([])}}
+  defp plan(:dane, host, false, port, opts), do: dane_plan(host, port, opts)
+
+  defp sni(_host, true), do: nil
+  defp sni(host, false), do: host
+
+  defp tls_level(destination, tls) do
+    key =
+      case destination do
+        {:mx, domain} -> domain
+        {:relayhost, %{host: host}} -> host
+        {:literal, ip} -> Received.address_literal(ip)
+      end
+
+    Map.get(tls.policy, key, tls.default)
+  end
+
+  defp dane_plan(host, port, opts) do
+    case Sovite.DNS.lookup_secure(opts.resolver, "_#{port}._tcp.#{host}", :tlsa) do
+      {:ok, records, true} ->
+        case DANE.usable(records) do
+          [] -> {:ok, {:may, TLS.client_options(hostname: host)}}
+          usable -> {:ok, {:required, "dane", DANE.client_options(usable, host)}}
+        end
+
+      {:ok, _records, false} ->
+        {:ok, {:may, TLS.client_options(hostname: host)}}
+
+      {:error, :nxdomain} ->
+        {:ok, {:may, TLS.client_options(hostname: host)}}
+
+      # RFC 7672 §2.2: a host whose TLSA lookup fails must not be used.
+      {:error, reason} ->
+        {:retry, {"4.7.5", "TLSA lookup for #{host} failed: #{reason}"}}
+    end
+  end
+
+  # Port 465 is implicit TLS (RFC 8314); elsewhere STARTTLS per plan.
+  defp open(ip, 465, remote, plan, opts) do
+    ssl =
+      case plan do
+        {_kind, _label, ssl} -> ssl
+        {:may, ssl} -> ssl
+        :none -> TLS.client_options([])
+      end
+
+    case Client.connect(ip, 465, Keyword.put(opts.client, :tls, ssl)) do
+      {:ok, client} -> {:ok, client}
+      {:error, error} -> {:retry, connect_error(remote, 465, error)}
+    end
+  end
+
+  defp open(ip, port, remote, plan, opts) do
+    case Client.connect(ip, port, opts.client) do
+      {:ok, client} -> starttls(client, plan, {ip, port, remote}, opts)
+      {:error, error} -> {:retry, connect_error(remote, port, error)}
+    end
+  end
+
+  defp starttls(client, :none, _address, _opts), do: {:ok, client}
+
+  defp starttls(client, {:may, ssl}, {ip, port, remote}, opts) do
+    case Client.starttls(client, ssl) do
+      {:ok, client} ->
+        {:ok, client}
+
+      {:error, client, _not_offered_or_refused} ->
+        {:ok, client}
+
+      # Opportunistic TLS must not make delivery fail: try again in
+      # plaintext. With TLS 1.3 a rejected handshake can also surface at
+      # the EHLO that follows it.
+      {:error, {_stage, _reason}} ->
+        open(ip, port, remote, :none, opts)
+    end
+  end
+
+  defp starttls(client, {:required, label, ssl}, {_ip, _port, remote}, _opts) do
+    case Client.starttls(client, ssl) do
+      {:ok, client} ->
+        {:ok, client}
+
+      {:error, client, :not_offered} ->
+        Client.quit(client)
+        {:retry, {"4.7.4", "TLS is required, but was not offered by host #{remote}"}}
+
+      {:error, client, {:refused, reply}} ->
+        Client.quit(client)
+
+        {:retry,
+         {"4.7.4",
+          "TLS is required, but host #{remote} refused to start TLS: #{Reply.to_string(reply)}"}}
+
+      {:error, {:starttls, {:tls, reason}}} ->
+        {:retry,
+         {"4.7.5", "TLS (#{label}) with host #{remote} failed: #{TLS.format_error(reason)}"}}
+
+      {:error, {stage, reason}} ->
+        {:retry,
+         {"4.4.2",
+          "lost connection with #{remote} #{stage_text(stage)} (#{format_reason(reason)})"}}
+    end
+  end
+
+  defp relay_auth(client, {:relayhost, _}, remote, %{relay_auth: %{} = credentials}) do
+    if Client.tls(client) == nil do
+      Client.quit(client)
+      {:retry, {"4.7.0", "will not send credentials to #{remote} without TLS"}}
+    else
+      case Client.authenticate(client, credentials) do
+        {:ok, client} ->
+          {:ok, client}
+
+        {:error, client, reason} ->
+          Client.quit(client)
+          {:retry, {"4.7.8", "authentication failed at #{remote}: #{auth_error(reason)}"}}
+
+        {:error, {stage, reason}} ->
+          {:retry,
+           {"4.4.2",
+            "lost connection with #{remote} #{stage_text(stage)} (#{format_reason(reason)})"}}
+      end
+    end
+  end
+
+  defp relay_auth(client, _destination, _remote, _opts), do: {:ok, client}
+
+  defp auth_error({:rejected, reply}), do: Reply.to_string(reply)
+  defp auth_error(:no_mechanism), do: "no supported mechanism offered"
+  defp auth_error({:sasl, reason}), do: inspect(reason)
 
   defp connected(job, client, remote, opts) do
     if loop?(client, opts.hostname) do
@@ -268,6 +467,9 @@ defmodule Sovite.Core.Delivery do
   defp connect_error(remote, port, {:connect, reason}),
     do: {"4.4.1", "connect to #{remote}:#{port}: #{format_reason(reason)}"}
 
+  defp connect_error(remote, _port, {:tls, {:tls, reason}}),
+    do: {"4.7.5", "TLS with host #{remote} failed: #{TLS.format_error(reason)}"}
+
   defp connect_error(remote, _port, {stage, %Reply{} = reply})
        when stage in [:greeting, :ehlo, :helo],
        do: {"4.4.1", "host #{remote} refused to talk to me: #{Reply.to_string(reply)}"}
@@ -284,6 +486,8 @@ defmodule Sovite.Core.Delivery do
   defp stage_text(:data), do: "while sending DATA"
   defp stage_text(:data_end), do: "while sending end of data"
   defp stage_text(:rset), do: "while sending RSET"
+  defp stage_text(:starttls), do: "while sending STARTTLS"
+  defp stage_text(:auth), do: "while authenticating"
   defp stage_text(stage), do: "at #{stage}"
 
   defp format_reason(:timeout), do: "timeout"

@@ -14,6 +14,14 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :smtp, :server, :session, :start]` | `system_time` | `session_id`, `remote_ip` |
   | `[:sovite, :smtp, :server, :session, :stop]` | `duration` | `session_id`, `remote_ip` |
   | `[:sovite, :smtp, :server, :command, :stop]` | `duration` | `session_id`, `remote_ip`, `command`, `argument`, `reply_code`, `reply` |
+  | `[:sovite, :smtp, :server, :tls, :stop]` | `duration` | `session_id`, `remote_ip`, `protocol`, `cipher`, `sni`, `error` |
+  | `[:sovite, :auth, :success]` | | `session_id`, `remote_ip`, `mechanism`, `username` |
+  | `[:sovite, :auth, :failure]` | | `session_id`, `remote_ip`, `mechanism`, `username`, `reason` |
+  | `[:sovite, :abuse, :penalty, :banned]` | `failures` | `penalty`, `key`, `ban_time` |
+  | `[:sovite, :tls, :certificate, :loaded]` | | `cert_file`, `names`, `not_after` |
+  | `[:sovite, :tls, :certificate, :error]` | | `cert_file`, `reason` |
+  | `[:sovite, :tls, :acme, :issued]` | | `domains`, `not_after` |
+  | `[:sovite, :tls, :acme, :failed]` | | `domains`, `reason` |
   | `[:sovite, :queue, :message, :enqueued]` | `size`, `recipients` | `queue_id`, `session_id`, `sender` |
   | `[:sovite, :queue, :message, :removed]` | | `queue_id`, `reason` (`delivered`, `bounced`, `expired`) |
   | `[:sovite, :queue, :message, :deferred]` | `attempts`, `recipients` | `queue_id`, `next_attempt` |
@@ -29,10 +37,16 @@ defmodule Sovite.Core.Telemetry do
   about the original message: `queue_id` is its ID, and `notification_id`
   the ID of the queued notification.
 
-  Message lifecycle events (`:queue`, delivery `:stop` and `:exception`)
-  and SMTP commands that got a 4xx or 5xx reply are logged at `:info`,
-  except `corrupt` and `discarded` notifications, which are logged at
-  `:warning`. All other events are logged at `:debug`.
+  Message lifecycle events (`:queue`, delivery `:stop` and `:exception`),
+  successful logins, certificate loads and ACME issuance, failed TLS
+  handshakes, and SMTP commands that got a 4xx or 5xx reply are logged at
+  `:info`. Corrupt messages, discarded notifications, failed logins, bans,
+  certificate errors, and failed ACME orders are logged at `:warning`.
+  All other events are logged at `:debug`.
+
+  Failed logins are logged as `auth.failure: mechanism=PLAIN,
+  reason=invalid_credentials, username=alice` with `remote_ip` in the
+  metadata, ready for tools such as fail2ban.
   """
 
   require Logger
@@ -48,6 +62,14 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :smtp, :server, :session, :start],
     [:sovite, :smtp, :server, :session, :stop],
     [:sovite, :smtp, :server, :command, :stop],
+    [:sovite, :smtp, :server, :tls, :stop],
+    [:sovite, :auth, :success],
+    [:sovite, :auth, :failure],
+    [:sovite, :abuse, :penalty, :banned],
+    [:sovite, :tls, :certificate, :loaded],
+    [:sovite, :tls, :certificate, :error],
+    [:sovite, :tls, :acme, :issued],
+    [:sovite, :tls, :acme, :failed],
     [:sovite, :queue, :message, :enqueued],
     [:sovite, :queue, :message, :removed],
     [:sovite, :queue, :message, :deferred],
@@ -65,12 +87,19 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :queue, :message, :deferred],
     [:sovite, :queue, :notification, :sent],
     [:sovite, :smtp, :client, :delivery, :stop],
-    [:sovite, :smtp, :client, :delivery, :exception]
+    [:sovite, :smtp, :client, :delivery, :exception],
+    [:sovite, :auth, :success],
+    [:sovite, :tls, :certificate, :loaded],
+    [:sovite, :tls, :acme, :issued]
   ]
 
   @warning_events [
     [:sovite, :queue, :message, :corrupt],
-    [:sovite, :queue, :notification, :discarded]
+    [:sovite, :queue, :notification, :discarded],
+    [:sovite, :auth, :failure],
+    [:sovite, :abuse, :penalty, :banned],
+    [:sovite, :tls, :certificate, :error],
+    [:sovite, :tls, :acme, :failed]
   ]
 
   @doc "Returns every event in the catalog."
@@ -114,6 +143,7 @@ defmodule Sovite.Core.Telemetry do
   defp format_ip(ip), do: ip
 
   defp rejected?([:sovite, :smtp, :server, :command, :stop], %{reply_code: code}), do: code >= 400
+  defp rejected?([:sovite, :smtp, :server, :tls, :stop], %{error: error}), do: error != nil
   defp rejected?(_event, _metadata), do: false
 
   # Postfix-style "key=value, key=value" so existing log tooling stays usable.
@@ -141,5 +171,17 @@ defmodule Sovite.Core.Telemetry do
   end
 
   defp format_value(value) when is_atom(value) or is_number(value), do: to_string(value)
+  defp format_value(%DateTime{} = value), do: DateTime.to_iso8601(value)
+
+  defp format_value(value) when is_tuple(value) do
+    if :inet.is_ip_address(value), do: Logging.format_ip(value), else: inspect(value)
+  end
+
+  defp format_value([value | _] = list) when is_binary(value) do
+    if Enum.all?(list, &is_binary/1),
+      do: Enum.map_join(list, " ", &format_value/1),
+      else: inspect(list)
+  end
+
   defp format_value(value), do: inspect(value)
 end

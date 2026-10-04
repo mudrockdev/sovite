@@ -101,34 +101,33 @@ defmodule Sovite.TLS.Certificate do
   ## Decoding
 
   defp decode_chain(pem) do
-    case pem_entries(pem) do
-      {:ok, entries} ->
-        case for({:Certificate, der, :not_encrypted} <- entries, do: der) do
-          [] -> {:error, :no_certificate}
-          chain -> {:ok, chain}
-        end
-
-      :error ->
-        {:error, :invalid_certificate}
+    with {:ok, entries} <- pem_entries(pem),
+         [_ | _] = chain <- for({:Certificate, der, :not_encrypted} <- entries, do: der) do
+      {:ok, chain}
+    else
+      :error -> {:error, :invalid_certificate}
+      [] -> {:error, :no_certificate}
     end
   end
 
   @key_types [:RSAPrivateKey, :ECPrivateKey, :PrivateKeyInfo]
 
   defp decode_key(pem) do
-    with {:ok, entries} <- pem_entries(pem) do
-      case Enum.find(entries, fn {type, _der, _} ->
-             type in [:EncryptedPrivateKeyInfo | @key_types]
-           end) do
-        nil -> {:error, :no_key}
-        {_type, _der, encryption} when encryption != :not_encrypted -> {:error, :encrypted_key}
-        {:EncryptedPrivateKeyInfo, _der, _} -> {:error, :encrypted_key}
-        {type, der, :not_encrypted} -> {:ok, {type, der}}
-      end
-    else
-      :error -> {:error, :invalid_key}
+    case pem_entries(pem) do
+      {:ok, entries} ->
+        entries
+        |> Enum.find(fn {type, _der, _} -> type in [:EncryptedPrivateKeyInfo | @key_types] end)
+        |> key_entry()
+
+      :error ->
+        {:error, :invalid_key}
     end
   end
+
+  defp key_entry(nil), do: {:error, :no_key}
+  defp key_entry({:EncryptedPrivateKeyInfo, _der, _}), do: {:error, :encrypted_key}
+  defp key_entry({type, der, :not_encrypted}), do: {:ok, {type, der}}
+  defp key_entry({_type, _der, _encryption}), do: {:error, :encrypted_key}
 
   defp pem_entries(pem) do
     {:ok, :public_key.pem_decode(pem)}

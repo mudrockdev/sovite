@@ -22,4 +22,20 @@ defmodule Sovite.DNS do
   def lookup({module, opts}, name, type) when is_binary(name) do
     module.lookup(name, type, opts)
   end
+
+  @doc """
+  Looks up records and whether DNSSEC authenticated them. Resolvers
+  without `c:Sovite.DNS.Resolver.lookup_secure/3` never authenticate.
+  """
+  @spec lookup_secure(resolver(), String.t(), Resolver.record_type()) ::
+          {:ok, [Resolver.record_data()], boolean()} | {:error, Resolver.error()}
+  def lookup_secure({module, opts}, name, type) when is_binary(name) do
+    Code.ensure_loaded(module)
+
+    if function_exported?(module, :lookup_secure, 3) do
+      module.lookup_secure(name, type, opts)
+    else
+      with {:ok, records} <- module.lookup(name, type, opts), do: {:ok, records, false}
+    end
+  end
 end

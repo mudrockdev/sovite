@@ -7,7 +7,7 @@ defmodule Sovite.SASL.Plain do
   authentication identity: one user cannot act as another.
   """
 
-  alias Sovite.SASL.Server
+  alias Sovite.SASL.Credentials
 
   @max_field 255
 
@@ -25,7 +25,7 @@ defmodule Sovite.SASL.Plain do
          true <-
            valid_field?(authzid, 0) and valid_field?(authcid, 1) and valid_field?(password, 1) do
       if authzid == "" or String.downcase(authzid) == String.downcase(authcid),
-        do: Server.verify_password(context, authcid, password),
+        do: Credentials.verify_password(context, authcid, password),
         else: {:error, :authorization_failed, authcid}
     else
       _ -> {:error, :malformed, nil}

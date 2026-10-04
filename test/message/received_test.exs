@@ -127,4 +127,22 @@ defmodule Sovite.Message.ReceivedTest do
                "Wed, 1 Jul 2026 12:00:00 -0700"
     end
   end
+
+  test "shows TLS details in a comment" do
+    header =
+      Received.build(%{
+        helo: "client.example",
+        remote_ip: {192, 0, 2, 7},
+        by: "mx.example.com",
+        protocol: "ESMTPSA",
+        id: "ID1",
+        date: ~U[2026-10-04 12:00:00Z],
+        tls: "TLSv1.3 with cipher TLS_AES_256_GCM_SHA384 (256/256 bits)"
+      })
+
+    assert header ==
+             "Received: from client.example ([192.0.2.7])\r\n" <>
+               "\t(using TLSv1.3 with cipher TLS_AES_256_GCM_SHA384 (256/256 bits))\r\n" <>
+               "\tby mx.example.com with ESMTPSA id ID1; Sun, 4 Oct 2026 12:00:00 +0000\r\n"
+  end
 end

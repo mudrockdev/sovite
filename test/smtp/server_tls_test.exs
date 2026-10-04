@@ -9,6 +9,8 @@ defmodule Sovite.SMTP.ServerTLSTest do
     @moduledoc false
     @behaviour Sovite.SMTP.Server.Handler
 
+    alias Sovite.SMTP.Reply
+
     @impl true
     def init(connection, test) do
       send(test, {:init, connection})
@@ -52,8 +54,7 @@ defmodule Sovite.SMTP.ServerTLSTest do
     def handle_auth("PLAIN", <<0, "alice", 0, "secret">>, state), do: {:ok, "alice", state}
 
     def handle_auth("PLAIN", _response, state),
-      do:
-        {:error, Sovite.SMTP.Reply.new(535, "5.7.8", "Authentication credentials invalid"), state}
+      do: {:error, Reply.new(535, "5.7.8", "Authentication credentials invalid"), state}
   end
 
   setup_all do

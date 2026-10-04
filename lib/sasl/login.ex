@@ -7,7 +7,7 @@ defmodule Sovite.SASL.Login do
   An initial response is taken as the user name, as some clients send it.
   """
 
-  alias Sovite.SASL.Server
+  alias Sovite.SASL.Credentials
 
   @max_field 255
 
@@ -26,7 +26,7 @@ defmodule Sovite.SASL.Login do
 
   def server_step({:password, username}, password, context) do
     if valid?(password),
-      do: Server.verify_password(context, username, password),
+      do: Credentials.verify_password(context, username, password),
       else: {:error, :malformed, username}
   end
 

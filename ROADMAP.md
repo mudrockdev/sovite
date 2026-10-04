@@ -94,19 +94,19 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 3 — TLS & Submission
 
-- [ ] `STARTTLS` on port 25 (server and client side)
-- [ ] Implicit TLS submission on port 465
-- [ ] Submission on port 587 with mandatory auth
-- [ ] TLS 1.2 and 1.3 only; modern cipher suites; configurable per listener
-- [ ] Multiple certificates with SNI selection
-- [ ] Automatic certificate reload; optional ACME (Let's Encrypt) integration
-- [ ] Outbound opportunistic TLS by default; per-destination TLS policy (none / may / encrypt / verify / dane)
-- [ ] SMTP AUTH: `PLAIN`, `LOGIN` (legacy compat), `SCRAM-SHA-256`, `OAUTHBEARER`
-- [ ] Auth backends: static file, SQL, LDAP, Dovecot SASL protocol
-- [ ] Auth only offered after TLS (configurable but secure default)
-- [ ] Brute-force protection: auth failure rate limiting and temporary bans
-- [ ] Sender login maps (authenticated user may only send as allowed addresses)
-- [ ] Message submission fixes: add missing `Date:` / `Message-ID:`, strip/rewrite client headers
+- [x] `STARTTLS` on port 25 (server and client side)
+- [x] Implicit TLS submission on port 465
+- [x] Submission on port 587 with mandatory auth
+- [x] TLS 1.2 and 1.3 only; modern cipher suites; configurable per listener
+- [x] Multiple certificates with SNI selection
+- [x] Automatic certificate reload; optional ACME (Let's Encrypt) integration
+- [x] Outbound opportunistic TLS by default; per-destination TLS policy (none / may / encrypt / verify / dane)
+- [x] SMTP AUTH: `PLAIN`, `LOGIN` (legacy compat), `SCRAM-SHA-256`, `OAUTHBEARER`
+- [x] Auth backends: static file, SQL (Sovite's own database via Ecto: SQLite by default, PostgreSQL or MySQL), LDAP, Dovecot SASL protocol
+- [x] Auth only offered after TLS (configurable but secure default)
+- [x] Brute-force protection: auth failure rate limiting and temporary bans
+- [x] Sender login maps (authenticated user may only send as allowed addresses)
+- [x] Message submission fixes: add missing `Date:` / `Message-ID:`, strip/rewrite client headers
 
 **Standards:** RFC 3207, RFC 6409, RFC 8314, RFC 4954, RFC 4422, RFC 4616, RFC 5802, RFC 7677, RFC 7628, RFC 8446, RFC 8996, RFC 9325 (BCP 195), RFC 7817, RFC 9525, RFC 7435, RFC 6186
 

@@ -9,6 +9,12 @@
 # Defaults to the system hostname, which is often not fully qualified.
 # hostname = "mail.example.com"
 
+[database]
+# Where users and other data are kept: "sqlite" (default), "postgres", or "mysql".
+adapter = "sqlite"
+path = "/var/lib/sovite/sovite.db"
+# url = "postgres://sovite:secret@db.example.com/sovite"   # postgres or mysql
+
 [queue]
 # Spool directory. Must be owned by the sovite user and not readable by others.
 directory = "/var/spool/sovite"
@@ -21,9 +27,39 @@ max_backoff = "1h"
 # delay_warning = "4h"
 
 # Where to accept SMTP. Repeat the table for more addresses; add "::" for IPv6.
+# mode = "smtp" (port 25), "submission" (587, STARTTLS and AUTH required),
+# or "submissions" (465, implicit TLS and AUTH required).
 [[listener]]
 address = "0.0.0.0"
 port = 25
+
+# Mail clients. These need a certificate in [tls].
+# [[listener]]
+# address = "0.0.0.0"
+# mode = "submission"
+#
+# [[listener]]
+# address = "0.0.0.0"
+# mode = "submissions"
+
+[tls]
+# TLS 1.2 and 1.3 only, with forward-secret AEAD ciphers. "1.3" drops 1.2.
+min_version = "1.2"
+# Check certificate files for changes this often and reload them.
+reload_interval = "1m"
+
+# Certificate chain (certificate first, then intermediates) and its key.
+# Repeat for more names, or an RSA and an ECDSA certificate; clients pick by SNI.
+# [[tls.certificate]]
+# cert_file = "/etc/sovite/tls/mx.example.com.pem"
+# key_file = "/etc/sovite/tls/mx.example.com.key"
+
+# Or get one from Let's Encrypt. The CA connects to port 80 to check the names.
+# [tls.acme]
+# enabled = true
+# domains = ["mx.example.com"]
+# email = "postmaster@example.com"
+# accept_terms = true
 
 [smtp]
 # Largest message accepted: bytes, or a number with K, M, or G.
@@ -67,6 +103,45 @@ max_addresses = 5
 # IP versions to deliver over, preferred first.
 ip_versions = ["ipv6", "ipv4"]
 connect_timeout = "30s"
+# TLS to other servers: none, may (opportunistic), encrypt, verify, or dane.
+# "dane" needs a local DNSSEC-validating resolver.
+tls = "may"
+# tls_policy = { "example.com" = "verify" }
+# Log in to the relay host (only over TLS).
+# relayhost_username = "user"
+# relayhost_password = "secret"
+
+[auth]
+# Users for SMTP AUTH: "database" (sovitectl user add ...), "file", "ldap",
+# or "dovecot".
+backend = "database"
+# Offer AUTH without TLS. Leave this off.
+plaintext = false
+# Ban a client address after this many failed logins within failure_window.
+max_failures = 10
+failure_window = "10m"
+ban_time = "1h"
+# Authenticated users may only send as their login and the addresses mapped
+# to them here or with `sovitectl user sender add`.
+sender_check = true
+
+# [auth.senders]
+# "alice@example.com" = ["sales@example.com", "@example.org"]
+
+# [auth.file]
+# path = "/etc/sovite/users"         # lines of user:hash, see sovitectl hash-password
+
+# [auth.ldap]
+# servers = ["ldap.example.com"]
+# base = "ou=people,dc=example,dc=com"
+# filter = "(mail=%u)"
+
+# [auth.dovecot]
+# socket = "/run/dovecot/auth-client"
+
+[submission]
+# Header fields removed from messages of authenticated clients.
+strip_headers = ["Return-Path"]
 
 [bounce]
 # Where to report notifications that could not be delivered. Unset: log only.

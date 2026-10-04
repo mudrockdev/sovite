@@ -19,6 +19,10 @@ defmodule Sovite.SMTP.Client do
   server cannot make the client buffer without limit. Every wait has a
   timeout; the defaults are those of RFC 5321 §4.5.3.2.
 
+  `starttls/2` upgrades a connection (RFC 3207) and `authenticate/3`
+  logs in with SASL (RFC 4954). With the `:tls` option the connection is
+  encrypted from the start instead (implicit TLS, RFC 8314).
+
   ## Options
 
     * `:helo` - name to send in `EHLO`/`HELO`. Required.
@@ -34,8 +38,12 @@ defmodule Sovite.SMTP.Client do
     * `:local_address` - local IP address to connect from.
     * `:max_line_length` / `:max_lines` - reply limits, see
       `Sovite.SMTP.Reply.decode/2`.
+    * `:tls` - `:ssl` client options to use implicit TLS: the handshake
+      runs right after connecting, before the greeting.
+    * `:tls_timeout` - for TLS handshakes. Defaults to 60 seconds.
   """
 
+  alias Sovite.SASL
   alias Sovite.SMTP.{DataEncoder, Reply}
   alias Sovite.Validators
 
@@ -48,8 +56,17 @@ defmodule Sovite.SMTP.Client do
     data_end_timeout: 600_000,
     local_address: nil,
     max_line_length: 2048,
-    max_lines: 100
+    max_lines: 100,
+    tls: nil,
+    tls_timeout: 60_000
   ]
+
+  @mechanisms %{
+    "SCRAM-SHA-256" => SASL.ScramSHA256,
+    "PLAIN" => SASL.Plain,
+    "LOGIN" => SASL.Login,
+    "OAUTHBEARER" => SASL.OAuthBearer
+  }
 
   @enforce_keys [:socket, :opts]
   defstruct [
@@ -59,6 +76,8 @@ defmodule Sovite.SMTP.Client do
     :port,
     :greeting,
     :server_name,
+    :tls,
+    transport: :gen_tcp,
     buffer: <<>>,
     extensions: %{}
   ]
@@ -71,14 +90,28 @@ defmodule Sovite.SMTP.Client do
   message.
   """
   @type stage ::
-          :connect | :greeting | :ehlo | :helo | :mail | :rcpt | :data | :data_end | :rset | :quit
+          :connect
+          | :tls
+          | :greeting
+          | :ehlo
+          | :helo
+          | :starttls
+          | :auth
+          | :mail
+          | :rcpt
+          | :data
+          | :data_end
+          | :rset
+          | :quit
 
   @typedoc """
   A failure that ends the connection. The reason is a rejection reply
   (at `:greeting`, `:ehlo`, or `:helo`), `:timeout`, `:closed`, a
-  `Sovite.SMTP.Reply.decode_error()`, or a socket error.
+  `Sovite.SMTP.Reply.decode_error()`, a socket error, or `{:tls, reason}`
+  for a failed TLS handshake (at `:tls` or `:starttls`).
   """
-  @type error :: {stage(), Reply.t() | :timeout | :closed | Reply.decode_error() | atom()}
+  @type error ::
+          {stage(), Reply.t() | :timeout | :closed | Reply.decode_error() | {:tls, term()} | atom()}
 
   @typedoc """
   Why `deliver/5` did not start a transaction. The connection stays
@@ -118,7 +151,8 @@ defmodule Sovite.SMTP.Client do
       {:ok, socket} ->
         client = %__MODULE__{socket: socket, opts: Map.new(opts), address: address, port: port}
 
-        with {:ok, client} <- greeting(client),
+        with {:ok, client} <- implicit_tls(client),
+             {:ok, client} <- greeting(client),
              {:ok, client} <- hello(client, helo) do
           {:ok, client}
         else
@@ -131,6 +165,125 @@ defmodule Sovite.SMTP.Client do
         {:error, {:connect, reason}}
     end
   end
+
+  defp implicit_tls(%{opts: %{tls: nil}} = client), do: {:ok, client}
+  defp implicit_tls(client), do: handshake(client, client.opts.tls, :tls)
+
+  defp handshake(client, ssl_opts, stage) do
+    case :ssl.connect(client.socket, ssl_opts, client.opts.tls_timeout) do
+      {:ok, ssl} ->
+        {:ok, tls} = Sovite.TLS.info(ssl)
+        {:ok, %{client | socket: ssl, transport: :ssl, tls: tls, buffer: <<>>}}
+
+      {:error, reason} ->
+        close(client)
+        {:error, {stage, {:tls, reason}}}
+    end
+  end
+
+  @doc """
+  Upgrades the connection with `STARTTLS` and sends `EHLO` again, as
+  RFC 3207 requires.
+
+  Returns `{:error, client, reason}` when the connection stays usable
+  without TLS: `:not_offered` (no `STARTTLS` extension), or
+  `{:refused, reply}`. Returns `{:error, {:starttls, reason}}` when it is
+  gone, for example after a failed handshake (`{:tls, ssl_reason}`).
+  """
+  @spec starttls(t(), [:ssl.tls_client_option()]) ::
+          {:ok, t()} | {:error, t(), :not_offered | {:refused, Reply.t()}} | {:error, error()}
+  def starttls(%__MODULE__{} = client, ssl_opts) do
+    cond do
+      client.tls != nil ->
+        {:error, client, :not_offered}
+
+      not Map.has_key?(client.extensions, "STARTTLS") ->
+        {:error, client, :not_offered}
+
+      true ->
+        client |> command(:starttls, "STARTTLS") |> after_starttls(ssl_opts)
+    end
+  end
+
+  defp after_starttls({:ok, %Reply{code: 220}, client}, ssl_opts) do
+    # Anything the server sent before the handshake is untrusted.
+    with {:ok, client} <- handshake(%{client | buffer: <<>>}, ssl_opts, :starttls) do
+      hello(%{client | extensions: %{}, server_name: nil}, client.opts.helo)
+    end
+  end
+
+  defp after_starttls({:ok, reply, client}, _ssl_opts), do: {:error, client, {:refused, reply}}
+  defp after_starttls({:error, _} = error, _ssl_opts), do: error
+
+  @doc "Returns the TLS details if the connection is encrypted, else `nil`."
+  @spec tls(t()) :: Sovite.TLS.info() | nil
+  def tls(%__MODULE__{tls: tls}), do: tls
+
+  @doc """
+  Authenticates with SASL (RFC 4954), using the first of `mechanisms`
+  the server offers.
+
+  `credentials` has `:username` and `:password` (or `:token` for
+  `OAUTHBEARER`). Mechanisms default to `["SCRAM-SHA-256", "PLAIN",
+  "LOGIN"]`. Do not send passwords over an unencrypted connection.
+
+  Returns `{:error, client, reason}` with the connection still usable:
+  `:no_mechanism` (none offered in common), `{:rejected, reply}`, or a
+  `{:sasl, reason}` from the mechanism (such as a server whose
+  `SCRAM-SHA-256` signature is wrong).
+  """
+  @spec authenticate(t(), map(), [String.t()]) ::
+          {:ok, t()} | {:error, t(), term()} | {:error, error()}
+  def authenticate(
+        %__MODULE__{} = client,
+        credentials,
+        mechanisms \\ ["SCRAM-SHA-256", "PLAIN", "LOGIN"]
+      ) do
+    offered =
+      client.extensions
+      |> Map.get("AUTH", "")
+      |> String.upcase(:ascii)
+      |> String.split(" ", trim: true)
+
+    case Enum.find(mechanisms, &(&1 in offered and Map.has_key?(@mechanisms, &1))) do
+      nil ->
+        {:error, client, :no_mechanism}
+
+      name ->
+        module = Map.fetch!(@mechanisms, name)
+        {:ok, initial, state} = module.client_start(credentials)
+        line = ["AUTH ", name] ++ if(initial, do: [" ", encode_initial(initial)], else: [])
+
+        with {:ok, reply, client} <- command(client, :auth, line),
+             do: auth_loop(client, module, state, reply)
+    end
+  end
+
+  defp encode_initial(""), do: "="
+  defp encode_initial(data), do: Base.encode64(data)
+
+  defp auth_loop(client, _module, _state, %Reply{code: 235}), do: {:ok, client}
+
+  defp auth_loop(client, module, state, %Reply{code: 334, lines: [text | _]}) do
+    result =
+      case Base.decode64(String.trim(text)) do
+        {:ok, challenge} -> module.client_step(state, challenge)
+        :error -> {:error, :malformed_challenge}
+      end
+
+    case result do
+      {:ok, response, state} ->
+        with {:ok, reply, client} <- command(client, :auth, Base.encode64(response)),
+             do: auth_loop(client, module, state, reply)
+
+      # Cancel the exchange (RFC 4954 §4) and read the 501.
+      {:error, reason} ->
+        with {:ok, _reply, client} <- command(client, :auth, "*"),
+             do: {:error, client, {:sasl, reason}}
+    end
+  end
+
+  defp auth_loop(client, _module, _state, reply), do: {:error, client, {:rejected, reply}}
 
   @doc "Returns the server's address and port."
   @spec peer(t()) :: {:inet.ip_address(), :inet.port_number()}
@@ -193,8 +346,8 @@ defmodule Sovite.SMTP.Client do
 
   @doc "Closes the connection without `QUIT`."
   @spec close(t()) :: :ok
-  def close(%__MODULE__{socket: socket}) do
-    _ = :gen_tcp.close(socket)
+  def close(%__MODULE__{transport: transport, socket: socket}) do
+    _ = transport.close(socket)
     :ok
   end
 
@@ -439,7 +592,7 @@ defmodule Sovite.SMTP.Client do
     do: send_raw(client, Enum.map(lines, &[&1, "\r\n"]), stage)
 
   defp send_raw(client, data, stage) do
-    case :gen_tcp.send(client.socket, data) do
+    case client.transport.send(client.socket, data) do
       :ok ->
         :ok
 
@@ -464,7 +617,7 @@ defmodule Sovite.SMTP.Client do
       :more ->
         remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
-        case :gen_tcp.recv(client.socket, 0, remaining) do
+        case client.transport.recv(client.socket, 0, remaining) do
           {:ok, data} ->
             read_reply(client, stage, deadline, buffer <> data)
 

@@ -14,7 +14,8 @@ defmodule Sovite.Test.FakeDNS do
       Sovite.DNS.lookup(resolver, "example.com", :mx)
       #=> {:ok, [{10, "mx.example.com"}]}
 
-  Lookups are case-insensitive. A name with entries for other types gets
+  An answer can be `{:secure, records}` to mark it as authenticated by
+  DNSSEC for `lookup_secure/3`. Lookups are case-insensitive. A name with entries for other types gets
   NODATA (`{:ok, []}`), and a name with no entries at all gets
   `{:error, :nxdomain}`, matching real DNS.
   """
@@ -29,6 +30,11 @@ defmodule Sovite.Test.FakeDNS do
 
   @impl true
   def lookup(name, type, opts) do
+    with {:ok, answers, _secure} <- lookup_secure(name, type, opts), do: {:ok, answers}
+  end
+
+  @impl true
+  def lookup_secure(name, type, opts) do
     records = Keyword.fetch!(opts, :records)
     name = normalize(name)
 
@@ -36,12 +42,15 @@ defmodule Sovite.Test.FakeDNS do
       {:ok, {:error, _} = error} ->
         error
 
+      {:ok, {:secure, answers}} ->
+        {:ok, answers, true}
+
       {:ok, answers} ->
-        {:ok, answers}
+        {:ok, answers, false}
 
       :error ->
         if Enum.any?(Map.keys(records), &match?({^name, _}, &1)),
-          do: {:ok, []},
+          do: {:ok, [], false},
           else: {:error, :nxdomain}
     end
   end

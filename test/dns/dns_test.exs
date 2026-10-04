@@ -71,6 +71,64 @@ defmodule Sovite.DNSTest do
     end
   end
 
+  describe "InetRes.lookup_secure/3" do
+    setup do
+      tlsa = <<3, 1, 1>> <> :binary.copy(<<0xAB>>, 32)
+
+      {:ok, ns} =
+        FakeNameserver.start_link(%{
+          {"_25._tcp.mx.signed.example", 52} => {:secure, [tlsa]},
+          {"_25._tcp.mx.unsigned.example", 52} => [tlsa],
+          {"_25._tcp.mx.junk.example", 52} => [<<3>>],
+          {"signed.example", :mx} => {:secure, [{10, ~c"mx.signed.example"}]},
+          {"broken.example", 52} => :servfail
+        })
+
+      %{resolver: {InetRes, nameservers: [FakeNameserver.address(ns)], timeout: 1_000, retry: 1}}
+    end
+
+    test "reports the AD bit", %{resolver: resolver} do
+      record = {3, 1, 1, :binary.copy(<<0xAB>>, 32)}
+
+      assert DNS.lookup_secure(resolver, "_25._tcp.mx.signed.example", :tlsa) ==
+               {:ok, [record], true}
+
+      assert DNS.lookup_secure(resolver, "_25._tcp.mx.unsigned.example", :tlsa) ==
+               {:ok, [record], false}
+
+      assert DNS.lookup_secure(resolver, "signed.example", :mx) ==
+               {:ok, [{10, "mx.signed.example"}], true}
+
+      assert DNS.lookup(resolver, "_25._tcp.mx.signed.example", :tlsa) == {:ok, [record]}
+    end
+
+    test "drops malformed TLSA data and maps errors", %{resolver: resolver} do
+      assert DNS.lookup_secure(resolver, "_25._tcp.mx.junk.example", :tlsa) == {:ok, [], false}
+      assert DNS.lookup_secure(resolver, "missing.example", :tlsa) == {:error, :nxdomain}
+      assert DNS.lookup_secure(resolver, "broken.example", :tlsa) == {:error, :servfail}
+      assert InetRes.lookup_secure("bad name", :tlsa, []) == {:error, :invalid_name}
+    end
+
+    test "times out against a silent server" do
+      {:ok, socket} = :gen_udp.open(0, ip: {127, 0, 0, 1})
+      {:ok, port} = :inet.port(socket)
+      resolver = {InetRes, nameservers: [{{127, 0, 0, 1}, port}], timeout: 100, retry: 1}
+      assert DNS.lookup_secure(resolver, "x.example", :tlsa) == {:error, :timeout}
+    end
+
+    defmodule PlainResolver do
+      @moduledoc false
+      @behaviour Sovite.DNS.Resolver
+      @impl true
+      def lookup(_name, :a, _opts), do: {:ok, [{192, 0, 2, 1}]}
+    end
+
+    test "resolvers without lookup_secure are never authenticated" do
+      assert DNS.lookup_secure({PlainResolver, []}, "x.example", :a) ==
+               {:ok, [{192, 0, 2, 1}], false}
+    end
+  end
+
   test "the default resolver is InetRes" do
     assert DNS.default_resolver() == {InetRes, []}
   end

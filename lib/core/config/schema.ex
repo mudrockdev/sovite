@@ -16,7 +16,14 @@ defmodule Sovite.Core.Config.Schema do
   #   :ip_address              - an :inet tuple
   #   :cidr                    - {ip, prefix_length}, from "192.0.2.0/24" or a single address
   #   :relayhost               - %{host, port, mx}, from "host", "host:port", "[host]", "[host]:port"
+  #   :tls_version             - :"tlsv1.2" | :"tlsv1.3", from "1.2" or "1.3"
+  #   :ciphers                 - a list of strong cipher suite names, see Sovite.TLS.ciphers/1
+  #   :ldap_filter             - an RFC 4515 filter with %u/%n/%d placeholders
+  #   :url                     - an absolute URL; with {:url, schemes} the scheme must be listed
+  #   :sender_pattern          - an address, "@domain", or "*"
+  #   :tls_destination         - a domain or an address literal ("[192.0.2.1]"), lower-cased
   #   {:list, type}            - an array; errors name the index, as in "key[0]"
+  #   {:map, key_type, value_type} - a table with arbitrary keys; errors name the key
   #   {:integer, min, max}
   #   {:enum, [atom]}          - the input string must equal one of the atom names
   #   {:section, [field]}      - a nested table
@@ -26,7 +33,9 @@ defmodule Sovite.Core.Config.Schema do
   #   required: true
 
   alias Sovite.Core.Config.Error
+  alias Sovite.Core.SenderCheck
   alias Sovite.Message.Received
+  alias Sovite.SASL.Backend.LDAP.Filter
 
   @type field :: {atom(), term(), keyword()}
 
@@ -104,6 +113,26 @@ defmodule Sovite.Core.Config.Schema do
 
   defp check({:list, _type}, value, path),
     do: {:error, [%Error{path: path, reason: "expected an array, got #{inspect(value)}"}]}
+
+  defp check({:map, key_type, value_type}, map, path) when is_map(map) do
+    map
+    |> Enum.sort()
+    |> Enum.reduce({%{}, []}, fn {key, value}, {acc, errors} ->
+      with {:ok, key} <- check(key_type, key, path ++ [key]),
+           {:ok, value} <- check(value_type, value, path ++ [key]) do
+        {Map.put(acc, key, value), errors}
+      else
+        {:error, new_errors} -> {acc, errors ++ new_errors}
+      end
+    end)
+    |> case do
+      {acc, []} -> {:ok, acc}
+      {_acc, errors} -> {:error, errors}
+    end
+  end
+
+  defp check({:map, _key_type, _value_type}, value, path),
+    do: {:error, [%Error{path: path, reason: "expected a table, got #{inspect(value)}"}]}
 
   defp check(type, value, path) do
     with {:error, reason} <- cast(type, value) do
@@ -249,6 +278,88 @@ defmodule Sovite.Core.Config.Schema do
   end
 
   defp cast(:relayhost, value), do: type_error("a relay host", value)
+
+  defp cast(:tls_version, "1.2"), do: {:ok, :"tlsv1.2"}
+  defp cast(:tls_version, "1.3"), do: {:ok, :"tlsv1.3"}
+
+  defp cast(:tls_version, value) when is_atom(value) and value in [:"tlsv1.2", :"tlsv1.3"],
+    do: {:ok, value}
+
+  defp cast(:tls_version, value), do: type_error(~s("1.2" or "1.3"), value)
+
+  defp cast(:ciphers, value) when is_list(value) do
+    case Enum.all?(value, &is_binary/1) && Sovite.TLS.ciphers(value) do
+      {:ok, _suites} ->
+        {:ok, value}
+
+      {:error, {:unknown_cipher, name}} ->
+        {:error, "#{inspect(name)} is not a cipher suite this system supports"}
+
+      {:error, {:weak_cipher, name}} ->
+        {:error,
+         "#{inspect(name)} is not allowed: only ECDHE with AES-GCM or ChaCha20-Poly1305, and TLS 1.3 suites"}
+
+      false ->
+        type_error("an array of cipher suite names", value)
+    end
+  end
+
+  defp cast(:ciphers, value), do: type_error("an array of cipher suite names", value)
+
+  defp cast(:ldap_filter, value) when is_binary(value) do
+    case Filter.parse(value) do
+      {:ok, _} -> {:ok, value}
+      :error -> {:error, "#{inspect(value)} is not a valid LDAP filter"}
+    end
+  end
+
+  defp cast(:ldap_filter, value), do: type_error("an LDAP filter", value)
+
+  defp cast(:url, value), do: cast({:url, nil}, value)
+
+  defp cast({:url, schemes}, value) when is_binary(value) do
+    case URI.new(value) do
+      {:ok, %URI{scheme: scheme, host: host}}
+      when is_binary(scheme) and is_binary(host) and host != "" ->
+        if schemes == nil or scheme in schemes,
+          do: {:ok, value},
+          else:
+            {:error,
+             "#{inspect(value)} must use #{Enum.map_join(schemes, " or ", &(&1 <> "://"))}"}
+
+      _ ->
+        {:error, "#{inspect(value)} is not a valid URL"}
+    end
+  end
+
+  defp cast({:url, _schemes}, value), do: type_error("a URL", value)
+
+  defp cast(:sender_pattern, value) when is_binary(value) do
+    value = String.downcase(value, :ascii)
+
+    if SenderCheck.valid_pattern?(value),
+      do: {:ok, value},
+      else: {:error, ~s(#{inspect(value)} is not an address, "@domain", or "*")}
+  end
+
+  defp cast(:sender_pattern, value), do: type_error("a sender address pattern", value)
+
+  defp cast(:tls_destination, value) when is_binary(value) do
+    value = String.downcase(value, :ascii)
+
+    case Sovite.Validators.parse_address_literal(value) do
+      {:ok, ip} ->
+        {:ok, Received.address_literal(ip)}
+
+      {:error, _} when value != "" ->
+        if Sovite.Validators.domain?(value),
+          do: {:ok, value},
+          else: {:error, "#{inspect(value)} is not a domain or address literal"}
+
+      {:error, _} ->
+        {:error, "#{inspect(value)} is not a domain or address literal"}
+    end
+  end
 
   defp cast(:duration, value) when is_integer(value) and value > 0, do: {:ok, value * 1000}
 

@@ -11,7 +11,7 @@ defmodule Sovite.SASL.OAuthBearer do
   (RFC 7628 §3.2.3).
   """
 
-  alias Sovite.SASL.Server
+  alias Sovite.SASL.Credentials
 
   @kvsep <<1>>
 
@@ -31,7 +31,7 @@ defmodule Sovite.SASL.OAuthBearer do
     with {:ok, username, pairs} <- parse(message),
          {:ok, "Bearer " <> token} <- Map.fetch(pairs, "auth"),
          true <- token != "" and token =~ ~r/\A[A-Za-z0-9\-._~+\/]+=*\z/ do
-      case Server.verify_token(context, username, token) do
+      case Credentials.verify_token(context, username, token) do
         {:ok, identity} -> {:ok, identity}
         {:error, :temporary} -> {:error, :temporary, username}
         {:error, :invalid} -> {:challenge, context.oauth_error, {:failed, username}}

@@ -4,10 +4,10 @@ defmodule Sovite.Core.SupervisorTest do
 
   import ExUnit.CaptureLog
 
-  alias Sovite.Core.{Config, Telemetry}
+  alias Sovite.Core.{Config, Repo, Telemetry, Users}
   alias Sovite.Core.Logging.FileHandler
   alias Sovite.Queue.Spool
-  alias Sovite.Test.{FakeDNS, FakeMTA, SMTPClient}
+  alias Sovite.Test.{Certs, FakeDNS, FakeMTA, SMTPClient}
 
   @moduletag :tmp_dir
   @moduletag :capture_log
@@ -37,6 +37,8 @@ defmodule Sovite.Core.SupervisorTest do
     hostname = "mx.example.org"
     [queue]
     directory = "#{Path.join(dir, "queue")}"
+    [database]
+    path = "#{Path.join(dir, "sovite.db")}"
     #{rest}
     """
   end
@@ -175,6 +177,72 @@ defmodule Sovite.Core.SupervisorTest do
     assert message.rcpt_to == ["b@example.net"]
     assert message.data =~ ~r/\AReceived: from client.test .* id #{queue_id}\r\n/s
     assert String.ends_with?(message.data, "\r\nSubject: hi\r\n\r\nhello\r\n")
+  end
+
+  test "serves authenticated submission over TLS and relays the fixed message", %{tmp_dir: dir} do
+    {:ok, mta} = FakeMTA.start_link()
+    ca = Certs.ca()
+    {cert_file, key_file} = Certs.write!(dir, "mx", Certs.issue(ca, names: ["mx.example.org"]))
+
+    {:ok, config} =
+      Config.parse(
+        toml(dir, "", """
+        [[listener]]
+        address = "127.0.0.1"
+        port = 0
+        mode = "submission"
+        [[tls.certificate]]
+        cert_file = "#{cert_file}"
+        key_file = "#{key_file}"
+        [auth]
+        failure_delay = 1
+        """)
+      )
+
+    resolver =
+      FakeDNS.resolver(%{
+        {"example.net", :mx} => [{10, "mx.example.net"}],
+        {"mx.example.net", :a} => [{127, 0, 0, 1}]
+      })
+
+    supervisor =
+      start_supervised!(
+        {Sovite.Core.Supervisor,
+         config: config, name: nil, queue_manager: [resolver: resolver, port: FakeMTA.port(mta)]}
+      )
+
+    repo = Repo.ref(config.database)
+    {:ok, _} = Users.create(repo, "alice@example.org", "secret")
+
+    {:ok, client} = SMTPClient.connect(listener_port(supervisor))
+    {:ok, {220, _}} = SMTPClient.read_reply(client)
+    {:ok, {250, lines}} = SMTPClient.command(client, "EHLO client.test")
+    assert "STARTTLS" in lines
+    refute Enum.any?(lines, &String.starts_with?(&1, "AUTH"))
+    assert {:ok, {530, _}} = SMTPClient.command(client, "MAIL FROM:<alice@example.org>")
+
+    tls = Sovite.TLS.client_options(verify: :peer, hostname: "mx.example.org", cacerts: [ca.cert])
+    {:ok, client} = SMTPClient.starttls(client, tls)
+    {:ok, {250, lines}} = SMTPClient.command(client, "EHLO client.test")
+    assert "AUTH SCRAM-SHA-256 PLAIN LOGIN" in lines
+
+    assert {:ok, {235, _}} =
+             SMTPClient.command(
+               client,
+               "AUTH PLAIN " <> Base.encode64("\0alice@example.org\0secret")
+             )
+
+    assert {:ok, {250, _}} = SMTPClient.command(client, "MAIL FROM:<alice@example.org>")
+    assert {:ok, {250, _}} = SMTPClient.command(client, "RCPT TO:<bob@example.net>")
+    assert {:ok, {354, _}} = SMTPClient.command(client, "DATA")
+    assert {:ok, {250, _}} = SMTPClient.send_data(client, "Subject: hi\r\n\r\nhello\r\n")
+
+    assert_receive {:fake_mta, ^mta, {:message, message}}, 5_000
+    assert message.data =~ "with ESMTPSA id"
+    assert message.data =~ "(using TLSv1.3 with cipher"
+
+    assert message.data =~
+             ~r/\r\nSubject: hi\r\nDate: .+\r\nMessage-ID: <.+@mx.example.org>\r\n\r\nhello\r\n\z/
   end
 
   def forward_event(_event, _measurements, metadata, pid), do: send(pid, {:deferred, metadata})
