@@ -76,17 +76,17 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 2 — Queue & Outbound Delivery (MVP outbound)
 
-- [ ] Queue structure: incoming, active, deferred, hold, corrupt
-- [ ] Queue file format: versioned, checksummed envelope + message body, crash recovery on startup
-- [ ] Scheduler: exponential backoff, maximum queue lifetime (default 5 days), per-destination concurrency and rate limits
-- [ ] DNS resolution: MX, A/AAAA fallback (implicit MX), Null MX handling, preference ordering, randomization among equal-preference hosts
-- [ ] IPv4 + IPv6 dual-stack delivery with fallback
-- [ ] SMTP client: EHLO negotiation, pipelining, connection caching/reuse
-- [ ] Multi-recipient messages: per-recipient status tracking, partial failures
-- [ ] Bounces: DSN generation for permanent failures, delay warnings (configurable)
-- [ ] Double-bounce handling and null-sender (`<>`) rules
-- [ ] `postmaster@` and `abuse@` always accepted
-- [ ] Smart host / relayhost support
+- [x] Queue structure: incoming, active, deferred, hold, corrupt
+- [x] Queue file format: versioned, checksummed envelope + message body, crash recovery on startup
+- [x] Scheduler: exponential backoff, maximum queue lifetime (default 5 days), per-destination concurrency and rate limits
+- [x] DNS resolution: MX, A/AAAA fallback (implicit MX), Null MX handling, preference ordering, randomization among equal-preference hosts
+- [x] IPv4 + IPv6 dual-stack delivery with fallback
+- [x] SMTP client: EHLO negotiation, pipelining, connection caching/reuse
+- [x] Multi-recipient messages: per-recipient status tracking, partial failures
+- [x] Bounces: DSN generation for permanent failures, delay warnings (configurable)
+- [x] Double-bounce handling and null-sender (`<>`) rules
+- [x] `postmaster@` and `abuse@` always accepted
+- [x] Smart host / relayhost support
 
 **Standards:** RFC 5321 §4.5.4 (retry strategy) & §5 (address resolution), RFC 7505 (Null MX), RFC 3461, RFC 3464, RFC 6522, RFC 3834
 

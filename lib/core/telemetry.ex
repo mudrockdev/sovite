@@ -15,14 +15,24 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :smtp, :server, :session, :stop]` | `duration` | `session_id`, `remote_ip` |
   | `[:sovite, :smtp, :server, :command, :stop]` | `duration` | `session_id`, `remote_ip`, `command`, `argument`, `reply_code`, `reply` |
   | `[:sovite, :queue, :message, :enqueued]` | `size`, `recipients` | `queue_id`, `session_id`, `sender` |
-  | `[:sovite, :queue, :message, :removed]` | | `queue_id`, `reason` |
+  | `[:sovite, :queue, :message, :removed]` | | `queue_id`, `reason` (`delivered`, `bounced`, `expired`) |
+  | `[:sovite, :queue, :message, :deferred]` | `attempts`, `recipients` | `queue_id`, `next_attempt` |
+  | `[:sovite, :queue, :message, :corrupt]` | | `queue_id`, `reason` |
+  | `[:sovite, :queue, :notification, :sent]` | `recipients` | `queue_id`, `kind`, `to`, `notification_id` |
+  | `[:sovite, :queue, :notification, :discarded]` | `recipients` | `queue_id`, `kind`, `sender` |
   | `[:sovite, :smtp, :client, :delivery, :start]` | `system_time` | `queue_id`, `relay` |
   | `[:sovite, :smtp, :client, :delivery, :stop]` | `duration` | `queue_id`, `relay`, `recipient`, `status`, `reply` |
   | `[:sovite, :smtp, :client, :delivery, :exception]` | `duration` | `queue_id`, `relay`, `kind`, `reason` |
 
-  Message lifecycle events (`:queue` and `:delivery` stop) and SMTP
-  commands that got a 4xx or 5xx reply are logged at `:info`. All other
-  events are logged at `:debug`.
+  Delivery `:stop` events come once per recipient; `status` is
+  `:delivered`, `:deferred`, or `:failed`. `:notification` events are
+  about the original message: `queue_id` is its ID, and `notification_id`
+  the ID of the queued notification.
+
+  Message lifecycle events (`:queue`, delivery `:stop` and `:exception`)
+  and SMTP commands that got a 4xx or 5xx reply are logged at `:info`,
+  except `corrupt` and `discarded` notifications, which are logged at
+  `:warning`. All other events are logged at `:debug`.
   """
 
   require Logger
@@ -40,6 +50,10 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :smtp, :server, :command, :stop],
     [:sovite, :queue, :message, :enqueued],
     [:sovite, :queue, :message, :removed],
+    [:sovite, :queue, :message, :deferred],
+    [:sovite, :queue, :message, :corrupt],
+    [:sovite, :queue, :notification, :sent],
+    [:sovite, :queue, :notification, :discarded],
     [:sovite, :smtp, :client, :delivery, :start],
     [:sovite, :smtp, :client, :delivery, :stop],
     [:sovite, :smtp, :client, :delivery, :exception]
@@ -48,8 +62,15 @@ defmodule Sovite.Core.Telemetry do
   @info_events [
     [:sovite, :queue, :message, :enqueued],
     [:sovite, :queue, :message, :removed],
+    [:sovite, :queue, :message, :deferred],
+    [:sovite, :queue, :notification, :sent],
     [:sovite, :smtp, :client, :delivery, :stop],
     [:sovite, :smtp, :client, :delivery, :exception]
+  ]
+
+  @warning_events [
+    [:sovite, :queue, :message, :corrupt],
+    [:sovite, :queue, :notification, :discarded]
   ]
 
   @doc "Returns every event in the catalog."
@@ -72,7 +93,13 @@ defmodule Sovite.Core.Telemetry do
 
   @doc false
   def handle_event(event, measurements, metadata, _config) do
-    level = if event in @info_events or rejected?(event, metadata), do: :info, else: :debug
+    level =
+      cond do
+        event in @warning_events -> :warning
+        event in @info_events or rejected?(event, metadata) -> :info
+        true -> :debug
+      end
+
     name = event |> tl() |> Enum.join(".")
 
     Logger.log(level, fn -> format(name, measurements, metadata) end,

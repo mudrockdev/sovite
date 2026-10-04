@@ -72,7 +72,7 @@ defmodule Sovite.Test.FakeMTATest do
     assert {:ok, {451, ["4.3.0 Try later"]}} =
              SMTPClient.send_message(client, "a@x.test", ["b@y.test"], "x")
 
-    refute_receive {:fake_mta, ^mta, _}
+    refute_receive {:fake_mta, ^mta, {:message, _}}
 
     assert {:error, :closed} = SMTPClient.command(client, "QUIT")
   end

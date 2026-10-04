@@ -4,6 +4,7 @@ defmodule Sovite.Queue.SpoolTest do
   import Bitwise
 
   alias Sovite.Queue.{Envelope, ID, Spool}
+  alias Sovite.Test.TelemetryForwarder
 
   @moduletag :tmp_dir
 
@@ -52,8 +53,8 @@ defmodule Sovite.Queue.SpoolTest do
     path
   end
 
-  # Writes a queue file with a correct header and checksum around
-  # arbitrary envelope bytes.
+  # Writes a version 1 queue file with a correct header and checksum
+  # around arbitrary envelope bytes.
   defp write_raw(path, envelope_line, message) do
     body = envelope_line <> message
     digest = :sha256 |> :crypto.hash(body) |> Base.encode16(case: :lower)
@@ -235,8 +236,11 @@ defmodule Sovite.Queue.SpoolTest do
       assert Spool.read(path) == {:error, :invalid_header}
     end
 
-    test "detects appended bytes", %{path: path, contents: contents} do
-      File.write!(path, contents <> "x")
+    test "detects appended bytes in a version 1 file", %{path: path} do
+      write_raw(path, JSON.encode!(Envelope.to_map(envelope())) <> "\n", @message)
+      assert {:ok, _env, _offset} = Spool.read(path)
+
+      File.write!(path, "x", [:append])
       assert Spool.read(path) == {:error, :checksum_mismatch}
     end
 
@@ -244,7 +248,7 @@ defmodule Sovite.Queue.SpoolTest do
       <<header::binary-size(@header_size), body::binary>> = contents
 
       for bad <- [
-            String.replace(header, "SOVITE-QUEUE 1", "SOVITE-QUEUE 2"),
+            String.replace(header, "SOVITE-QUEUE 2", "SOVITE-QUEUE 3"),
             String.replace(header, "SOVITE-QUEUE", "sovite-queue"),
             String.replace(header, " 0000", " 00x0", global: false),
             String.replace(header, "\n", " "),
@@ -257,15 +261,15 @@ defmodule Sovite.Queue.SpoolTest do
     end
 
     test "rejects signed sizes in the header", %{path: path, contents: contents} do
-      <<"SOVITE-QUEUE 1 ", env, env_rest::binary-9, " ", msg, msg_rest::binary-19, rest::binary>> =
+      <<"SOVITE-QUEUE 2 ", env, env_rest::binary-9, " ", msg, msg_rest::binary-19, rest::binary>> =
         contents
 
       assert {env, msg} == {?0, ?0}
 
-      File.write!(path, "SOVITE-QUEUE 1 0#{env_rest} -#{msg_rest}" <> rest)
+      File.write!(path, "SOVITE-QUEUE 2 0#{env_rest} -#{msg_rest}" <> rest)
       assert Spool.read(path) == {:error, :invalid_header}
 
-      File.write!(path, "SOVITE-QUEUE 1 -#{env_rest} 0#{msg_rest}" <> rest)
+      File.write!(path, "SOVITE-QUEUE 2 -#{env_rest} 0#{msg_rest}" <> rest)
       assert Spool.read(path) == {:error, :invalid_header}
     end
 
@@ -300,6 +304,165 @@ defmodule Sovite.Queue.SpoolTest do
 
     test "returns file errors", %{tmp_dir: dir} do
       assert Spool.read(Path.join(dir, "missing")) == {:error, :enoent}
+    end
+  end
+
+  describe "records" do
+    @at ~U[2026-10-04 12:00:00Z]
+
+    defp details(status),
+      do: %{status: status, reply: "250 2.0.0 Ok", remote: "mx[192.0.2.25]", smtp: true, at: @at}
+
+    setup %{tmp_dir: dir} do
+      %{path: spool!(dir)}
+    end
+
+    test "load/2 returns appended records", %{path: path} do
+      {:ok, loaded} = Spool.load(path)
+      assert loaded.records == []
+      assert loaded.end_offset == File.stat!(path).size
+
+      records = [
+        {:recipient, "b@example.com", :delivered, details("2.0.0")},
+        {:recipient, "c@example.com", :deferred, details("4.2.1")}
+      ]
+
+      assert {:ok, end_offset} = Spool.append(path, loaded.end_offset, records)
+      assert {:ok, end_offset} = Spool.append(path, end_offset, [{:retry, 1, @at}])
+      assert {:ok, ^end_offset} = Spool.append(path, end_offset, [])
+
+      assert {:ok, reloaded} = Spool.load(path)
+      assert reloaded.records == records ++ [{:retry, 1, @at}]
+      assert reloaded.end_offset == end_offset
+      assert reloaded.message_offset == loaded.message_offset
+      assert reloaded.message_size == byte_size(@message)
+
+      # read/1 still verifies the message.
+      assert {:ok, _env, _offset} = Spool.read(path)
+    end
+
+    test "ignores an incomplete last record and overwrites it", %{path: path} do
+      {:ok, loaded} = Spool.load(path)
+      {:ok, end_offset} = Spool.append(path, loaded.end_offset, [{:retry, 1, @at}])
+
+      # A crash in the middle of an append.
+      File.write!(path, ~s(R 0123 {"type":"ret), [:append])
+      assert {:ok, %{records: [{:retry, 1, @at}], end_offset: ^end_offset}} = Spool.load(path)
+
+      {:ok, new_end} = Spool.append(path, end_offset, [:warned])
+
+      assert {:ok, %{records: [{:retry, 1, @at}, :warned], end_offset: ^new_end}} =
+               Spool.load(path)
+
+      assert File.stat!(path).size == new_end
+    end
+
+    test "rejects a damaged record that is not the last", %{path: path} do
+      {:ok, loaded} = Spool.load(path)
+      {:ok, _} = Spool.append(path, loaded.end_offset, [{:retry, 1, @at}, :warned])
+
+      File.write!(path, String.replace(File.read!(path), ~s("attempts":1), ~s("attempts":2)))
+      assert Spool.load(path) == {:error, :invalid_record}
+    end
+
+    test "load/2 can skip the checksum and the records", %{path: path, tmp_dir: _} do
+      {:ok, loaded} = Spool.load(path)
+      {:ok, _} = Spool.append(path, loaded.end_offset, [:warned])
+      contents = File.read!(path)
+      pos = loaded.message_offset
+      <<before::binary-size(^pos), byte, rest::binary>> = contents
+      File.write!(path, <<before::binary, bxor(byte, 1), rest::binary>>)
+
+      assert Spool.load(path) == {:error, :checksum_mismatch}
+      assert {:ok, %{records: [:warned]}} = Spool.load(path, verify: false)
+      assert {:ok, %{records: []}} = Spool.load(path, verify: false, records: false)
+    end
+  end
+
+  describe "queues" do
+    test "move/4, list/2, and recover/1", %{tmp_dir: dir} do
+      env1 = envelope()
+      env2 = envelope()
+      spool!(dir, env1)
+      spool!(dir, env2)
+
+      assert Spool.list(dir, :incoming) == {:ok, Enum.sort([env1.queue_id, env2.queue_id])}
+      assert Spool.move(dir, env1.queue_id, :incoming, :active) == :ok
+      assert Spool.move(dir, env2.queue_id, :incoming, :hold) == :ok
+      assert Spool.move(dir, env2.queue_id, :incoming, :active) == {:error, :enoent}
+
+      assert Spool.list(dir, :active) == {:ok, [env1.queue_id]}
+      assert {:ok, ^env1, _} = Spool.read(Spool.path(dir, :active, env1.queue_id))
+
+      assert Spool.recover(dir) == {:ok, 1}
+      assert Spool.list(dir, :incoming) == {:ok, [env1.queue_id]}
+      assert Spool.list(dir, :active) == {:ok, []}
+      assert Spool.list(dir, :hold) == {:ok, [env2.queue_id]}
+    end
+
+    test "list/2 skips files that are not queue files", %{tmp_dir: dir} do
+      File.write!(Path.join([dir, "incoming", "README"]), "")
+      assert Spool.list(dir, :incoming) == {:ok, []}
+    end
+
+    test "init/1 creates every queue", %{tmp_dir: dir} do
+      for queue <- Spool.queues() do
+        assert mode(Path.join(dir, Atom.to_string(queue))) == 0o700
+      end
+    end
+
+    test "remove/4 deletes the file and emits an event", %{tmp_dir: dir} do
+      TelemetryForwarder.attach([[:sovite, :queue, :message, :removed]])
+      env = envelope()
+      spool!(dir, env)
+      id = env.queue_id
+
+      assert Spool.remove(dir, :incoming, id, :delivered) == :ok
+      assert Spool.list(dir, :incoming) == {:ok, []}
+
+      assert_received {:telemetry, _, %{}, %{queue_id: ^id, reason: :delivered}}
+      assert Spool.remove(dir, :incoming, id, :delivered) == {:error, :enoent}
+    end
+  end
+
+  describe "message access" do
+    test "stream_message/3 streams exactly the message", %{tmp_dir: dir} do
+      big = String.duplicate("0123456789abcdef", 10_000) <> "\r\n"
+      path = spool!(dir, envelope(), [@message, big])
+      {:ok, loaded} = Spool.load(path)
+      {:ok, _} = Spool.append(path, loaded.end_offset, [:warned])
+
+      chunks =
+        path |> Spool.stream_message(loaded.message_offset, loaded.message_size) |> Enum.to_list()
+
+      assert length(chunks) > 1
+      assert IO.iodata_to_binary(chunks) == @message <> big
+
+      assert Spool.stream_message(path, loaded.message_offset, 0) |> Enum.to_list() == []
+    end
+
+    test "read_headers/4 returns the header section", %{tmp_dir: dir} do
+      path = spool!(dir)
+      {:ok, loaded} = Spool.load(path)
+
+      assert Spool.read_headers(path, loaded.message_offset, loaded.message_size) ==
+               {:ok, "From: a@example.net\r\nSubject: hi\r\n"}
+
+      # Cut at a line end when over the limit.
+      assert Spool.read_headers(path, loaded.message_offset, loaded.message_size, 25) ==
+               {:ok, "From: a@example.net\r\n"}
+
+      body_only = spool!(dir, envelope(), ["\r\nbody\r\n"])
+      {:ok, loaded} = Spool.load(body_only)
+
+      assert Spool.read_headers(body_only, loaded.message_offset, loaded.message_size) ==
+               {:ok, ""}
+
+      no_body = spool!(dir, envelope(), ["Subject: x\r\n"])
+      {:ok, loaded} = Spool.load(no_body)
+
+      assert Spool.read_headers(no_body, loaded.message_offset, loaded.message_size) ==
+               {:ok, "Subject: x\r\n"}
     end
   end
 end

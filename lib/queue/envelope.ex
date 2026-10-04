@@ -4,6 +4,11 @@ defmodule Sovite.Queue.Envelope do
   arrived.
 
   `sender` is `""` for the null reverse-path (`MAIL FROM:<>`).
+
+  `notification` is set on delivery status notifications Sovite
+  generates itself: `:failure`, `:delay`, or `:double_bounce` (a failed
+  notification reported to the postmaster). A failed `:double_bounce` is
+  never reported again, so notifications cannot loop.
   """
 
   @enforce_keys [:queue_id, :sender, :recipients]
@@ -16,7 +21,8 @@ defmodule Sovite.Queue.Envelope do
     :remote_ip,
     :helo,
     :protocol,
-    :body_type
+    :body_type,
+    :notification
   ]
 
   @type t :: %__MODULE__{
@@ -28,7 +34,8 @@ defmodule Sovite.Queue.Envelope do
           remote_ip: :inet.ip_address() | nil,
           helo: String.t() | nil,
           protocol: String.t() | nil,
-          body_type: :"7bit" | :"8bitmime" | nil
+          body_type: :"7bit" | :"8bitmime" | nil,
+          notification: :failure | :delay | :double_bounce | nil
         }
 
   @doc false
@@ -43,7 +50,8 @@ defmodule Sovite.Queue.Envelope do
       "remote_ip" => envelope.remote_ip && envelope.remote_ip |> :inet.ntoa() |> to_string(),
       "helo" => envelope.helo,
       "protocol" => envelope.protocol,
-      "body_type" => envelope.body_type && Atom.to_string(envelope.body_type)
+      "body_type" => envelope.body_type && Atom.to_string(envelope.body_type),
+      "notification" => envelope.notification && Atom.to_string(envelope.notification)
     }
   end
 
@@ -54,7 +62,8 @@ defmodule Sovite.Queue.Envelope do
     with true <- Enum.all?(rcpts, &is_binary/1),
          {:ok, received_at} <- optional(map["received_at"], &parse_time/1),
          {:ok, remote_ip} <- optional(map["remote_ip"], &parse_ip/1),
-         {:ok, body_type} <- optional(map["body_type"], &parse_body_type/1) do
+         {:ok, body_type} <- optional(map["body_type"], &parse_body_type/1),
+         {:ok, notification} <- optional(map["notification"], &parse_notification/1) do
       {:ok,
        %__MODULE__{
          queue_id: id,
@@ -65,7 +74,8 @@ defmodule Sovite.Queue.Envelope do
          remote_ip: remote_ip,
          helo: map["helo"],
          protocol: map["protocol"],
-         body_type: body_type
+         body_type: body_type,
+         notification: notification
        }}
     else
       _ -> {:error, :invalid_envelope}
@@ -96,4 +106,9 @@ defmodule Sovite.Queue.Envelope do
   defp parse_body_type("7bit"), do: {:ok, :"7bit"}
   defp parse_body_type("8bitmime"), do: {:ok, :"8bitmime"}
   defp parse_body_type(_), do: :error
+
+  defp parse_notification("failure"), do: {:ok, :failure}
+  defp parse_notification("delay"), do: {:ok, :delay}
+  defp parse_notification("double_bounce"), do: {:ok, :double_bounce}
+  defp parse_notification(_), do: :error
 end

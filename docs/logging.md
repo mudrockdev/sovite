@@ -22,6 +22,14 @@
 {"time":"2026-10-04T12:00:00.123456Z","level":"info","msg":"queue.message.enqueued: recipients=2, sender=a@example.com, size=1024","queue_id":"4Xb2Kq","event":"queue.message.enqueued"}
 ```
 
+A delivered message, from acceptance to removal:
+
+```
+[info] queue_id=8CboABCDEFGHIJ event=queue.message.enqueued queue.message.enqueued: recipients=1, sender=alice@example.org, size=1532
+[info] queue_id=8CboABCDEFGHIJ event=smtp.client.delivery.stop smtp.client.delivery.stop: duration=412, recipient=bob@example.net, relay=mx.example.net[192.0.2.25], reply=250 2.0.0 Ok: queued as 4Xb2Kq, status=delivered
+[info] queue_id=8CboABCDEFGHIJ event=queue.message.removed queue.message.removed: reason=delivered
+```
+
 ## Log Files
 
 By default, logs go to standard output, for systemd or a container runtime to collect. Set `[log] directory` to write rotating files instead, similar to pino-roll:
@@ -61,7 +69,8 @@ All keys are in the [configuration reference](configuration.md#log).
 
 Reusable components never write logs. They emit `:telemetry` events named `[:sovite, component, ...]`, and the host application decides what to do with them. Sovite itself attaches `Sovite.Core.Telemetry`, which logs each event:
 
-- message lifecycle events (enqueue, removal, delivery results) at `info`
+- message lifecycle events (enqueue, delivery result per recipient, deferral, notifications sent, removal) at `info`
+- corrupt queue files and notifications that could not be sent anywhere (double bounces) at `warning`
 - SMTP commands that were rejected (4xx/5xx replies), with the command, its argument, and the reply, at `info`
 - everything else at `debug`
 

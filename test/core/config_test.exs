@@ -48,7 +48,13 @@ defmodule Sovite.Core.ConfigTest do
 
     assert Map.take(config, [:server, :queue, :log]) == %{
              server: %{hostname: "mail.example.com"},
-             queue: %{directory: "/srv/sovite/queue"},
+             queue: %{
+               directory: "/srv/sovite/queue",
+               max_lifetime: 5 * 86_400_000,
+               min_backoff: 300_000,
+               max_backoff: 3_600_000,
+               delay_warning: nil
+             },
              log: %{
                level: :debug,
                format: :json,
@@ -117,6 +123,110 @@ defmodule Sovite.Core.ConfigTest do
              relay: ["backup.example"],
              local_recipients: ["alice@example.com"]
            }
+  end
+
+  test "defaults the queue, delivery, and bounce settings" do
+    assert {:ok, config} = Config.parse("")
+
+    assert config.delivery == %{
+             relayhost: nil,
+             max_deliveries: 100,
+             destination_concurrency: 20,
+             destination_rate_delay: nil,
+             max_recipients: 50,
+             max_addresses: 5,
+             ip_versions: [:ipv6, :ipv4],
+             connect_timeout: 30_000
+           }
+
+    assert config.bounce == %{double_bounce_recipient: nil}
+  end
+
+  test "parses queue, delivery, and bounce settings" do
+    toml = """
+    [queue]
+    max_lifetime = "2d"
+    min_backoff = "1m"
+    max_backoff = "2h"
+    delay_warning = "4h"
+
+    [delivery]
+    relayhost = "[smtp.isp.example]:587"
+    max_deliveries = 10
+    destination_concurrency = 2
+    destination_rate_delay = "1s"
+    max_recipients = 10
+    max_addresses = 3
+    ip_versions = ["ipv4"]
+    connect_timeout = "10s"
+
+    [bounce]
+    double_bounce_recipient = "Postmaster@Example.org"
+    """
+
+    assert {:ok, config} = Config.parse(toml)
+
+    assert Map.delete(config.queue, :directory) == %{
+             max_lifetime: 2 * 86_400_000,
+             min_backoff: 60_000,
+             max_backoff: 7_200_000,
+             delay_warning: 4 * 3_600_000
+           }
+
+    assert config.delivery.relayhost == %{host: "smtp.isp.example", port: 587, mx: false}
+    assert config.delivery.destination_rate_delay == 1000
+    assert config.delivery.ip_versions == [:ipv4]
+    assert config.bounce.double_bounce_recipient == "postmaster@example.org"
+  end
+
+  test "parses relay hosts in Postfix syntax" do
+    for {value, expected} <- [
+          {"isp.example", %{host: "isp.example", port: 25, mx: true}},
+          {"ISP.example:2525", %{host: "isp.example", port: 2525, mx: true}},
+          {"[smtp.isp.example]", %{host: "smtp.isp.example", port: 25, mx: false}},
+          {"[192.0.2.1]:587", %{host: "[192.0.2.1]", port: 587, mx: false}},
+          {"[2001:db8::1]", %{host: "[IPv6:2001:db8::1]", port: 25, mx: false}},
+          {"[IPv6:2001:db8::1]:465", %{host: "[IPv6:2001:db8::1]", port: 465, mx: false}}
+        ] do
+      assert {:ok, config} = Config.parse(~s([delivery]\nrelayhost = "#{value}"))
+      assert config.delivery.relayhost == expected, value
+    end
+
+    for bad <- [
+          "",
+          "isp.example:0",
+          "isp.example:x",
+          "[isp.example",
+          "192.0.2.1",
+          "a:b:c",
+          "-bad.example"
+        ] do
+      assert {:error, [error]} = Config.parse(~s([delivery]\nrelayhost = "#{bad}"))
+
+      assert Exception.message(error) =~
+               "delivery.relayhost: #{inspect(bad)} is not a valid relay host"
+    end
+  end
+
+  test "checks settings that depend on each other" do
+    toml = """
+    [queue]
+    min_backoff = "2h"
+    max_backoff = "1h"
+
+    [delivery]
+    ip_versions = ["ipv4", "ipv4"]
+    """
+
+    assert {:error, errors} = Config.parse(toml)
+
+    assert Enum.map(errors, &Exception.message/1) == [
+             "queue.max_backoff: must not be less than queue.min_backoff",
+             "delivery.ip_versions: must not repeat a version"
+           ]
+
+    assert {:error, [error]} = Config.parse("[delivery]\nip_versions = []")
+    assert Exception.message(error) == "delivery.ip_versions: must not be empty"
   end
 
   test "names array elements in errors" do

@@ -138,6 +138,14 @@ defmodule Sovite.Core.SMTPHandlerTest do
              queued(mta, id)
   end
 
+  test "always accepts abuse at local domains", context do
+    mta = start_mta(context, ~s([domains]\nlocal = ["example.com"]\nlocal_recipients = []))
+
+    assert {250, _} = rcpt(mta, "Abuse@example.com")
+    assert {501, _} = rcpt(mta, "Abuse")
+    assert {554, _} = rcpt(mta, "abuse@remote.test")
+  end
+
   test "queues the message durably with a Received header", context do
     mta = start_mta(context)
     assert {250, _} = rcpt(mta, "user@mx.example.com")

@@ -20,13 +20,15 @@ defmodule Sovite.Core.Supervisor do
     * `:config_path` - path to the config file. Ignored when `:config` is
       given. Defaults to `Sovite.Core.Config.default_path/0`.
     * `:name` - the supervisor's registered name. Defaults to this module.
+    * `:queue_manager` - extra `Sovite.Core.QueueManager` options, such
+      as `:name` (defaults to `Sovite.Core.QueueManager`) or `:resolver`.
   """
 
   use Supervisor
 
   require Logger
 
-  alias Sovite.Core.{Config, Logging, SMTPHandler, Telemetry}
+  alias Sovite.Core.{Config, Logging, QueueManager, SMTPHandler, Telemetry}
   alias Sovite.Queue.Spool
 
   @spec start_link(keyword()) ::
@@ -36,7 +38,11 @@ defmodule Sovite.Core.Supervisor do
     with {:ok, config} <- fetch_config(opts),
          :ok <- init_queue(config.queue.directory),
          {:ok, pid} <-
-           Supervisor.start_link(__MODULE__, config, name: Keyword.get(opts, :name, __MODULE__)) do
+           Supervisor.start_link(
+             __MODULE__,
+             {config, Keyword.get(opts, :queue_manager, [])},
+             name: Keyword.get(opts, :name, __MODULE__)
+           ) do
       # Logged here, not in init/1, so it reaches the log file.
       Logger.info("sovite started on #{config.server.hostname}")
       {:ok, pid}
@@ -44,20 +50,24 @@ defmodule Sovite.Core.Supervisor do
   end
 
   @impl true
-  def init(%Config{} = config) do
+  def init({%Config{} = config, manager_opts}) do
     Config.put(config)
     Logging.configure(config.log)
     Telemetry.attach_logger()
 
-    # The log file handler comes first so it stops last, after the
-    # listeners have closed their sessions. The queue manager and delivery
-    # agents are added here as the roadmap phases land.
-    children = Logging.child_specs(config.log) ++ Enum.map(config.listener, &listener(&1, config))
+    manager_opts = Keyword.put_new(manager_opts, :name, QueueManager)
+
+    # Children stop in reverse order: listeners first, so no new mail
+    # arrives, then the queue manager, and the log file handler last.
+    children =
+      Logging.child_specs(config.log) ++
+        [{QueueManager, QueueManager.opts(config) ++ manager_opts}] ++
+        Enum.map(config.listener, &listener(&1, config, manager_opts[:name]))
 
     Supervisor.init(children, strategy: :one_for_one)
   end
 
-  defp listener(%{address: address, port: port}, config) do
+  defp listener(%{address: address, port: port}, config, queue_manager) do
     smtp = config.smtp
 
     {Sovite.SMTP.Server,
@@ -67,7 +77,7 @@ defmodule Sovite.Core.Supervisor do
      max_connections: smtp.max_connections,
      max_connections_per_ip: smtp.max_connections_per_ip,
      hostname: config.server.hostname,
-     handler: {SMTPHandler, SMTPHandler.opts(config)},
+     handler: {SMTPHandler, SMTPHandler.opts(config, queue_manager)},
      max_message_size: smtp.max_message_size,
      max_recipients: smtp.max_recipients,
      max_errors: smtp.max_errors,

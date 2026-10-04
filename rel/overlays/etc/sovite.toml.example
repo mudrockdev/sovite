@@ -12,6 +12,13 @@
 [queue]
 # Spool directory. Must be owned by the sovite user and not readable by others.
 directory = "/var/spool/sovite"
+# Bounce what is still undelivered after this long.
+max_lifetime = "5d"
+# Wait between delivery attempts: doubles from min_backoff up to max_backoff.
+min_backoff = "5m"
+max_backoff = "1h"
+# Tell the sender once when a message is still undelivered after this long.
+# delay_warning = "4h"
 
 # Where to accept SMTP. Repeat the table for more addresses; add "::" for IPv6.
 [[listener]]
@@ -44,6 +51,26 @@ trusted_networks = []
 relay = []
 # The only addresses that exist at local domains. Unset: accept any address.
 # local_recipients = ["postmaster@example.com", "alice@example.com"]
+
+[delivery]
+# Send all outbound mail through this server. "[host]:port" skips the MX
+# lookup. Unset: deliver to each recipient domain's MX hosts.
+# relayhost = "[smtp.example.net]:587"
+max_deliveries = 100
+destination_concurrency = 20
+# Wait between deliveries to the same destination.
+# destination_rate_delay = "1s"
+# Recipients per SMTP transaction.
+max_recipients = 50
+# Server addresses tried per delivery attempt.
+max_addresses = 5
+# IP versions to deliver over, preferred first.
+ip_versions = ["ipv6", "ipv4"]
+connect_timeout = "30s"
+
+[bounce]
+# Where to report notifications that could not be delivered. Unset: log only.
+# double_bounce_recipient = "postmaster@example.com"
 
 [log]
 # One of: debug, info, notice, warning, error

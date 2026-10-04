@@ -15,6 +15,7 @@ defmodule Sovite.Core.Config.Schema do
   #   :domain | :mailbox       - validated and lower-cased
   #   :ip_address              - an :inet tuple
   #   :cidr                    - {ip, prefix_length}, from "192.0.2.0/24" or a single address
+  #   :relayhost               - %{host, port, mx}, from "host", "host:port", "[host]", "[host]:port"
   #   {:list, type}            - an array; errors name the index, as in "key[0]"
   #   {:integer, min, max}
   #   {:enum, [atom]}          - the input string must equal one of the atom names
@@ -25,6 +26,7 @@ defmodule Sovite.Core.Config.Schema do
   #   required: true
 
   alias Sovite.Core.Config.Error
+  alias Sovite.Message.Received
 
   @type field :: {atom(), term(), keyword()}
 
@@ -232,6 +234,22 @@ defmodule Sovite.Core.Config.Schema do
 
   defp cast(:cidr, value), do: type_error("a network", value)
 
+  # Postfix syntax: "[host]" skips the MX lookup. An IP address must be in
+  # brackets and is kept as an address literal ("[192.0.2.1]").
+  defp cast(:relayhost, value) when is_binary(value) do
+    with {:ok, host, port, mx} <- split_relayhost(value),
+         {:ok, port} <- parse_port(port),
+         {:ok, host} <- relay_target(host, mx) do
+      {:ok, %{host: host, port: port, mx: mx}}
+    else
+      _ ->
+        {:error,
+         "#{inspect(value)} is not a valid relay host, expected \"host\", \"[host]\", or \"[host]:port\""}
+    end
+  end
+
+  defp cast(:relayhost, value), do: type_error("a relay host", value)
+
   defp cast(:duration, value) when is_integer(value) and value > 0, do: {:ok, value * 1000}
 
   defp cast(:duration, value) when is_binary(value) do
@@ -257,6 +275,49 @@ defmodule Sovite.Core.Config.Schema do
   end
 
   defp cast(:byte_size, value), do: byte_size_error(value)
+
+  defp split_relayhost("[" <> rest) do
+    case :binary.split(rest, "]") do
+      [host, ""] -> {:ok, host, nil, false}
+      [host, ":" <> port] -> {:ok, host, port, false}
+      _ -> :error
+    end
+  end
+
+  defp split_relayhost(value) do
+    case :binary.split(value, ":") do
+      [host] -> {:ok, host, nil, true}
+      [host, port] -> {:ok, host, port, true}
+      _ -> :error
+    end
+  end
+
+  defp parse_port(nil), do: {:ok, 25}
+
+  defp parse_port(port) do
+    case Integer.parse(port) do
+      {port, ""} when port in 1..65_535 -> {:ok, port}
+      _ -> :error
+    end
+  end
+
+  defp relay_target(host, true) do
+    if Sovite.Validators.hostname?(host), do: {:ok, String.downcase(host, :ascii)}, else: :error
+  end
+
+  defp relay_target(host, false) do
+    host = String.replace_prefix(host, "IPv6:", "")
+
+    case Sovite.Net.parse_ip(host) do
+      {:ok, ip} ->
+        {:ok, Received.address_literal(ip)}
+
+      {:error, _} ->
+        if Sovite.Validators.hostname?(host),
+          do: {:ok, String.downcase(host, :ascii)},
+          else: :error
+    end
+  end
 
   defp unit_size(""), do: 1
   defp unit_size("K"), do: 1024

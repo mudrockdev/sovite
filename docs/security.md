@@ -59,7 +59,9 @@ These apply to every component and are checked in code review.
 | Open relay | Explicit relay permission, open-relay test in the definition of done | 1 |
 | Resource exhaustion | Connection limits (global and per IP), timeouts, bounded parsing | 1 |
 | SMTP smuggling | Strict end-of-data handling | 1 |
-| Lost mail on crash | `fsync` before `250`, crash recovery | 1–2 |
+| Lost mail on crash | `fsync` before `250`, delivery results `fsync`ed before they count, crash recovery | 1–2 |
+| Hostile remote servers | Bounded reply parsing (line length and count), timeouts on every wait, remote text sanitized before it goes into notifications or logs | 2 |
+| Mail loops | Notifications sent from `<>` and never answered; double-bounce reports never reported again; MX hosts at or below this server's preference skipped; a server greeting with our own name treated as a loop | 2 |
 | Credential theft in transit | AUTH only after TLS by default | 3 |
 | Brute-force AUTH | Failure rate limits and temporary bans | 3 |
 | Sender spoofing by authenticated users | Sender login maps | 3 |

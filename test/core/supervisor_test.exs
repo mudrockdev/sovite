@@ -7,7 +7,7 @@ defmodule Sovite.Core.SupervisorTest do
   alias Sovite.Core.{Config, Telemetry}
   alias Sovite.Core.Logging.FileHandler
   alias Sovite.Queue.Spool
-  alias Sovite.Test.SMTPClient
+  alias Sovite.Test.{FakeDNS, FakeMTA, SMTPClient}
 
   @moduletag :tmp_dir
   @moduletag :capture_log
@@ -101,6 +101,13 @@ defmodule Sovite.Core.SupervisorTest do
         """)
       )
 
+    handler_id = "supervisor-test-#{System.unique_integer([:positive])}"
+    event = [:sovite, :queue, :message, :deferred]
+    test = self()
+
+    :telemetry.attach(handler_id, event, &__MODULE__.forward_event/4, test)
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
     supervisor = start_supervised!({Sovite.Core.Supervisor, config: config, name: nil})
     {:ok, client} = SMTPClient.connect(listener_port(supervisor))
 
@@ -112,17 +119,65 @@ defmodule Sovite.Core.SupervisorTest do
                "Subject: hi\r\n\r\nhello\r\n"
              )
 
-    path = Path.join([dir, "queue", "incoming", queue_id])
-    assert {:ok, envelope, offset} = Spool.read(path)
-    assert envelope.recipients == ["b@example.com"]
+    # The queue manager picks the message up at once. Local delivery comes
+    # in a later phase, so mail for a local domain is deferred.
+    assert_receive {:deferred, %{queue_id: ^queue_id}}, 5_000
+    path = Path.join([dir, "queue", "deferred", queue_id])
+    assert {:ok, loaded} = Spool.load(path)
+    assert loaded.envelope.recipients == ["b@example.com"]
 
-    message = path |> File.read!() |> binary_part(offset, File.stat!(path).size - offset)
+    assert [{:recipient, "b@example.com", :deferred, %{status: "4.3.2"}}, {:retry, 1, _}] =
+             loaded.records
+
+    message = path |> File.read!() |> binary_part(loaded.message_offset, loaded.message_size)
 
     assert message =~
              ~r/\AReceived: from client.test \(\[127.0.0.1\]\)\r\n\tby mx.example.org with ESMTP id #{queue_id}\r\n/
 
     assert String.ends_with?(message, "\r\nSubject: hi\r\n\r\nhello\r\n")
   end
+
+  test "relays mail from trusted clients to remote servers", %{tmp_dir: dir} do
+    {:ok, mta} = FakeMTA.start_link()
+
+    {:ok, config} =
+      Config.parse(
+        toml(dir, ~s([smtp]\ntrusted_networks = ["127.0.0.1"]), """
+        [[listener]]
+        address = "127.0.0.1"
+        port = 0
+        """)
+      )
+
+    resolver =
+      FakeDNS.resolver(%{
+        {"example.net", :mx} => [{10, "mx.example.net"}],
+        {"mx.example.net", :a} => [{127, 0, 0, 1}]
+      })
+
+    supervisor =
+      start_supervised!(
+        {Sovite.Core.Supervisor,
+         config: config, name: nil, queue_manager: [resolver: resolver, port: FakeMTA.port(mta)]}
+      )
+
+    {:ok, client} = SMTPClient.connect(listener_port(supervisor))
+
+    assert {:ok, {250, ["2.0.0 Ok: queued as " <> queue_id]}} =
+             SMTPClient.send_message(
+               client,
+               "a@example.org",
+               ["b@example.net"],
+               "Subject: hi\r\n\r\nhello\r\n"
+             )
+
+    assert_receive {:fake_mta, ^mta, {:message, message}}, 5_000
+    assert message.rcpt_to == ["b@example.net"]
+    assert message.data =~ ~r/\AReceived: from client.test .* id #{queue_id}\r\n/s
+    assert String.ends_with?(message.data, "\r\nSubject: hi\r\n\r\nhello\r\n")
+  end
+
+  def forward_event(_event, _measurements, metadata, pid), do: send(pid, {:deferred, metadata})
 
   test "refuses to start without a usable queue directory", %{tmp_dir: dir} do
     File.write!(Path.join(dir, "queue"), "a file, not a directory")

@@ -7,5 +7,7 @@ defmodule Sovite.SMTP do
     * `Sovite.SMTP.DataDecoder` - streaming `DATA` decoder, smuggling-safe
     * `Sovite.SMTP.Server` - an SMTP server with a pluggable
       `Sovite.SMTP.Server.Handler`
+    * `Sovite.SMTP.Client` - an SMTP client for relaying messages
+    * `Sovite.SMTP.DataEncoder` - streaming dot-stuffing for `DATA`
   """
 end

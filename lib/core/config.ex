@@ -16,7 +16,15 @@ defmodule Sovite.Core.Config do
 
   @schema [
     {:server, {:section, [{:hostname, :hostname, default: &__MODULE__.system_hostname/0}]}, []},
-    {:queue, {:section, [{:directory, :absolute_path, default: "/var/spool/sovite"}]}, []},
+    {:queue,
+     {:section,
+      [
+        {:directory, :absolute_path, default: "/var/spool/sovite"},
+        {:max_lifetime, :duration, default: "5d"},
+        {:min_backoff, :duration, default: "5m"},
+        {:max_backoff, :duration, default: "1h"},
+        {:delay_warning, :duration, []}
+      ]}, []},
     {:listener,
      {:list,
       {:section,
@@ -45,6 +53,19 @@ defmodule Sovite.Core.Config do
         {:relay, {:list, :domain}, default: []},
         {:local_recipients, {:list, :mailbox}, []}
       ]}, []},
+    {:delivery,
+     {:section,
+      [
+        {:relayhost, :relayhost, []},
+        {:max_deliveries, {:integer, 1, 100_000}, default: 100},
+        {:destination_concurrency, {:integer, 1, 100_000}, default: 20},
+        {:destination_rate_delay, :duration, []},
+        {:max_recipients, {:integer, 1, 100_000}, default: 50},
+        {:max_addresses, {:integer, 1, 100}, default: 5},
+        {:ip_versions, {:list, {:enum, [:ipv6, :ipv4]}}, default: ["ipv6", "ipv4"]},
+        {:connect_timeout, :duration, default: "30s"}
+      ]}, []},
+    {:bounce, {:section, [{:double_bounce_recipient, :mailbox, []}]}, []},
     {:log,
      {:section,
       [
@@ -60,11 +81,17 @@ defmodule Sovite.Core.Config do
       ]}, []}
   ]
 
-  defstruct [:server, :queue, :listener, :smtp, :domains, :log]
+  defstruct [:server, :queue, :listener, :smtp, :domains, :delivery, :bounce, :log]
 
   @type t :: %__MODULE__{
           server: %{hostname: String.t()},
-          queue: %{directory: Path.t()},
+          queue: %{
+            directory: Path.t(),
+            max_lifetime: pos_integer(),
+            min_backoff: pos_integer(),
+            max_backoff: pos_integer(),
+            delay_warning: pos_integer() | nil
+          },
           listener: [%{address: :inet.ip_address(), port: :inet.port_number()}],
           smtp: %{
             max_message_size: pos_integer(),
@@ -83,6 +110,17 @@ defmodule Sovite.Core.Config do
             relay: [String.t()],
             local_recipients: [String.t()] | nil
           },
+          delivery: %{
+            relayhost: %{host: String.t(), port: :inet.port_number(), mx: boolean()} | nil,
+            max_deliveries: pos_integer(),
+            destination_concurrency: pos_integer(),
+            destination_rate_delay: pos_integer() | nil,
+            max_recipients: pos_integer(),
+            max_addresses: pos_integer(),
+            ip_versions: [:ipv6 | :ipv4, ...],
+            connect_timeout: pos_integer()
+          },
+          bounce: %{double_bounce_recipient: String.t() | nil},
           log: Sovite.Core.Logging.config()
         }
 
@@ -126,7 +164,8 @@ defmodule Sovite.Core.Config do
   """
   @spec validate(map()) :: {:ok, t()} | {:error, [Error.t()]}
   def validate(map) do
-    with {:ok, values} <- Schema.validate(map, @schema) do
+    with {:ok, values} <- Schema.validate(map, @schema),
+         :ok <- check(values) do
       # Like Postfix's mydestination, the server is its own final
       # destination unless told otherwise.
       values =
@@ -137,6 +176,25 @@ defmodule Sovite.Core.Config do
 
       {:ok, struct!(__MODULE__, values)}
     end
+  end
+
+  # Rules that involve more than one key.
+  defp check(values) do
+    errors =
+      [
+        values.queue.min_backoff > values.queue.max_backoff &&
+          %Error{
+            path: ["queue", "max_backoff"],
+            reason: "must not be less than queue.min_backoff"
+          },
+        values.delivery.ip_versions == [] &&
+          %Error{path: ["delivery", "ip_versions"], reason: "must not be empty"},
+        Enum.uniq(values.delivery.ip_versions) != values.delivery.ip_versions &&
+          %Error{path: ["delivery", "ip_versions"], reason: "must not repeat a version"}
+      ]
+      |> Enum.filter(& &1)
+
+    if errors == [], do: :ok, else: {:error, errors}
   end
 
   @doc "Stores `config` as the running configuration."

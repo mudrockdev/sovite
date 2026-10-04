@@ -5,9 +5,10 @@ defmodule Sovite.Core.SMTPHandler do
 
   Recipients are checked at `RCPT` time:
 
-  1. `<Postmaster>` and `postmaster@` any local domain are always
-     accepted (RFC 5321 §4.5.1). A bare `<Postmaster>` is queued as
-     `postmaster@<server.hostname>`.
+  1. `<Postmaster>`, and `postmaster@` and `abuse@` any local domain, are
+     always accepted (RFC 5321 §4.5.1, RFC 2142), even when
+     `domains.local_recipients` does not list them. A bare `<Postmaster>`
+     is queued as `postmaster@<server.hostname>`.
   2. Local domains (`domains.local`): accepted if `domains.local_recipients`
      is unset or lists the address, otherwise `550 5.1.1`.
   3. Relay domains (`domains.relay`): accepted.
@@ -20,23 +21,28 @@ defmodule Sovite.Core.SMTPHandler do
   the parsed mailbox counts.
 
   The message is accepted with `250` only after `Sovite.Queue.Spool`
-  has made it durable. A `Received:` header is added at the top.
+  has made it durable. A `Received:` header is added at the top. The
+  queue manager given as `:queue_manager` is then told about it.
   """
 
   @behaviour Sovite.SMTP.Server.Handler
 
   require Logger
 
-  alias Sovite.Core.Logging
+  alias Sovite.Core.{Logging, QueueManager}
   alias Sovite.Message.Received
   alias Sovite.Net
   alias Sovite.Queue.{Envelope, ID, Spool}
   alias Sovite.SMTP.Reply
 
-  @doc "Handler options from the running configuration."
-  @spec opts(Sovite.Core.Config.t()) :: map()
-  def opts(config) do
+  @doc """
+  Handler options from the running configuration. `queue_manager` is the
+  `Sovite.Core.QueueManager` to notify about new messages, if any.
+  """
+  @spec opts(Sovite.Core.Config.t(), GenServer.server() | nil) :: map()
+  def opts(config, queue_manager \\ nil) do
     %{
+      queue_manager: queue_manager,
       hostname: config.server.hostname,
       queue_directory: config.queue.directory,
       local_domains: MapSet.new(config.domains.local),
@@ -150,6 +156,7 @@ defmodule Sovite.Core.SMTPHandler do
       {:ok, _path, _size} ->
         state = %{state | writer: nil}
         Logger.metadata(queue_id: nil)
+        if state.queue_manager, do: QueueManager.notify(state.queue_manager, state.queue_id)
         {:reply, Reply.new(250, "2.0.0", "Ok: queued as #{state.queue_id}"), state}
 
       {:error, reason} ->
@@ -202,7 +209,7 @@ defmodule Sovite.Core.SMTPHandler do
         local = MapSet.member?(state.local_domains, domain)
 
         cond do
-          local and String.downcase(local_part, :ascii) == "postmaster" -> :postmaster
+          local and String.downcase(local_part, :ascii) in ["postmaster", "abuse"] -> :postmaster
           local -> {:local, String.downcase(recipient, :ascii)}
           MapSet.member?(state.relay_domains, domain) -> :relay
           true -> :remote

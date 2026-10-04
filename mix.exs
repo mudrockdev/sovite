@@ -101,6 +101,7 @@ defmodule Sovite.MixProject do
         Queue: [~r/^Sovite\.Queue/],
         Listener: [~r/^Sovite\.Listener/],
         SMTP: [~r/^Sovite\.SMTP/],
+        DSN: [~r/^Sovite\.DSN/],
         Core: [~r/^Sovite\.Core/, Sovite]
       ]
     ]

@@ -5,8 +5,10 @@ defmodule Sovite.Test.FakeMTA do
   It listens on a random local port and accepts any number of
   connections. Each accepted message is sent to the owner process as
   `{:fake_mta, pid, {:message, message}}`, where `message` is a map with
-  `:helo`, `:mail_from`, `:rcpt_to` (accepted recipients only), and
-  `:data` (dot-unstuffed, without the final `.`).
+  `:helo`, `:mail_from`, `:mail_args` (the whole `MAIL` argument, with
+  parameters), `:rcpt_to` (accepted recipients only), and `:data`
+  (dot-unstuffed, without the final `.`). Each new connection is reported
+  as `{:fake_mta, pid, :connected}`.
 
       {:ok, mta} = FakeMTA.start_link(responses: %{rcpt: &reject_unknown/1})
       port = FakeMTA.port(mta)
@@ -95,6 +97,8 @@ defmodule Sovite.Test.FakeMTA do
       :go -> :ok
     end
 
+    send(config.owner, {:fake_mta, config.server, :connected})
+
     greeting = respond(config, :greeting, nil, "220 #{config.hostname} ESMTP fake")
 
     if reply(socket, greeting) == :ok do
@@ -102,7 +106,7 @@ defmodule Sovite.Test.FakeMTA do
     end
   end
 
-  defp new_transaction(helo), do: %{helo: helo, mail_from: nil, rcpt_to: []}
+  defp new_transaction(helo), do: %{helo: helo, mail_from: nil, mail_args: nil, rcpt_to: []}
 
   defp session(socket, config, txn) do
     case :gen_tcp.recv(socket, 0, @recv_timeout) do
@@ -136,7 +140,8 @@ defmodule Sovite.Test.FakeMTA do
   defp handle_command("MAIL", arg, socket, config, txn) do
     from = extract_path(arg, "FROM:")
     reply = respond(config, :mail, from, "250 2.1.0 OK")
-    send_reply(socket, reply, if(positive?(reply), do: %{txn | mail_from: from}, else: txn))
+    txn = if positive?(reply), do: %{txn | mail_from: from, mail_args: arg}, else: txn
+    send_reply(socket, reply, txn)
   end
 
   defp handle_command("RCPT", arg, socket, config, txn) do
@@ -151,7 +156,12 @@ defmodule Sovite.Test.FakeMTA do
   end
 
   defp handle_command("DATA", _arg, socket, config, txn) do
-    reply = respond(config, :data, nil, "354 End data with <CR><LF>.<CR><LF>")
+    default =
+      if txn.rcpt_to == [],
+        do: "554 5.5.1 No valid recipients",
+        else: "354 End data with <CR><LF>.<CR><LF>"
+
+    reply = respond(config, :data, nil, default)
 
     with {:continue, txn} <- send_reply(socket, reply, txn) do
       if String.starts_with?(reply, "354"),
