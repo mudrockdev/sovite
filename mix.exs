@@ -23,7 +23,7 @@ defmodule Sovite.MixProject do
   def application do
     [
       mod: {Sovite, []},
-      extra_applications: [:logger, :crypto, :public_key, :ssl]
+      extra_applications: [:logger, :crypto, :public_key, :ssl, :inets, :eldap]
     ]
   end
 
@@ -46,6 +46,10 @@ defmodule Sovite.MixProject do
     [
       {:telemetry, "~> 1.4"},
       {:toml, "~> 0.7.0"},
+      {:ecto_sql, "~> 3.14"},
+      {:ecto_sqlite3, "~> 0.25.0"},
+      {:postgrex, "~> 0.22.4", optional: true},
+      {:myxql, "~> 0.9.0", optional: true},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
