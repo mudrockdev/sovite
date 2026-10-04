@@ -1,0 +1,96 @@
+defmodule Sovite.Core.Config do
+  @moduledoc """
+  Loads, validates, and stores the Sovite configuration file.
+
+  The file is TOML. Every key is checked against a schema: unknown keys,
+  wrong types, and invalid values are all reported together, each with the
+  path of the bad key. See `docs/configuration.md` for the reference.
+
+  The running configuration is kept in `:persistent_term`. Read it with
+  `get/0`.
+  """
+
+  alias Sovite.Core.Config.{Error, Schema}
+
+  @default_path "/etc/sovite/sovite.toml"
+
+  @schema [
+    {:server, {:section, [{:hostname, :hostname, default: &__MODULE__.system_hostname/0}]}, []},
+    {:queue, {:section, [{:directory, :absolute_path, default: "/var/spool/sovite"}]}, []},
+    {:log,
+     {:section,
+      [
+        {:level, {:enum, [:debug, :info, :notice, :warning, :error]}, default: :info},
+        {:format, {:enum, [:text, :json]}, default: :text}
+      ]}, []}
+  ]
+
+  defstruct [:server, :queue, :log]
+
+  @type t :: %__MODULE__{
+          server: %{hostname: String.t()},
+          queue: %{directory: Path.t()},
+          log: %{
+            level: :debug | :info | :notice | :warning | :error,
+            format: :text | :json
+          }
+        }
+
+  @doc """
+  Returns the config file path: `$SOVITE_CONFIG` if set, otherwise
+  `#{@default_path}`.
+  """
+  @spec default_path() :: Path.t()
+  def default_path, do: System.get_env("SOVITE_CONFIG") || @default_path
+
+  @doc "Reads, parses, and validates the config file at `path`."
+  @spec load(Path.t()) :: {:ok, t()} | {:error, [Error.t()]}
+  def load(path) do
+    case File.read(path) do
+      {:ok, contents} ->
+        parse(contents)
+
+      {:error, reason} ->
+        {:error, [%Error{reason: "cannot read #{path}: #{:file.format_error(reason)}"}]}
+    end
+  end
+
+  @doc "Parses and validates TOML config `contents`."
+  @spec parse(String.t()) :: {:ok, t()} | {:error, [Error.t()]}
+  def parse(contents) do
+    case Toml.decode(contents) do
+      {:ok, map} ->
+        validate(map)
+
+      {:error, {:invalid_toml, reason}} ->
+        {:error, [%Error{reason: "invalid TOML: " <> String.trim(reason)}]}
+
+      {:error, reason} ->
+        {:error, [%Error{reason: "invalid TOML: #{inspect(reason)}"}]}
+    end
+  end
+
+  @doc """
+  Validates a decoded config map (string keys, as produced by a TOML
+  decoder), fills in defaults, and returns the config struct.
+  """
+  @spec validate(map()) :: {:ok, t()} | {:error, [Error.t()]}
+  def validate(map) do
+    with {:ok, values} <- Schema.validate(map, @schema) do
+      {:ok, struct!(__MODULE__, values)}
+    end
+  end
+
+  @doc "Stores `config` as the running configuration."
+  @spec put(t()) :: :ok
+  def put(%__MODULE__{} = config), do: :persistent_term.put(__MODULE__, config)
+
+  @doc "Returns the running configuration. Raises if none has been stored."
+  @spec get() :: t()
+  def get, do: :persistent_term.get(__MODULE__)
+
+  @doc false
+  # Default for server.hostname. Not always an FQDN, so production configs
+  # should set the hostname explicitly.
+  def system_hostname, do: :net_adm.localhost() |> List.to_string() |> String.downcase()
+end

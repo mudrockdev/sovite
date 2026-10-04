@@ -1,0 +1,108 @@
+defmodule Sovite.Core.Telemetry do
+  @moduledoc """
+  The catalog of `:telemetry` events emitted by Sovite, and the default
+  handler that turns them into log lines.
+
+  Components emit events named `[:sovite, component, ...]`. Durations are
+  in `:native` time units, as with `:telemetry.span/3`.
+
+  | Event | Measurements | Metadata |
+  |---|---|---|
+  | `[:sovite, :listener, :connection, :start]` | `system_time` | `listener`, `remote_ip`, `remote_port` |
+  | `[:sovite, :listener, :connection, :stop]` | `duration` | `listener`, `remote_ip`, `remote_port` |
+  | `[:sovite, :listener, :connection, :rejected]` | | `listener`, `remote_ip`, `reason` |
+  | `[:sovite, :smtp, :server, :session, :start]` | `system_time` | `session_id`, `remote_ip` |
+  | `[:sovite, :smtp, :server, :session, :stop]` | `duration` | `session_id`, `remote_ip` |
+  | `[:sovite, :smtp, :server, :command, :stop]` | `duration` | `session_id`, `command`, `reply_code` |
+  | `[:sovite, :queue, :message, :enqueued]` | `size`, `recipients` | `queue_id`, `session_id`, `sender` |
+  | `[:sovite, :queue, :message, :removed]` | | `queue_id`, `reason` |
+  | `[:sovite, :smtp, :client, :delivery, :start]` | `system_time` | `queue_id`, `relay` |
+  | `[:sovite, :smtp, :client, :delivery, :stop]` | `duration` | `queue_id`, `relay`, `recipient`, `status`, `reply` |
+  | `[:sovite, :smtp, :client, :delivery, :exception]` | `duration` | `queue_id`, `relay`, `kind`, `reason` |
+
+  Message lifecycle events (`:queue` and `:delivery` stop) are logged at
+  `:info`. All other events are logged at `:debug`.
+  """
+
+  require Logger
+
+  @handler_id {__MODULE__, :logger}
+
+  @events [
+    [:sovite, :listener, :connection, :start],
+    [:sovite, :listener, :connection, :stop],
+    [:sovite, :listener, :connection, :rejected],
+    [:sovite, :smtp, :server, :session, :start],
+    [:sovite, :smtp, :server, :session, :stop],
+    [:sovite, :smtp, :server, :command, :stop],
+    [:sovite, :queue, :message, :enqueued],
+    [:sovite, :queue, :message, :removed],
+    [:sovite, :smtp, :client, :delivery, :start],
+    [:sovite, :smtp, :client, :delivery, :stop],
+    [:sovite, :smtp, :client, :delivery, :exception]
+  ]
+
+  @info_events [
+    [:sovite, :queue, :message, :enqueued],
+    [:sovite, :queue, :message, :removed],
+    [:sovite, :smtp, :client, :delivery, :stop],
+    [:sovite, :smtp, :client, :delivery, :exception]
+  ]
+
+  @doc "Returns every event in the catalog."
+  @spec events() :: [:telemetry.event_name()]
+  def events, do: @events
+
+  @doc "Attaches the logging handler to every cataloged event. Safe to call repeatedly."
+  @spec attach_logger() :: :ok
+  def attach_logger do
+    _ = :telemetry.detach(@handler_id)
+    :ok = :telemetry.attach_many(@handler_id, @events, &__MODULE__.handle_event/4, nil)
+  end
+
+  @doc "Detaches the logging handler."
+  @spec detach_logger() :: :ok
+  def detach_logger do
+    _ = :telemetry.detach(@handler_id)
+    :ok
+  end
+
+  @doc false
+  def handle_event(event, measurements, metadata, _config) do
+    level = if event in @info_events, do: :info, else: :debug
+    name = event |> tl() |> Enum.join(".")
+
+    Logger.log(level, fn -> format(name, measurements, metadata) end,
+      queue_id: metadata[:queue_id],
+      session_id: metadata[:session_id],
+      remote_ip: metadata[:remote_ip],
+      event: name
+    )
+  end
+
+  # Postfix-style "key=value, key=value" so existing log tooling stays usable.
+  defp format(name, measurements, metadata) do
+    pairs =
+      measurements
+      |> Map.update(:duration, nil, &System.convert_time_unit(&1, :native, :millisecond))
+      |> Map.reject(fn {key, value} -> key == :system_time or is_nil(value) end)
+      |> Map.merge(
+        Map.drop(metadata, [:queue_id, :session_id, :remote_ip, :telemetry_span_context])
+      )
+      |> Enum.sort()
+      |> Enum.map_join(", ", fn {key, value} -> "#{key}=#{format_value(value)}" end)
+
+    if pairs == "", do: name, else: name <> ": " <> pairs
+  end
+
+  # Metadata often holds network input (EHLO names, addresses). Quote
+  # anything with control characters so it cannot forge log lines.
+  defp format_value(value) when is_binary(value) do
+    if String.valid?(value) and not String.match?(value, ~r/[\x00-\x1f\x7f]/),
+      do: value,
+      else: inspect(value)
+  end
+
+  defp format_value(value) when is_atom(value) or is_number(value), do: to_string(value)
+  defp format_value(value), do: inspect(value)
+end

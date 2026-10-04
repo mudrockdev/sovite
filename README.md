@@ -1,21 +1,43 @@
 # Sovite
 
-**TODO: Add description**
+A modern, secure Mail Transfer Agent written in Elixir/OTP, meant as an alternative to Postfix.
 
-## Installation
+> **Status:** early development. Phase 0 (foundations) is done; the SMTP receiver is next. See the [roadmap](ROADMAP.md).
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `sovite` to your list of dependencies in `mix.exs`:
+Sovite is also a library: its components (address validators, DNS, and later SMTP, DKIM, SPF, ...) can be used from any Elixir project without running the MTA. See [STRUCTURE.md](STRUCTURE.md).
 
-```elixir
-def deps do
-  [
-    {:sovite, "~> 0.1.0"}
-  ]
-end
+## Development
+
+Requires Erlang/OTP 29 and Elixir 1.20 (see `mise.toml`).
+
+```sh
+mix deps.get
+mix test            # tests, including property tests
+mix lint            # format check, warnings as errors, credo, xref cycles
+mix dialyzer
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/sovite>.
+Run the MTA locally:
 
+```sh
+cp rel/overlays/etc/sovite.toml.example sovite.toml   # edit as needed
+SOVITE_START_MTA=1 SOVITE_CONFIG=./sovite.toml iex -S mix
+```
+
+Build a release:
+
+```sh
+MIX_ENV=prod mix release
+_build/prod/rel/sovite/bin/sovitectl config check _build/prod/rel/sovite/etc/sovite.toml.example
+SOVITE_CONFIG=/etc/sovite/sovite.toml _build/prod/rel/sovite/bin/sovite start
+```
+
+## Documentation
+
+- [Configuration](docs/configuration.md)
+- [Logging and telemetry](docs/logging.md)
+- [Security model](docs/security.md) and [vulnerability reporting](SECURITY.md)
+
+## License
+
+AGPL-3.0. See [LICENSE](LICENSE).

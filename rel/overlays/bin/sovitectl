@@ -1,0 +1,6 @@
+#!/bin/sh
+# Sovite admin CLI. Runs Sovite.Core.CLI without starting the MTA.
+set -e
+SELF=$(readlink -f "$0")
+BIN_DIR=$(dirname "$SELF")
+exec "$BIN_DIR/sovite" eval "Sovite.Core.CLI.main(System.argv())" "$@"

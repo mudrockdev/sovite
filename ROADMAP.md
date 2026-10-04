@@ -46,14 +46,14 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 0 — Foundations
 
-- [ ] Project layout: OTP application, supervision tree design, release build (`mix release`)
-- [ ] Configuration system: file format, schema validation, defaults, `sovite config check`
-- [ ] Logging conventions: structured logs with a per-message queue ID
-- [ ] Telemetry events defined from day one (connection, command, queue, delivery)
-- [ ] Test harness: SMTP client test helpers, fake DNS resolver, fake remote MTAs
-- [ ] Property-based / fuzz testing setup for the parsers
-- [ ] CI: format, credo/dialyzer, tests, coverage
-- [ ] Security model doc: privileges, file ownership, threat model
+- [x] Project layout: OTP application, supervision tree design, release build (`mix release`)
+- [x] Configuration system: file format, schema validation, defaults, `sovite config check`
+- [x] Logging conventions: structured logs with a per-message queue ID
+- [x] Telemetry events defined from day one (connection, command, queue, delivery)
+- [x] Test harness: SMTP client test helpers, fake DNS resolver, fake remote MTAs
+- [x] Property-based / fuzz testing setup for the parsers
+- [x] CI: format, credo/dialyzer, tests, coverage
+- [x] Security model doc: privileges, file ownership, threat model
 
 **Done when:** the empty application builds as a release, loads and validates config, and has a working test harness.
 

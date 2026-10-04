@@ -6,20 +6,33 @@ defmodule Sovite.MixProject do
       app: :sovite,
       version: "0.1.0",
       elixir: "~> 1.20",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      aliases: aliases(),
+      releases: releases(),
+      dialyzer: dialyzer(),
+      test_coverage: [summary: [threshold: 85], ignore_modules: [~r/^Sovite\.Test\./]],
       description: "A modern, secure Mail Transfer Agent written in Elixir/OTP.",
       package: package(),
       source_url: "https://github.com/mudrockdev/sovite",
-      docs: [main: "readme", extras: ["README.md"]]
+      docs: docs()
     ]
   end
 
   def application do
     [
+      mod: {Sovite, []},
       extra_applications: [:logger]
     ]
   end
+
+  def cli do
+    [preferred_envs: [lint: :test]]
+  end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   defp package do
     [
@@ -30,6 +43,61 @@ defmodule Sovite.MixProject do
   end
 
   defp deps do
-    [{:ex_doc, "~> 0.34", only: :dev, runtime: false}]
+    [
+      {:telemetry, "~> 1.4"},
+      {:toml, "~> 0.7.0"},
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:stream_data, "~> 1.4", only: [:dev, :test]}
+    ]
+  end
+
+  defp aliases do
+    [
+      lint: [
+        "format --check-formatted",
+        "compile --warnings-as-errors --force",
+        "credo --strict",
+        "xref graph --format cycles --fail-above 0"
+      ]
+    ]
+  end
+
+  defp releases do
+    [
+      sovite: [
+        include_executables_for: [:unix],
+        applications: [sovite: :permanent]
+      ]
+    ]
+  end
+
+  defp dialyzer do
+    [
+      plt_local_path: "priv/plts",
+      plt_core_path: "priv/plts",
+      plt_add_apps: [:mix, :ex_unit]
+    ]
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      extras: [
+        "README.md",
+        "ROADMAP.md",
+        "STRUCTURE.md",
+        "docs/configuration.md",
+        "docs/logging.md",
+        "docs/security.md",
+        "SECURITY.md"
+      ],
+      groups_for_modules: [
+        Validators: [~r/^Sovite\.Validators/],
+        DNS: [~r/^Sovite\.DNS/],
+        Core: [~r/^Sovite\.Core/, Sovite]
+      ]
+    ]
   end
 end

@@ -1,0 +1,20 @@
+# Sovite configuration
+#
+# Copy to /etc/sovite/sovite.toml (or point $SOVITE_CONFIG at it) and check it
+# with `sovitectl config check`. Every setting is optional; the values below
+# are the defaults. See docs/configuration.md for the full reference.
+
+[server]
+# Fully qualified name used in the SMTP greeting, EHLO, and Received: headers.
+# Defaults to the system hostname, which is often not fully qualified.
+# hostname = "mail.example.com"
+
+[queue]
+# Spool directory. Must be owned by the sovite user and not readable by others.
+directory = "/var/spool/sovite"
+
+[log]
+# One of: debug, info, notice, warning, error
+level = "info"
+# "text" for classic log lines, "json" for one JSON object per line
+format = "text"
