@@ -42,6 +42,53 @@ defmodule Sovite.Core.Config.SchemaTest do
            ]
   end
 
+  test "parses byte sizes" do
+    schema = [{:size, :byte_size, []}]
+
+    for {input, bytes} <- [
+          {4096, 4096},
+          {"4096", 4096},
+          {"10k", 10 * 1024},
+          {"512M", 512 * 1024 * 1024},
+          {"512 MB", 512 * 1024 * 1024},
+          {"1G", 1024 * 1024 * 1024}
+        ] do
+      assert Schema.validate(%{"size" => input}, schema) == {:ok, %{size: bytes}}
+    end
+
+    for input <- ["0M", 0, -1, "1T", "M", "1.5G", 1.5] do
+      assert [~s(size: expected a size like "512M" or "1G", got ) <> _] =
+               %{"size" => input} |> Schema.validate(schema) |> messages()
+    end
+  end
+
+  test "checks file names, file name patterns, and strftime formats" do
+    schema = [
+      {:name, :file_name, []},
+      {:pattern, :file_name_pattern, []},
+      {:date, :strftime, []}
+    ]
+
+    assert Schema.validate(
+             %{"name" => "current.log", "pattern" => "a.{date}.{n}.log", "date" => "%Y-%m"},
+             schema
+           ) == {:ok, %{name: "current.log", pattern: "a.{date}.{n}.log", date: "%Y-%m"}}
+
+    assert %{"name" => "..", "pattern" => "x/{n}", "date" => "%Y/%m"}
+           |> Schema.validate(schema)
+           |> messages() == [
+             ~s(name: ".." is not a valid file name),
+             ~s(pattern: "x/{n}" is not a valid file name),
+             ~s(date: "%Y/%m" must not produce a "/")
+           ]
+
+    assert %{"pattern" => "{n}.{n}"} |> Schema.validate(schema) |> messages() ==
+             [~s(pattern: "{n}.{n}" must contain {n} exactly once)]
+
+    assert %{"pattern" => "{day}.{n}"} |> Schema.validate(schema) |> messages() ==
+             [~s(pattern: "{day}.{n}" has unknown placeholder {day}, expected {date} or {n})]
+  end
+
   test "rejects non-string values for string-like types" do
     schema = [{:host, :hostname, []}, {:mode, {:enum, [:a]}, []}]
 

@@ -5,6 +5,7 @@ defmodule Sovite.Core.SupervisorTest do
   import ExUnit.CaptureLog
 
   alias Sovite.Core.{Config, Telemetry}
+  alias Sovite.Core.Logging.FileHandler
 
   @moduletag :tmp_dir
   @moduletag :capture_log
@@ -34,6 +35,28 @@ defmodule Sovite.Core.SupervisorTest do
     assert Process.alive?(pid)
     assert Config.get().server.hostname == "mx.example.org"
     assert Logger.level() == :warning
+  end
+
+  test "writes logs to files when log.directory is set", %{tmp_dir: dir} do
+    logs = Path.join(dir, "logs")
+
+    {:ok, config} =
+      Config.parse("""
+      [server]
+      hostname = "mx.example.org"
+      [log]
+      directory = "#{logs}"
+      file_name = "mta.{n}.log"
+      symlink = "current.log"
+      """)
+
+    start_supervised!({Sovite.Core.Supervisor, config: config, name: nil})
+    :ok = FileHandler.sync(:sovite_file)
+
+    assert File.read!(Path.join(logs, "current.log")) =~ "[info] sovite started on mx.example.org"
+
+    stop_supervised!(Sovite.Core.Supervisor)
+    assert {:error, {:not_found, :sovite_file}} = :logger.get_handler_config(:sovite_file)
   end
 
   test "accepts an already validated config" do

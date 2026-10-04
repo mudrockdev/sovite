@@ -18,3 +18,20 @@ directory = "/var/spool/sovite"
 level = "info"
 # "text" for classic log lines, "json" for one JSON object per line
 format = "text"
+
+# Write logs to rotating files in this directory instead of standard output.
+# The settings below only apply when this is set.
+# directory = "/var/log/sovite"
+# {date} is the date formatted with date_format (strftime), {n} the file
+# number, which goes up with each rotation. {n} is required.
+file_name = "sovite.{date}.{n}.log"
+date_format = "%Y-%m-%d"
+# Start a new file before the current one grows past this size: bytes, or a
+# number with K, M, or G (1024-based), for example "512M" or "1G".
+max_size = "100M"
+# Also start a new file every: never, hourly, daily, weekly, monthly
+rotation = "daily"
+# Log files to keep, including the current one. 0 keeps all.
+max_files = 14
+# Symlink in the directory that always points to the current file.
+# symlink = "current.log"

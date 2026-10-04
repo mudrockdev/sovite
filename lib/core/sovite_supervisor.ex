@@ -30,8 +30,12 @@ defmodule Sovite.Core.Supervisor do
 
   @spec start_link(keyword()) :: Supervisor.on_start() | {:error, {:invalid_config, list()}}
   def start_link(opts \\ []) do
-    with {:ok, config} <- fetch_config(opts) do
-      Supervisor.start_link(__MODULE__, config, name: Keyword.get(opts, :name, __MODULE__))
+    with {:ok, config} <- fetch_config(opts),
+         {:ok, pid} <-
+           Supervisor.start_link(__MODULE__, config, name: Keyword.get(opts, :name, __MODULE__)) do
+      # Logged here, not in init/1, so it reaches the log file.
+      Logger.info("sovite started on #{config.server.hostname}")
+      {:ok, pid}
     end
   end
 
@@ -41,11 +45,10 @@ defmodule Sovite.Core.Supervisor do
     Logging.configure(config.log)
     Telemetry.attach_logger()
 
-    Logger.info("sovite starting on #{config.server.hostname}")
-
-    # Listeners, the queue manager, and delivery agents are added here as
-    # the roadmap phases land.
-    children = []
+    # The log file handler comes first so it stops last. Listeners, the
+    # queue manager, and delivery agents are added here as the roadmap
+    # phases land.
+    children = Logging.child_specs(config.log)
 
     Supervisor.init(children, strategy: :one_for_one)
   end

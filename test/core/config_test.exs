@@ -8,7 +8,19 @@ defmodule Sovite.Core.ConfigTest do
   test "fills in defaults for an empty file" do
     assert {:ok, config} = Config.parse("")
     assert config.queue.directory == "/var/spool/sovite"
-    assert config.log == %{level: :info, format: :text}
+
+    assert config.log == %{
+             level: :info,
+             format: :text,
+             directory: nil,
+             file_name: "sovite.{date}.{n}.log",
+             date_format: "%Y-%m-%d",
+             max_size: 100 * 1024 * 1024,
+             rotation: :daily,
+             max_files: 14,
+             symlink: nil
+           }
+
     assert is_binary(config.server.hostname)
   end
 
@@ -23,6 +35,13 @@ defmodule Sovite.Core.ConfigTest do
     [log]
     level = "debug"
     format = "json"
+    directory = "/var/log/sovite"
+    file_name = "mta-{date}-{n}.log"
+    date_format = "%Y%m%d"
+    max_size = "512M"
+    rotation = "hourly"
+    max_files = 0
+    symlink = "current.log"
     """
 
     assert {:ok, config} = Config.parse(toml)
@@ -30,7 +49,17 @@ defmodule Sovite.Core.ConfigTest do
     assert config == %Config{
              server: %{hostname: "mail.example.com"},
              queue: %{directory: "/srv/sovite/queue"},
-             log: %{level: :debug, format: :json}
+             log: %{
+               level: :debug,
+               format: :json,
+               directory: "/var/log/sovite",
+               file_name: "mta-{date}-{n}.log",
+               date_format: "%Y%m%d",
+               max_size: 512 * 1024 * 1024,
+               rotation: :hourly,
+               max_files: 0,
+               symlink: "current.log"
+             }
            }
   end
 
@@ -48,6 +77,12 @@ defmodule Sovite.Core.ConfigTest do
     [log]
     level = "loud"
     format = 1
+    directory = "logs"
+    file_name = "sovite.log"
+    date_format = "%J"
+    max_size = "1T"
+    rotation = "yearly"
+    symlink = "a/b"
     """
 
     assert {:error, errors} = Config.parse(toml)
@@ -58,7 +93,13 @@ defmodule Sovite.Core.ConfigTest do
              "queue.extra: unknown key",
              ~s(queue.directory: "relative/path" is not an absolute path),
              ~s(log.level: expected one of "debug", "info", "notice", "warning", "error", got "loud"),
-             ~s(log.format: expected one of "text", "json", got 1)
+             ~s(log.format: expected one of "text", "json", got 1),
+             ~s(log.directory: "logs" is not an absolute path),
+             ~s(log.file_name: "sovite.log" must contain {n} exactly once),
+             ~s(log.date_format: "%J" is not a valid strftime format),
+             ~s(log.max_size: expected a size like "512M" or "1G", got "1T"),
+             ~s(log.rotation: expected one of "never", "hourly", "daily", "weekly", "monthly", got "yearly"),
+             ~s(log.symlink: "a/b" is not a valid file name)
            ]
   end
 

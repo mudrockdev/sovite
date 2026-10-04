@@ -21,7 +21,14 @@ defmodule Sovite.Core.Config do
      {:section,
       [
         {:level, {:enum, [:debug, :info, :notice, :warning, :error]}, default: :info},
-        {:format, {:enum, [:text, :json]}, default: :text}
+        {:format, {:enum, [:text, :json]}, default: :text},
+        {:directory, :absolute_path, []},
+        {:file_name, :file_name_pattern, default: "sovite.{date}.{n}.log"},
+        {:date_format, :strftime, default: "%Y-%m-%d"},
+        {:max_size, :byte_size, default: "100M"},
+        {:rotation, {:enum, [:never, :hourly, :daily, :weekly, :monthly]}, default: :daily},
+        {:max_files, {:integer, 0, 100_000}, default: 14},
+        {:symlink, :file_name, []}
       ]}, []}
   ]
 
@@ -30,10 +37,7 @@ defmodule Sovite.Core.Config do
   @type t :: %__MODULE__{
           server: %{hostname: String.t()},
           queue: %{directory: Path.t()},
-          log: %{
-            level: :debug | :info | :notice | :warning | :error,
-            format: :text | :json
-          }
+          log: Sovite.Core.Logging.config()
         }
 
   @doc """
