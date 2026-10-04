@@ -5,14 +5,20 @@
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
+set "MIX_ENV=test"
+
 echo "pre-commit: mix lint"
-if ! MIX_ENV=test mix lint; then
+if ! mix lint; then
   echo "pre-commit: mix lint failed, commit refused" >&2
+  unset MIX_ENV
   exit 1
 fi
 
 echo "pre-commit: mix dialyzer"
-if ! MIX_ENV=test mix dialyzer; then
+if ! mix dialyzer; then
   echo "pre-commit: mix dialyzer failed, commit refused" >&2
+  unset MIX_ENV
   exit 1
 fi
+
+unset MIX_ENV

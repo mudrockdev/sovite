@@ -1,7 +1,7 @@
 defmodule Sovite.Core.Config.RoutingRules do
   @moduledoc false
-  # Cross-key checks for [domains], [restrictions], and the routing
-  # settings of [delivery].
+  # Cross-key checks for [domains], [restrictions], [routing], and the
+  # routing settings of [delivery].
 
   alias Sovite.Core.Config.Error
   alias Sovite.Core.Restrictions
@@ -10,7 +10,19 @@ defmodule Sovite.Core.Config.RoutingRules do
   def errors(values) do
     domain_errors(values.domains) ++
       restriction_errors(values.restrictions) ++
-      source_errors(values.delivery.source_address)
+      source_errors(values.delivery.source_address) ++
+      pipe_errors(values.routing, values.pipe)
+  end
+
+  # A pipe transport must name a [pipe.<name>] section.
+  defp pipe_errors(routing, pipes) do
+    for key <- [:local_transport, :mailbox_transport, :relay_transport, :remote_transport],
+        %{transport: :pipe, nexthop: name} <- [Map.fetch!(routing, key)],
+        not Map.has_key?(pipes, name),
+        do: %Error{
+          path: ["routing", Atom.to_string(key)],
+          reason: "there is no [pipe.#{name}] section"
+        }
   end
 
   # A domain can only be in one class.

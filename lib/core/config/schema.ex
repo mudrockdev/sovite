@@ -26,6 +26,10 @@ defmodule Sovite.Core.Config.Schema do
   #   :transport               - a Sovite.Core.Transport map, from "smtp", "lmtp:unix:/path", ...
   #   :delimiter               - address extension delimiter characters, such as "+" or "+-"
   #   :hide_subdomain          - a domain, or "!domain" for an exception
+  #   :maildir_template        - an absolute path with {user}, {domain}, {address} placeholders
+  #   :pipe_name               - letters, digits, "_", "-"; see Sovite.Core.Transport.pipe_name?/1
+  #   :env_name                - an environment variable name
+  #   :command                 - a non-empty array of strings, the first an absolute path
   #   {:list, type}            - an array; errors name the index, as in "key[0]"
   #   {:map, key_type, value_type} - a table with arbitrary keys; errors name the key
   #   {:integer, min, max}
@@ -396,6 +400,53 @@ defmodule Sovite.Core.Config.Schema do
   end
 
   defp cast(:hide_subdomain, value), do: cast(:domain, value)
+
+  defp cast(:maildir_template, value) when is_binary(value) do
+    unknown =
+      ~r/\{[^}]*\}/
+      |> Regex.scan(value)
+      |> List.flatten()
+      |> Enum.reject(&(&1 in ["{user}", "{domain}", "{address}"]))
+
+    cond do
+      Path.type(value) != :absolute ->
+        {:error, "#{inspect(value)} is not an absolute path"}
+
+      unknown != [] ->
+        {:error, "unknown placeholder #{hd(unknown)}; use {user}, {domain}, or {address}"}
+
+      true ->
+        {:ok, value}
+    end
+  end
+
+  defp cast(:maildir_template, value), do: type_error("a path template", value)
+
+  defp cast(:pipe_name, value) do
+    if Transport.pipe_name?(value),
+      do: {:ok, value},
+      else:
+        {:error, "#{inspect(value)} is not a valid name: use letters, digits, \"_\", and \"-\""}
+  end
+
+  defp cast(:env_name, value) when is_binary(value) do
+    if value =~ ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/,
+      do: {:ok, value},
+      else: {:error, "#{inspect(value)} is not a valid environment variable name"}
+  end
+
+  defp cast(:env_name, value), do: type_error("an environment variable name", value)
+
+  defp cast(:command, [program | _] = command) when is_binary(program) do
+    cond do
+      not Enum.all?(command, &is_binary/1) -> type_error("an array of strings", command)
+      Path.type(program) != :absolute -> {:error, "#{inspect(program)} is not an absolute path"}
+      true -> {:ok, command}
+    end
+  end
+
+  defp cast(:command, value),
+    do: type_error("a command: an array with a program's absolute path and its arguments", value)
 
   defp cast(:duration, value) when is_integer(value) and value > 0, do: {:ok, value * 1000}
 

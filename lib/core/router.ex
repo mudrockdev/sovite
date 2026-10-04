@@ -15,8 +15,8 @@ defmodule Sovite.Core.Router do
        then `@domain`), else to `delivery.relayhost`, else to the MX hosts
        of the recipient's domain (or the address in an address literal).
 
-  Local, mailbox, and LMTP delivery arrive with roadmap Phase 5; until
-  then mail for them stays deferred.
+  LMTP, Maildir (`local` and `mailbox`), and pipe deliveries are final:
+  see `Sovite.Core.Delivery`.
 
   SMTP deliveries also get the source address to connect from (the
   sender relays table, else `delivery.source_address`) and, for explicit
@@ -44,17 +44,27 @@ defmodule Sovite.Core.Router do
           | {:literal, :inet.ip_address()}
 
   @typedoc """
-  Where an SMTP delivery goes: the next hop, the local addresses to
-  connect from, and the credentials to log in with.
+  Where a delivery goes:
+
+    * SMTP: the next hop, the local addresses to connect from, and the
+      credentials to log in with.
+    * LMTP: a Unix socket or a host (never looked up in MX records).
+    * `:local` and `:mailbox`: Maildir delivery.
+    * `:pipe`: the command of the `[pipe.<name>]` config section.
   """
-  @type destination :: %{
-          nexthop: nexthop(),
-          source: %{optional(:ipv4 | :ipv6) => :inet.ip_address()},
-          auth: %{username: String.t(), password: String.t()} | nil
-        }
+  @type destination ::
+          %{
+            transport: :smtp,
+            nexthop: nexthop(),
+            source: %{optional(:ipv4 | :ipv6) => :inet.ip_address()},
+            auth: %{username: String.t(), password: String.t()} | nil
+          }
+          | %{transport: :lmtp, nexthop: {:unix, Path.t()} | {:host, Transport.host()}}
+          | %{transport: :local | :mailbox}
+          | %{transport: :pipe, name: String.t()}
 
   @type route ::
-          {:remote, destination()}
+          {:deliver, destination()}
           | {:defer, String.t(), String.t()}
           | {:fail, String.t(), String.t()}
           | {:discard, String.t()}
@@ -115,7 +125,7 @@ defmodule Sovite.Core.Router do
     with {:ok, nexthop} <- nexthop(routing, sender, recipient, nexthop),
          {:ok, source} <- source(routing, sender),
          {:ok, auth} <- auth(routing, sender, nexthop) do
-      {:remote, %{nexthop: nexthop, source: source, auth: auth}}
+      {:deliver, %{transport: :smtp, nexthop: nexthop, source: source, auth: auth}}
     else
       {:error, table} -> {:defer, "4.3.0", "lookup error: cannot read table #{table}"}
       {:invalid, what} -> {:defer, "4.3.5", what}
@@ -132,12 +142,21 @@ defmodule Sovite.Core.Router do
   defp resolve(_routing, _sender, _recipient, %{transport: :discard, nexthop: text}),
     do: {:discard, text}
 
-  defp resolve(_routing, _sender, _recipient, %{transport: transport}),
-    do: {:defer, "4.3.2", "#{transport_name(transport)} delivery is not available yet"}
+  defp resolve(_routing, _sender, _recipient, %{transport: :lmtp, nexthop: nil}),
+    do: {:defer, "4.3.5", "the lmtp transport needs a socket or host"}
 
-  defp transport_name(:lmtp), do: "LMTP"
-  defp transport_name(:local), do: "local"
-  defp transport_name(:mailbox), do: "mailbox"
+  defp resolve(_routing, _sender, _recipient, %{transport: :lmtp, nexthop: {:unix, _} = socket}),
+    do: {:deliver, %{transport: :lmtp, nexthop: socket}}
+
+  defp resolve(_routing, _sender, _recipient, %{transport: :lmtp, nexthop: host}),
+    do: {:deliver, %{transport: :lmtp, nexthop: {:host, host}}}
+
+  defp resolve(_routing, _sender, _recipient, %{transport: :pipe, nexthop: name}),
+    do: {:deliver, %{transport: :pipe, name: name}}
+
+  defp resolve(_routing, _sender, _recipient, %{transport: transport})
+       when transport in [:local, :mailbox],
+       do: {:deliver, %{transport: transport}}
 
   defp nexthop(_routing, _sender, _recipient, %{} = host), do: {:ok, {:host, host}}
 
@@ -227,8 +246,17 @@ defmodule Sovite.Core.Router do
   @doc """
   Returns a destination or next hop as text, for logs: `"example.com"`,
   `"[192.0.2.1]"`, or the host as configured (`"[smtp.example.com]:587"`).
+  LMTP destinations are the socket path or `host:port`, the others
+  `"local"`, `"mailbox"`, or `"pipe:<name>"`.
   """
   @spec name(destination() | nexthop()) :: String.t()
+  def name(%{transport: :lmtp, nexthop: {:unix, path}}), do: path
+
+  def name(%{transport: :lmtp, nexthop: {:host, %{host: host, port: port}}}),
+    do: "#{host}:#{port}"
+
+  def name(%{transport: :pipe, name: name}), do: "pipe:" <> name
+  def name(%{transport: transport}) when transport in [:local, :mailbox], do: "#{transport}"
   def name(%{nexthop: nexthop}), do: name(nexthop)
   def name({:mx, domain}), do: domain
   def name({:literal, ip}), do: Received.address_literal(ip)

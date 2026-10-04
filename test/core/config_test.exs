@@ -558,4 +558,87 @@ defmodule Sovite.Core.ConfigTest do
              ]
     end
   end
+
+  describe "Phase 5 settings" do
+    defp phase5_errors(toml) do
+      {:error, errors} = Config.parse(toml)
+      Enum.map(errors, &Exception.message/1)
+    end
+
+    test "defaults: no Maildir, no pipes, 50 hops" do
+      {:ok, config} = Config.parse("")
+      assert config.maildir == %{local: nil, mailbox: nil}
+      assert config.pipe == %{}
+      assert config.smtp.max_hops == 50
+    end
+
+    test "Maildir templates and pipes" do
+      {:ok, config} =
+        Config.parse("""
+        [routing]
+        local_transport = "pipe:procmail"
+        [maildir]
+        mailbox = "/var/vmail/{domain}/{user}/"
+        [pipe.procmail]
+        command = ["/usr/bin/procmail", "-a", "{extension}"]
+        sandbox = ["/usr/bin/systemd-run", "--pipe", "--wait"]
+        timeout = "1m"
+        env = { LANG = "C" }
+        """)
+
+      assert config.maildir.mailbox == "/var/vmail/{domain}/{user}/"
+      assert config.routing.local_transport == %{transport: :pipe, nexthop: "procmail"}
+
+      assert config.pipe["procmail"] == %{
+               command: ["/usr/bin/procmail", "-a", "{extension}"],
+               sandbox: ["/usr/bin/systemd-run", "--pipe", "--wait"],
+               timeout: 60_000,
+               directory: "/",
+               env: %{"LANG" => "C"},
+               trace_headers: true
+             }
+    end
+
+    test "rejects bad Maildir templates, pipes, and pipe transports" do
+      assert phase5_errors("""
+             [routing]
+             mailbox_transport = "pipe:missing"
+             [maildir]
+             local = "mail/{user}"
+             mailbox = "/mail/{folder}"
+             [pipe."bad name"]
+             command = ["/bin/true"]
+             [pipe.relative]
+             command = ["true"]
+             [pipe.empty]
+             command = []
+             [pipe.noenv]
+             command = ["/bin/true"]
+             env = { "1X" = "y" }
+             [pipe.nocommand]
+             timeout = "1m"
+             """) == [
+               ~s(maildir.local: "mail/{user}" is not an absolute path),
+               "maildir.mailbox: unknown placeholder {folder}; use {user}, {domain}, or {address}",
+               ~s(pipe.bad name: "bad name" is not a valid name: use letters, digits, "_", and "-"),
+               ~s(pipe.empty.command: expected a command: an array with a program's absolute path and its arguments, got []),
+               "pipe.nocommand.command: is required",
+               ~s(pipe.noenv.env.1X: "1X" is not a valid environment variable name),
+               ~s(pipe.relative.command: "true" is not an absolute path)
+             ]
+
+      assert phase5_errors("""
+             [routing]
+             mailbox_transport = "pipe:missing"
+             """) == ["routing.mailbox_transport: there is no [pipe.missing] section"]
+    end
+
+    test "LMTP listeners default to port 24 and must not use port 25" do
+      {:ok, config} = Config.parse("[[listener]]\nmode = \"lmtp\"")
+      assert [%{mode: :lmtp, port: 24, auth: false}] = config.listener
+
+      assert phase5_errors("[[listener]]\nmode = \"lmtp\"\nport = 25") ==
+               ["listener[0].port: LMTP must not use port 25"]
+    end
+  end
 end

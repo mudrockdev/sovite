@@ -154,7 +154,7 @@ defmodule Sovite.Core.QueueManagerTest do
       assert %{rcpt_to: ["bob@[127.0.0.1]"]} = assert_message(mta)
     end
 
-    test "defers local recipients until local delivery exists", context do
+    test "defers local recipients without maildir.local", context do
       id = enqueue(context, "alice@sender.example", ["postmaster@mx.example.org"])
 
       assert_receive {:telemetry, [:sovite, :queue, :message, :deferred], %{attempts: 1},
@@ -162,7 +162,11 @@ defmodule Sovite.Core.QueueManagerTest do
                      @timeout
 
       {:ok, loaded} = Spool.load(Spool.path(context.dir, :deferred, id))
-      assert [{:recipient, _, :deferred, %{status: "4.3.2"}} | _] = loaded.records
+
+      assert [{:recipient, _, :deferred, %{status: "4.3.5", reply: reply}} | _] =
+               loaded.records
+
+      assert reply =~ "maildir.local"
     end
   end
 

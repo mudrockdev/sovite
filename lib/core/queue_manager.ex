@@ -91,7 +91,10 @@ defmodule Sovite.Core.QueueManager do
       min_backoff: config.queue.min_backoff,
       max_backoff: config.queue.max_backoff,
       delay_warning: config.queue.delay_warning,
-      double_bounce_recipient: config.bounce.double_bounce_recipient
+      double_bounce_recipient: config.bounce.double_bounce_recipient,
+      maildir: config.maildir,
+      pipes: config.pipe,
+      delimiter: config.routing.extension_delimiter
     ] ++ Map.to_list(config.delivery)
   end
 
@@ -154,7 +157,12 @@ defmodule Sovite.Core.QueueManager do
         default: Map.get(opts, :tls) || :may,
         policy: Map.get(opts, :tls_policy) || %{},
         cacerts: Map.get(opts, :tls_cacerts)
-      }
+      },
+      maildir: Map.get(opts, :maildir) || %{},
+      pipes: Map.get(opts, :pipes, %{}),
+      delimiter: Map.get(opts, :delimiter, ""),
+      # The spool's private tmp/, emptied by Spool.init/1.
+      tmp_dir: Path.join(opts.directory, "tmp")
     }
 
     {:ok, task_supervisor} = Task.Supervisor.start_link()
@@ -459,13 +467,13 @@ defmodule Sovite.Core.QueueManager do
       message.entry
       |> Entry.pending()
       |> Enum.map(&{&1, Router.route(state.opts.routing, envelope.sender, &1)})
-      |> Enum.split_with(&match?({_rcpt, {:remote, _}}, &1))
+      |> Enum.split_with(&match?({_rcpt, {:deliver, _}}, &1))
 
     message = record_results(message, Enum.map(immediate, &immediate_result/1))
     groups = Enum.group_by(remote, fn {_rcpt, route} -> route end, &elem(&1, 0))
 
     jobs =
-      for {{:remote, destination}, recipients} <- groups,
+      for {{:deliver, destination}, recipients} <- groups,
           chunk <- Enum.chunk_every(recipients, state.opts.max_recipients) do
         %{
           queue_id: id,

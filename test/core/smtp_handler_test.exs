@@ -100,6 +100,23 @@ defmodule Sovite.Core.SMTPHandlerTest do
     end
   end
 
+  test "refuses a message with too many hops", context do
+    mta = start_mta(context, "[smtp]\nmax_hops = 3")
+    assert {250, _} = rcpt(mta, "user@mx.example.com")
+
+    received = String.duplicate("Received: from a by b; Mon, 1 Jan 2026 00:00:00 +0000\r\n", 4)
+
+    assert {:ok, {554, ["5.4.6 Too many hops"]}} =
+             deliver(mta, received <> "Subject: x\r\n\r\nbody\r\n")
+
+    assert queue_files(mta, "incoming") == []
+
+    {:ok, {250, _}} = SMTPClient.command(mta.client, "MAIL FROM:<sender@remote.test>")
+    assert {250, _} = rcpt(mta, "user@mx.example.com")
+    received = String.duplicate("Received: from a by b; Mon, 1 Jan 2026 00:00:00 +0000\r\n", 3)
+    assert {:ok, {250, _}} = deliver(mta, received <> "Subject: x\r\n\r\nbody\r\n")
+  end
+
   test "relays for trusted networks", context do
     mta = start_mta(context, ~s([smtp]\ntrusted_networks = ["127.0.0.0/8"]))
     assert {250, _} = rcpt(mta, "user@remote.test")

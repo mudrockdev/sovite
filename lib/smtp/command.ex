@@ -26,6 +26,7 @@ defmodule Sovite.SMTP.Command do
   @type t ::
           {:ehlo, String.t()}
           | {:helo, String.t()}
+          | {:lhlo, String.t()}
           | {:mail, String.t(), params()}
           | {:rcpt, String.t(), params()}
           | :data
@@ -61,6 +62,7 @@ defmodule Sovite.SMTP.Command do
   @verbs %{
     "EHLO" => :ehlo,
     "HELO" => :helo,
+    "LHLO" => :lhlo,
     "MAIL" => :mail,
     "RCPT" => :rcpt,
     "DATA" => :data,
@@ -99,7 +101,7 @@ defmodule Sovite.SMTP.Command do
 
   defp printable?(line), do: for(<<c <- line>>, reduce: true, do: (acc -> acc and c in 32..126))
 
-  defp parse_verb(verb, argument) when verb in [:ehlo, :helo] do
+  defp parse_verb(verb, argument) when verb in [:ehlo, :helo, :lhlo] do
     case String.trim(argument) do
       "" -> {:error, verb, :syntax}
       domain -> {:ok, {verb, domain}}

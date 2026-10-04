@@ -122,14 +122,14 @@ defmodule Sovite.Core.SupervisorTest do
                "Subject: hi\r\n\r\nhello\r\n"
              )
 
-    # The queue manager picks the message up at once. Local delivery comes
-    # in a later phase, so mail for a local domain is deferred.
+    # The queue manager picks the message up at once. Without
+    # maildir.local, mail for a local domain is deferred.
     assert_receive {:deferred, %{queue_id: ^queue_id}}, 5_000
     path = Path.join([dir, "queue", "deferred", queue_id])
     assert {:ok, loaded} = Spool.load(path)
     assert loaded.envelope.recipients == ["b@example.com"]
 
-    assert [{:recipient, "b@example.com", :deferred, %{status: "4.3.2"}}, {:retry, 1, _}] =
+    assert [{:recipient, "b@example.com", :deferred, %{status: "4.3.5"}}, {:retry, 1, _}] =
              loaded.records
 
     message = path |> File.read!() |> binary_part(loaded.message_offset, loaded.message_size)
@@ -138,6 +138,124 @@ defmodule Sovite.Core.SupervisorTest do
              ~r/\AReceived: from client.test \(\[127.0.0.1\]\)\r\n\tby mx.example.org with ESMTP id #{queue_id}\r\n/
 
     assert String.ends_with?(message, "\r\nSubject: hi\r\n\r\nhello\r\n")
+  end
+
+  test "delivers inbound mail over LMTP with a status per recipient", %{tmp_dir: dir} do
+    # Unix socket paths are limited to about 100 bytes, too few for tmp_dir.
+    socket = Path.join(System.tmp_dir!(), "sovite-lmtp-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm(socket) end)
+
+    replies = fn
+      "full@example.com" -> "452 4.2.2 Mailbox full"
+      "gone@example.com" -> "550 5.1.1 No such user"
+      _ -> "250 2.0.0 Saved"
+    end
+
+    {:ok, lmtp} =
+      FakeMTA.start_link(lmtp: true, unix: socket, responses: %{lmtp_data_end: replies})
+
+    {:ok, config} =
+      Config.parse(
+        toml(
+          dir,
+          """
+          [domains]
+          local = ["example.com"]
+          [routing]
+          local_transport = "lmtp:unix:#{socket}"
+          """,
+          """
+          [[listener]]
+          address = "127.0.0.1"
+          port = 0
+          """
+        )
+      )
+
+    handler_id = "supervisor-test-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:sovite, :queue, :message, :deferred],
+      &__MODULE__.forward_event/4,
+      self()
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    supervisor =
+      start_supervised!(
+        {Sovite.Core.Supervisor,
+         config: config, name: nil, queue_manager: [resolver: FakeDNS.resolver(%{})]}
+      )
+
+    {:ok, client} = SMTPClient.connect(listener_port(supervisor))
+    recipients = ["a@example.com", "full@example.com", "gone@example.com"]
+
+    assert {:ok, {250, ["2.0.0 Ok: queued as " <> queue_id]}} =
+             SMTPClient.send_message(
+               client,
+               "s@example.net",
+               recipients,
+               "Subject: hi\r\n\r\nhello\r\n"
+             )
+
+    assert_receive {:fake_mta, ^lmtp, {:message, message}}, 5_000
+    assert message.mail_from == "s@example.net"
+    assert message.rcpt_to == recipients
+    assert message.delivered == ["a@example.com"]
+    assert message.data =~ ~r/\AReceived: from client.test .* id #{queue_id};/s
+
+    # The full mailbox is retried; the others are done.
+    assert_receive {:deferred, %{queue_id: ^queue_id}}, 5_000
+    {:ok, loaded} = Spool.load(Path.join([dir, "queue", "deferred", queue_id]))
+
+    statuses =
+      for {:recipient, rcpt, status, details} <- loaded.records,
+          do: {rcpt, status, details.status}
+
+    assert {"a@example.com", :delivered, "2.0.0"} in statuses
+    assert {"full@example.com", :deferred, "4.2.2"} in statuses
+    assert {"gone@example.com", :failed, "5.1.1"} in statuses
+  end
+
+  test "accepts mail on an LMTP listener", %{tmp_dir: dir} do
+    {:ok, config} =
+      Config.parse(
+        toml(dir, ~s([domains]\nlocal = ["example.com"]), """
+        [[listener]]
+        address = "127.0.0.1"
+        port = 0
+        mode = "lmtp"
+        """)
+      )
+
+    handler_id = "supervisor-test-#{System.unique_integer([:positive])}"
+    event = [:sovite, :queue, :message, :deferred]
+    :telemetry.attach(handler_id, event, &__MODULE__.forward_event/4, self())
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    supervisor = start_supervised!({Sovite.Core.Supervisor, config: config, name: nil})
+    {:ok, client} = SMTPClient.connect(listener_port(supervisor))
+
+    assert {:ok, {220, ["mx.example.org LMTP"]}} = SMTPClient.read_reply(client)
+    assert {:ok, {500, _}} = SMTPClient.command(client, "EHLO client.test")
+    assert {:ok, {250, _}} = SMTPClient.command(client, "LHLO client.test")
+    assert {:ok, {250, _}} = SMTPClient.command(client, "MAIL FROM:<s@example.net>")
+    assert {:ok, {250, _}} = SMTPClient.command(client, "RCPT TO:<a@example.com>")
+    assert {:ok, {250, _}} = SMTPClient.command(client, "RCPT TO:<b@example.com>")
+    assert {:ok, {354, _}} = SMTPClient.command(client, "DATA")
+
+    assert {:ok, {250, ["2.0.0 Ok: queued as " <> queue_id]}} =
+             SMTPClient.send_data(client, "Subject: hi\r\n\r\nhello\r\n")
+
+    # One reply per recipient.
+    assert {:ok, {250, ["2.0.0 Ok: queued as " <> ^queue_id]}} = SMTPClient.read_reply(client)
+
+    # Without maildir.local the message waits in the deferred queue.
+    assert_receive {:deferred, %{queue_id: ^queue_id}}, 5_000
+    message = File.read!(Path.join([dir, "queue", "deferred", queue_id]))
+    assert message =~ " with LMTP id #{queue_id}"
   end
 
   test "relays mail from trusted clients to remote servers", %{tmp_dir: dir} do

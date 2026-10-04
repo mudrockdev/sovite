@@ -690,4 +690,80 @@ defmodule Sovite.SMTP.Server.SessionTest do
                        %{session_id: "S1", command: "AUTH", argument: "PLAIN", reply_code: 235}}
     end
   end
+
+  describe "LMTP" do
+    defp lmtp(handler_opts \\ [], opts \\ []) do
+      {:continue, "220 mx.test LMTP\r\n", session} = start(handler_opts, [lmtp: true] ++ opts)
+      session
+    end
+
+    test "greets with LHLO and refuses EHLO and HELO" do
+      session = lmtp()
+      {:continue, out, session} = input(session, "EHLO c.test\r\nHELO c.test\r\n")
+      assert codes(out) == [500, 500]
+
+      {:continue, out, session} = input(session, "MAIL FROM:<a@x.test>\r\n")
+      assert out == "503 5.5.1 Send LHLO first\r\n"
+
+      {:continue, out, _} = input(session, "LHLO c.test\r\n")
+      assert out =~ "250-mx.test\r\n250-PIPELINING"
+      assert_received {:helo, {:lhlo, "c.test"}}
+    end
+
+    test "SMTP does not know LHLO" do
+      {:continue, out, _} = input(started(), "LHLO c.test\r\n")
+      assert out == "500 5.5.1 Command not recognized\r\n"
+    end
+
+    test "answers the data once per accepted recipient" do
+      rcpt = fn
+        "bad@y.test", state -> {:reply, Reply.new(550, "5.1.1", "No such user"), state}
+        _, state -> {:ok, state}
+      end
+
+      session = lmtp(rcpt: rcpt)
+
+      {:continue, out, session} =
+        input(
+          session,
+          "LHLO c.test\r\nMAIL FROM:<a@x.test>\r\nRCPT TO:<b@y.test>\r\n" <>
+            "RCPT TO:<bad@y.test>\r\nRCPT TO:<c@y.test>\r\nDATA\r\n"
+        )
+
+      assert codes(out) == [250, 250, 250, 550, 250, 354]
+
+      {:continue, out, _} = input(session, "Subject: x\r\n\r\nbody\r\n.\r\n")
+      assert out == "250 2.0.0 Ok\r\n250 2.0.0 Ok\r\n"
+      assert_received {:data_end, %{recipients: ["b@y.test", "c@y.test"]}}
+    end
+
+    test "repeats a rejection for every recipient" do
+      reject = fn _transaction, state -> {:reply, Reply.new(451, "4.3.0", "Try later"), state} end
+      session = lmtp(data_end: reject)
+
+      {:continue, _out, session} =
+        input(
+          session,
+          "LHLO c.test\r\nMAIL FROM:<a@x.test>\r\nRCPT TO:<b@y.test>\r\n" <>
+            "RCPT TO:<c@y.test>\r\nDATA\r\n"
+        )
+
+      {:continue, out, _} = input(session, "body\r\n.\r\n")
+      assert out == "451 4.3.0 Try later\r\n451 4.3.0 Try later\r\n"
+    end
+
+    test "a message that is too large fails for every recipient" do
+      session = lmtp([], max_message_size: 10)
+
+      {:continue, _out, session} =
+        input(
+          session,
+          "LHLO c.test\r\nMAIL FROM:<a@x.test>\r\nRCPT TO:<b@y.test>\r\n" <>
+            "RCPT TO:<c@y.test>\r\nDATA\r\n"
+        )
+
+      {:continue, out, _} = input(session, String.duplicate("x", 100) <> "\r\n.\r\n")
+      assert codes(out) == [552, 552]
+    end
+  end
 end

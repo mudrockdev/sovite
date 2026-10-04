@@ -27,20 +27,19 @@ defmodule Sovite.Core.RouterTest do
   end
 
   defp remote(nexthop, extra \\ %{}),
-    do: {:remote, Map.merge(%{nexthop: nexthop, source: %{}, auth: nil}, extra)}
+    do:
+      {:deliver, Map.merge(%{transport: :smtp, nexthop: nexthop, source: %{}, auth: nil}, extra)}
 
   test "routes by domain class" do
     r = routing()
 
-    assert Router.route(r, "", "a@example.org") ==
-             {:defer, "4.3.2", "local delivery is not available yet"}
+    assert Router.route(r, "", "a@example.org") == {:deliver, %{transport: :local}}
 
     assert Router.route(r, "", "a@Example.NET") == remote({:mx, "example.net"})
     assert Router.route(r, "", "a@[192.0.2.1]") == remote({:literal, {192, 0, 2, 1}})
     assert Router.route(r, "", "a@relayed.example") == remote({:mx, "relayed.example"})
 
-    assert Router.route(r, "", "alice@hosted.example") ==
-             {:defer, "4.3.2", "mailbox delivery is not available yet"}
+    assert Router.route(r, "", "alice@hosted.example") == {:deliver, %{transport: :mailbox}}
 
     assert Router.route(r, "", "not an address") ==
              {:fail, "5.1.3", "bad recipient address syntax"}
@@ -94,7 +93,7 @@ defmodule Sovite.Core.RouterTest do
     assert Router.route(r, "", "a@drop.example") == {:discard, "spam trap"}
 
     assert Router.route(r, "", "a@lmtp.example") ==
-             {:defer, "4.3.2", "LMTP delivery is not available yet"}
+             {:deliver, %{transport: :lmtp, nexthop: {:unix, "/run/dovecot/lmtp"}}}
 
     assert {:defer, "4.3.5", "invalid transport \"nonsense:x\"" <> _} =
              Router.route(r, "", "a@bad.example")
@@ -159,7 +158,7 @@ defmodule Sovite.Core.RouterTest do
              })
 
     # Notifications (null sender) use the defaults.
-    assert {:remote, %{auth: %{username: "default"}}} = Router.route(r, "", "a@example.net")
+    assert {:deliver, %{auth: %{username: "default"}}} = Router.route(r, "", "a@example.net")
 
     assert {:defer, "4.3.5", "invalid relay host" <> _} =
              Router.route(r, "bad@x.example", "a@example.net")

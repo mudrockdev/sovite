@@ -43,7 +43,7 @@ defmodule Sovite.Core.Config do
        [
          {:address, :ip_address, default: "0.0.0.0"},
          {:port, {:integer, 0, 65_535}, []},
-         {:mode, {:enum, [:smtp, :submission, :submissions]}, default: :smtp},
+         {:mode, {:enum, [:smtp, :submission, :submissions, :lmtp]}, default: :smtp},
          {:auth, :boolean, []},
          {:require_tls, :boolean, []},
          {:require_auth, :boolean, []},
@@ -90,7 +90,8 @@ defmodule Sovite.Core.Config do
         {:data_timeout, :duration, default: "5m"},
         {:bare_line_endings, {:enum, [:reject, :normalize]}, default: :reject},
         {:vrfy, :boolean, default: false},
-        {:trusted_networks, {:list, :cidr}, default: []}
+        {:trusted_networks, {:list, :cidr}, default: []},
+        {:max_hops, {:integer, 1, 1000}, default: 50}
       ]}, []},
     {:domains,
      {:section,
@@ -135,6 +136,19 @@ defmodule Sovite.Core.Config do
         {:relayhost_password, :string, []},
         {:source_address, {:list, :ip_address}, default: []}
       ]}, []},
+    {:maildir, {:section, [{:local, :maildir_template, []}, {:mailbox, :maildir_template, []}]},
+     []},
+    {:pipe,
+     {:map, :pipe_name,
+      {:section,
+       [
+         {:command, :command, required: true},
+         {:sandbox, :command, []},
+         {:timeout, :duration, default: "10m"},
+         {:directory, :absolute_path, default: "/"},
+         {:env, {:map, :env_name, :string}, default: %{}},
+         {:trace_headers, :boolean, default: true}
+       ]}}, default: %{}},
     {:auth,
      {:section,
       [
@@ -201,6 +215,8 @@ defmodule Sovite.Core.Config do
     :routing,
     :restrictions,
     :delivery,
+    :maildir,
+    :pipe,
     :auth,
     :submission,
     :bounce,
@@ -229,7 +245,7 @@ defmodule Sovite.Core.Config do
             %{
               address: :inet.ip_address(),
               port: :inet.port_number(),
-              mode: :smtp | :submission | :submissions,
+              mode: :smtp | :submission | :submissions | :lmtp,
               auth: boolean(),
               require_tls: boolean(),
               require_auth: boolean(),
@@ -254,7 +270,8 @@ defmodule Sovite.Core.Config do
             data_timeout: pos_integer(),
             bare_line_endings: :reject | :normalize,
             vrfy: boolean(),
-            trusted_networks: [Sovite.Net.network()]
+            trusted_networks: [Sovite.Net.network()],
+            max_hops: pos_integer()
           },
           domains: %{
             local: [String.t()],
@@ -280,6 +297,17 @@ defmodule Sovite.Core.Config do
             relayhost_username: String.t() | nil,
             relayhost_password: String.t() | nil,
             source_address: [:inet.ip_address()]
+          },
+          maildir: %{local: String.t() | nil, mailbox: String.t() | nil},
+          pipe: %{
+            String.t() => %{
+              command: [String.t(), ...],
+              sandbox: [String.t(), ...] | nil,
+              timeout: pos_integer(),
+              directory: Path.t(),
+              env: %{String.t() => String.t()},
+              trace_headers: boolean()
+            }
           },
           auth: map(),
           submission: %{strip_headers: [String.t()]},
@@ -347,7 +375,8 @@ defmodule Sovite.Core.Config do
   @mode_defaults %{
     smtp: %{port: 25, auth: false, require_tls: false, require_auth: false},
     submission: %{port: 587, auth: true, require_tls: true, require_auth: true},
-    submissions: %{port: 465, auth: true, require_tls: true, require_auth: true}
+    submissions: %{port: 465, auth: true, require_tls: true, require_auth: true},
+    lmtp: %{port: 24, auth: false, require_tls: false, require_auth: false}
   }
 
   defp listener_defaults(values),
@@ -444,6 +473,7 @@ defmodule Sovite.Core.Config do
   defp listener_problems(listener, tls, plaintext) do
     Enum.filter(
       [
+        lmtp_port_problem(listener),
         implicit_tls_problem(listener, tls),
         require_tls_problem(listener, tls),
         auth_problem(listener, tls, plaintext),
@@ -452,6 +482,10 @@ defmodule Sovite.Core.Config do
       & &1
     )
   end
+
+  # RFC 2033 §5: LMTP must not be used on the SMTP port.
+  defp lmtp_port_problem(%{mode: :lmtp, port: 25}), do: {"port", "LMTP must not use port 25"}
+  defp lmtp_port_problem(_listener), do: nil
 
   defp implicit_tls_problem(%{mode: :submissions}, false),
     do: {"mode", ~s("submissions" needs a certificate in [tls])}

@@ -30,8 +30,11 @@ defmodule Sovite.SMTP.Server.Handler do
   @callback init(Session.connection(), opts :: term()) ::
               {:ok, state()} | {:close, Reply.t(), state()}
 
-  @doc "`EHLO` or `HELO`. The name is a valid domain or address literal."
-  @callback handle_helo(:ehlo | :helo, name :: String.t(), state()) :: result()
+  @doc """
+  `EHLO`, `HELO`, or (in an LMTP session) `LHLO`. The name is a valid
+  domain or address literal.
+  """
+  @callback handle_helo(:ehlo | :helo | :lhlo, name :: String.t(), state()) :: result()
 
   @doc "`MAIL FROM`. `sender` is `\"\"` for the null reverse-path."
   @callback handle_mail(sender :: String.t(), Session.mail_params(), state()) :: result()

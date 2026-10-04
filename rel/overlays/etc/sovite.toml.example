@@ -88,6 +88,21 @@ relay = []
 # The only addresses that exist at local domains. Unset: accept any address.
 # local_recipients = ["postmaster@example.com", "alice@example.com"]
 
+[routing]
+# Where mail for each domain class goes. Hand hosted mailboxes to Dovecot:
+# mailbox_transport = "lmtp:unix:/run/dovecot/lmtp"
+# local_transport = "local"
+
+[maildir]
+# Maildir folders for the "local" and "mailbox" transports. Unset: such
+# mail is deferred.
+# local = "/var/mail/{user}/"
+# mailbox = "/var/vmail/{domain}/{user}/"
+
+# Commands for "pipe:<name>" transports, run once per recipient.
+# [pipe.procmail]
+# command = ["/usr/bin/procmail", "-d", "{user}"]
+
 [delivery]
 # Send all outbound mail through this server. "[host]:port" skips the MX
 # lookup. Unset: deliver to each recipient domain's MX hosts.

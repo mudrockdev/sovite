@@ -9,7 +9,9 @@ defmodule Sovite.Core.Transport do
       host, without an MX lookup.
     * `lmtp:unix:/run/dovecot/lmtp` / `lmtp:inet:mail.example.com:24` /
       `lmtp:[mail.example.com]:24` - LMTP. Port 24 by default.
-    * `local` / `mailbox` - local and hosted mailbox delivery.
+    * `local` / `mailbox` - Maildir delivery for local and hosted
+      domains, to the folders `maildir.local` and `maildir.mailbox` name.
+    * `pipe:name` - run the command of the `[pipe.name]` config section.
     * `error:5.1.1 text` - bounce with that status and text. The status
       is optional (`5.0.0`).
     * `retry:4.3.0 text` - keep the mail and try again later.
@@ -26,7 +28,7 @@ defmodule Sovite.Core.Transport do
   @type host :: %{host: String.t(), port: :inet.port_number(), mx: boolean()}
 
   @type t :: %{
-          transport: :smtp | :lmtp | :local | :mailbox | :error | :retry | :discard | nil,
+          transport: :smtp | :lmtp | :local | :mailbox | :pipe | :error | :retry | :discard | nil,
           nexthop:
             host()
             | {:unix, Path.t()}
@@ -66,6 +68,7 @@ defmodule Sovite.Core.Transport do
   defp transport("lmtp"), do: {:ok, :lmtp}
   defp transport("local"), do: {:ok, :local}
   defp transport("mailbox"), do: {:ok, :mailbox}
+  defp transport("pipe"), do: {:ok, :pipe}
   defp transport("error"), do: {:ok, :error}
   defp transport("retry"), do: {:ok, :retry}
   defp transport("discard"), do: {:ok, :discard}
@@ -78,6 +81,7 @@ defmodule Sovite.Core.Transport do
   defp nexthop(:retry, text), do: {:ok, status_text(text, "4.0.0", "delivery deferred")}
   defp nexthop(:discard, text), do: {:ok, if(text == "", do: "discarded", else: text)}
   defp nexthop(transport, _nexthop) when transport in [:local, :mailbox], do: :error
+  defp nexthop(:pipe, name), do: if(pipe_name?(name), do: {:ok, name}, else: :error)
 
   defp nexthop(:lmtp, "unix:" <> path) do
     if Path.type(path) == :absolute, do: {:ok, {:unix, path}}, else: :error
@@ -162,6 +166,17 @@ defmodule Sovite.Core.Transport do
           else: :error
     end
   end
+
+  @doc """
+  Whether `name` can name a pipe: letters, digits, `_`, and `-`.
+
+      iex> Sovite.Core.Transport.pipe_name?("procmail")
+      true
+      iex> Sovite.Core.Transport.pipe_name?("../x")
+      false
+  """
+  @spec pipe_name?(term()) :: boolean()
+  def pipe_name?(name), do: is_binary(name) and name =~ ~r/\A[A-Za-z0-9_-]{1,64}\z/
 
   @doc """
   Merges a transports table entry into a default: an empty transport or

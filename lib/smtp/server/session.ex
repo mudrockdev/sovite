@@ -24,6 +24,14 @@ defmodule Sovite.SMTP.Server.Session do
   After the handshake the session starts over, as the RFC requires: the
   client must send `EHLO` again.
 
+  ## LMTP
+
+  With `lmtp: true` the session speaks LMTP (RFC 2033): the client
+  greets with `LHLO` (`EHLO` and `HELO` are refused), and the end of the
+  data gets one reply per accepted recipient, all with the handler's
+  reply. The handler sees `LHLO` as `handle_helo(:lhlo, name, state)`.
+  Without it, `LHLO` is an unknown command.
+
   ## AUTH
 
   With `auth: true`, `AUTH` (RFC 4954) is offered with the mechanisms the
@@ -60,6 +68,7 @@ defmodule Sovite.SMTP.Server.Session do
       Defaults to `false`: passwords are never sent in the clear.
     * `:max_auth_failures` - failed `AUTH` attempts before the session is
       closed. Defaults to 3.
+    * `:lmtp` - speak LMTP instead of SMTP. Defaults to `false`.
 
   The connection map may carry `:tls` (a `Sovite.TLS.info()`) when it is
   encrypted from the start (implicit TLS, RFC 8314).
@@ -70,7 +79,7 @@ defmodule Sovite.SMTP.Server.Session do
   `%{duration}` and `%{session_id, remote_ip, command, argument,
   reply_code, reply}`. `command` is the verb (`"MAIL"`), `"UNKNOWN"`, or
   `"END-OF-MESSAGE"` for the final dot. `argument` is only set for `EHLO`,
-  `HELO`, `MAIL`, `RCPT`, and `VRFY`, and is network input. For `AUTH` it
+  `HELO`, `LHLO`, `MAIL`, `RCPT`, and `VRFY`, and is network input. For `AUTH` it
   is the mechanism; SASL responses are never included.
   """
 
@@ -117,7 +126,8 @@ defmodule Sovite.SMTP.Server.Session do
     auth: false,
     auth_required: false,
     plaintext_auth: false,
-    max_auth_failures: 3
+    max_auth_failures: 3,
+    lmtp: false
   ]
 
   defstruct [
@@ -163,7 +173,8 @@ defmodule Sovite.SMTP.Server.Session do
 
     case module.init(connection, handler_opts) do
       {:ok, state} ->
-        greeting = Reply.new(220, "#{session.hostname} ESMTP")
+        protocol = if session.opts.lmtp, do: "LMTP", else: "ESMTP"
+        greeting = Reply.new(220, "#{session.hostname} #{protocol}")
         {:continue, Reply.encode(greeting), %{session | handler_state: state}}
 
       {:close, reply, state} ->
@@ -347,15 +358,29 @@ defmodule Sovite.SMTP.Server.Session do
   defp command_name(command) when is_atom(command), do: verb_name(command)
   defp command_name(command), do: command |> elem(0) |> verb_name()
 
-  defp execute({kind, name}, session, out, started) when kind in [:ehlo, :helo] do
+  # LMTP has only LHLO, SMTP has no LHLO (RFC 2033 §4.1).
+  defp execute({kind, name}, %{opts: %{lmtp: lmtp}} = session, out, started)
+       when (kind == :lhlo and not lmtp) or (kind in [:ehlo, :helo] and lmtp) do
+    reply(
+      session,
+      out,
+      verb_name(kind),
+      name,
+      Reply.new(500, "5.5.1", "Command not recognized"),
+      started
+    )
+  end
+
+  defp execute({kind, name}, session, out, started) when kind in [:ehlo, :helo, :lhlo] do
     verb = verb_name(kind)
+    esmtp = kind != :helo
 
     if Validators.helo?(name) do
       session = reset_transaction(session)
 
       case session.handler.handle_helo(kind, name, session.handler_state) do
         {:ok, state} ->
-          session = %{session | handler_state: state, helo: name, esmtp: kind == :ehlo}
+          session = %{session | handler_state: state, helo: name, esmtp: esmtp}
           reply(session, out, verb, name, helo_reply(session, kind), started)
 
         result ->
@@ -366,7 +391,7 @@ defmodule Sovite.SMTP.Server.Session do
             name,
             result,
             started,
-            &%{&1 | helo: name, esmtp: kind == :ehlo}
+            &%{&1 | helo: name, esmtp: esmtp}
           )
       end
     else
@@ -519,7 +544,8 @@ defmodule Sovite.SMTP.Server.Session do
   end
 
   defp execute({:help, _argument}, session, out, started) do
-    text = "Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT VRFY HELP STARTTLS AUTH"
+    greeting = if session.opts.lmtp, do: "LHLO", else: "EHLO HELO"
+    text = "Commands: #{greeting} MAIL RCPT DATA RSET NOOP QUIT VRFY HELP STARTTLS AUTH"
     reply(session, out, "HELP", nil, Reply.new(214, "2.0.0", text), started)
   end
 
@@ -541,7 +567,8 @@ defmodule Sovite.SMTP.Server.Session do
         {:error, Reply.new(503, "5.5.1", "Authentication not enabled")}
 
       not session.esmtp ->
-        {:error, Reply.new(503, "5.5.1", "Send EHLO first")}
+        {:error,
+         Reply.new(503, "5.5.1", "Send #{if session.opts.lmtp, do: "LHLO", else: "EHLO"} first")}
 
       session.identity != nil ->
         {:error, Reply.new(503, "5.5.1", "Already authenticated")}
@@ -673,7 +700,7 @@ defmodule Sovite.SMTP.Server.Session do
 
   defp helo_reply(session, :helo), do: Reply.new(250, session.hostname)
 
-  defp helo_reply(session, :ehlo) do
+  defp helo_reply(session, _ehlo_or_lhlo) do
     starttls = if session.opts.starttls and tls(session) == nil, do: ["STARTTLS"], else: []
 
     auth =
@@ -695,6 +722,9 @@ defmodule Sovite.SMTP.Server.Session do
       ] ++ starttls ++ auth
     )
   end
+
+  defp check_mail(_params, %{helo: nil, opts: %{lmtp: true}}),
+    do: {:error, Reply.new(503, "5.5.1", "Send LHLO first")}
 
   defp check_mail(_params, %{helo: nil}),
     do: {:error, Reply.new(503, "5.5.1", "Send HELO/EHLO first")}
@@ -863,20 +893,53 @@ defmodule Sovite.SMTP.Server.Session do
       %{error: nil} ->
         session = %{session | data: nil}
 
-        session.handler.handle_data_end(transaction, session.handler_state)
-        |> accept(
-          session,
-          out,
-          "END-OF-MESSAGE",
-          nil,
-          started,
-          Reply.new(250, "2.0.0", "Ok"),
-          & &1
-        )
+        result = session.handler.handle_data_end(transaction, session.handler_state)
+
+        if session.opts.lmtp,
+          do: lmtp_data_end(result, session, out, transaction, started),
+          else:
+            accept(
+              result,
+              session,
+              out,
+              "END-OF-MESSAGE",
+              nil,
+              started,
+              Reply.new(250, "2.0.0", "Ok"),
+              & &1
+            )
 
       %{error: reply} ->
-        reply(%{session | data: nil}, out, "END-OF-MESSAGE", nil, reply, started)
+        if session.opts.lmtp,
+          do: lmtp_replies(%{session | data: nil}, out, transaction.recipients, reply, started),
+          else: reply(%{session | data: nil}, out, "END-OF-MESSAGE", nil, reply, started)
     end
+  end
+
+  defp lmtp_data_end({:ok, state}, session, out, transaction, started) do
+    session = %{session | handler_state: state}
+    lmtp_replies(session, out, transaction.recipients, Reply.new(250, "2.0.0", "Ok"), started)
+  end
+
+  defp lmtp_data_end({:reply, reply, state}, session, out, transaction, started),
+    do:
+      lmtp_replies(%{session | handler_state: state}, out, transaction.recipients, reply, started)
+
+  defp lmtp_data_end({:close, _reply, _state} = result, session, out, _transaction, started),
+    do: handler_reply(session, out, "END-OF-MESSAGE", nil, result, started, & &1)
+
+  # One reply per accepted recipient, the last one through reply/6.
+  defp lmtp_replies(session, out, recipients, reply, started) do
+    {earlier, [last]} = Enum.split(recipients, -1)
+
+    {session, out} =
+      Enum.reduce(earlier, {session, out}, fn recipient, {session, out} ->
+        reply_event(session, "END-OF-MESSAGE", recipient, reply, started)
+        errors = session.errors + if(Reply.negative?(reply), do: 1, else: 0)
+        {%{session | errors: errors}, [Reply.encode(reply) | out]}
+      end)
+
+    reply(session, out, "END-OF-MESSAGE", last, reply, started)
   end
 
   # Tells the handler that an open message will not complete.
@@ -890,23 +953,12 @@ defmodule Sovite.SMTP.Server.Session do
   ## Replies
 
   defp reply(session, out, command, argument, reply, started \\ System.monotonic_time()) do
-    :telemetry.execute(
-      [:sovite, :smtp, :server, :command, :stop],
-      %{duration: System.monotonic_time() - started},
-      %{
-        session_id: session.connection.session_id,
-        remote_ip: session.connection.remote_ip,
-        command: command,
-        argument: argument,
-        reply_code: reply.code,
-        reply: Reply.to_string(reply)
-      }
-    )
+    reply_event(session, command, argument, reply, started)
 
     # The greeting and the EHLO/HELO response carry no enhanced code
     # (RFC 2034 §4). Errors keep theirs, as most servers do.
     reply =
-      if command in ["EHLO", "HELO"] and Reply.positive?(reply),
+      if command in ["EHLO", "HELO", "LHLO"] and Reply.positive?(reply),
         do: %{reply | enhanced: nil},
         else: reply
 
@@ -929,5 +981,20 @@ defmodule Sovite.SMTP.Server.Session do
       true ->
         process(session, out)
     end
+  end
+
+  defp reply_event(session, command, argument, reply, started) do
+    :telemetry.execute(
+      [:sovite, :smtp, :server, :command, :stop],
+      %{duration: System.monotonic_time() - started},
+      %{
+        session_id: session.connection.session_id,
+        remote_ip: session.connection.remote_ip,
+        command: command,
+        argument: argument,
+        reply_code: reply.code,
+        reply: Reply.to_string(reply)
+      }
+    )
   end
 end

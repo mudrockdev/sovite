@@ -53,6 +53,14 @@ defmodule Sovite.Core.SMTPHandler do
   a missing `Date:` or `Message-ID:` is added, and the header fields in
   `submission.strip_headers` are removed.
 
+  ## Loops
+
+  A message with more than `smtp.max_hops` `Received:` fields is refused
+  at the end of the data with `554 5.4.6` (RFC 5321 §6.3): it is most
+  likely going round in circles.
+
+  ## Queueing
+
   The message is accepted with `250` only after `Sovite.Queue.Spool`
   has made it durable. A `Received:` header is added at the top. The
   queue manager given as `:queue_manager` is then told about it. A
@@ -86,7 +94,7 @@ defmodule Sovite.Core.SMTPHandler do
 
   alias Sovite.Core.Repo.Tables.{AccessRules, Users}
 
-  alias Sovite.Message.{Date, Headers, MessageID, Received}
+  alias Sovite.Message.{Date, Headers, MessageID, Received, Trace}
   alias Sovite.Net
   alias Sovite.Queue.{Envelope, ID, Spool}
   alias Sovite.SASL
@@ -117,6 +125,7 @@ defmodule Sovite.Core.SMTPHandler do
       local_recipients:
         config.domains.local_recipients && MapSet.new(config.domains.local_recipients),
       trusted_networks: config.smtp.trusted_networks,
+      max_hops: config.smtp.max_hops,
       restrictions: config.restrictions,
       access: access_tables(repo),
       resolver: Keyword.get_lazy(runtime, :resolver, &Sovite.DNS.default_resolver/0),
@@ -219,6 +228,7 @@ defmodule Sovite.Core.SMTPHandler do
         mechanism: nil,
         helo: nil,
         esmtp: false,
+        lmtp: false,
         sender: nil,
         envelope_sender: nil,
         expansions: [],
@@ -246,7 +256,7 @@ defmodule Sovite.Core.SMTPHandler do
 
   @impl true
   def handle_helo(kind, name, state) do
-    state = %{state | helo: name, esmtp: kind == :ehlo}
+    state = %{state | helo: name, esmtp: kind != :helo, lmtp: kind == :lhlo}
 
     case restrict(state, :helo) do
       {:ok, state} ->
@@ -540,7 +550,12 @@ defmodule Sovite.Core.SMTPHandler do
     received_at = DateTime.utc_now()
 
     protocol =
-      Received.protocol(esmtp: state.esmtp, tls: state.tls != nil, auth: state.identity != nil)
+      Received.protocol(
+        lmtp: state.lmtp,
+        esmtp: state.esmtp,
+        tls: state.tls != nil,
+        auth: state.identity != nil
+      )
 
     envelope = %Envelope{
       queue_id: queue_id,
@@ -569,9 +584,9 @@ defmodule Sovite.Core.SMTPHandler do
     with {:ok, writer} <- Spool.open(state.queue_directory, envelope),
          {:ok, writer} <- Spool.write(writer, received) do
       Logger.metadata(queue_id: queue_id)
-      # Hold back the header section when it has to be fixed or rewritten.
-      header = if state.identity != nil or header_rewriting?(state), do: ""
-      {:ok, %{state | writer: writer, queue_id: queue_id, header: header}}
+      # The header section is held back to count hops, and to be fixed or
+      # rewritten.
+      {:ok, %{state | writer: writer, queue_id: queue_id, header: ""}}
     else
       {:error, reason} -> queue_error(state, reason)
     end
@@ -588,7 +603,8 @@ defmodule Sovite.Core.SMTPHandler do
 
     case Headers.split(buffer) do
       {:ok, header, body} ->
-        write(%{state | header: nil}, [fix_header(header, state), "\r\n", body])
+        with {:ok, header} <- checked_header(header, state),
+             do: write(%{state | header: nil}, [header, "\r\n", body])
 
       :more when byte_size(buffer) > @max_header_section ->
         write(%{state | header: nil}, buffer)
@@ -609,10 +625,24 @@ defmodule Sovite.Core.SMTPHandler do
     end
   end
 
-  # The RFC 6409 §8.1-8.3 fixes, and address rewriting.
-  defp fix_header(header, state) do
+  # Refuses a looping message, and fixes the header section if needed.
+  defp checked_header(header, state) do
     fields = Headers.parse(header)
 
+    cond do
+      Trace.hops(fields) > state.max_hops ->
+        {:reply, Reply.new(554, "5.4.6", "Too many hops"), abort(state)}
+
+      state.identity != nil or header_rewriting?(state) ->
+        {:ok, fix_header(fields, state)}
+
+      true ->
+        {:ok, header}
+    end
+  end
+
+  # The RFC 6409 §8.1-8.3 fixes, and address rewriting.
+  defp fix_header(fields, state) do
     fields =
       if state.identity,
         do: submission_fixes(fields, state),
@@ -645,10 +675,9 @@ defmodule Sovite.Core.SMTPHandler do
     header =
       if header == "" or String.ends_with?(header, "\r\n"), do: header, else: header <> "\r\n"
 
-    case write(%{state | header: nil}, fix_header(header, state)) do
-      {:ok, state} -> handle_data_end(transaction, state)
-      error -> error
-    end
+    with {:ok, header} <- checked_header(header, state),
+         {:ok, state} <- write(%{state | header: nil}, header),
+         do: handle_data_end(transaction, state)
   end
 
   def handle_data_end(_transaction, state) do

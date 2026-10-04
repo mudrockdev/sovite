@@ -22,6 +22,11 @@ defmodule Sovite.Test.FakeMTA do
     * `:tls` - `:ssl` server options: offer `STARTTLS`.
     * `:implicit_tls` - with `:tls`, run the handshake before the greeting.
     * `:auth` - a map of user name to password: offer `AUTH PLAIN LOGIN`.
+    * `:lmtp` - speak LMTP: answer `LHLO` instead of `EHLO`, and reply
+      once per accepted recipient after the data, with the `:lmtp_data_end`
+      response (called with the recipient). Messages then also carry
+      `:delivered`, the recipients that got a 2xx reply.
+    * `:unix` - listen on this Unix socket path instead of a TCP port.
 
   Messages also carry `:tls` (the `Sovite.TLS.info()` of the connection,
   or `nil`) and `:auth` (the authenticated user, or `nil`).
@@ -56,17 +61,16 @@ defmodule Sovite.Test.FakeMTA do
 
   @impl true
   def init(opts) do
-    {:ok, listen} =
-      :gen_tcp.listen(0, [
-        :binary,
-        ip: {127, 0, 0, 1},
-        active: false,
-        packet: :line,
-        buffer: 65_536,
-        reuseaddr: true
-      ])
+    address =
+      case Keyword.get(opts, :unix) do
+        nil -> [ip: {127, 0, 0, 1}, reuseaddr: true]
+        path -> [:local, ifaddr: {:local, path}]
+      end
 
-    {:ok, port} = :inet.port(listen)
+    {:ok, listen} =
+      :gen_tcp.listen(0, [:binary, active: false, packet: :line, buffer: 65_536] ++ address)
+
+    {:ok, port} = if opts[:unix], do: {:ok, 0}, else: :inet.port(listen)
 
     config = %{
       owner: Keyword.fetch!(opts, :owner),
@@ -76,7 +80,8 @@ defmodule Sovite.Test.FakeMTA do
       responses: Keyword.get(opts, :responses, %{}),
       tls: Keyword.get(opts, :tls),
       implicit_tls: Keyword.get(opts, :implicit_tls, false),
-      auth: Keyword.get(opts, :auth)
+      auth: Keyword.get(opts, :auth),
+      lmtp: Keyword.get(opts, :lmtp, false)
     }
 
     acceptor = spawn_link(fn -> accept_loop(listen, config) end)
@@ -156,7 +161,8 @@ defmodule Sovite.Test.FakeMTA do
     end
   end
 
-  defp handle_command("EHLO", arg, socket, config, txn) do
+  defp handle_command(verb, arg, socket, %{lmtp: lmtp} = config, txn)
+       when (verb == "EHLO" and not lmtp) or (verb == "LHLO" and lmtp) do
     starttls = if config.tls && txn.tls == nil, do: ["STARTTLS"], else: []
     auth = if config.auth, do: ["AUTH PLAIN LOGIN"], else: []
     lines = [config.hostname | config.extensions] ++ starttls ++ auth
@@ -294,14 +300,10 @@ defmodule Sovite.Test.FakeMTA do
     case recv(socket) do
       {:ok, ".\r\n"} ->
         data = acc |> Enum.reverse() |> IO.iodata_to_binary()
-        reply = respond(config, :data_end, data, "250 2.0.0 OK queued")
 
-        if positive?(reply) do
-          message = Map.put(txn, :data, data)
-          send(config.owner, {:fake_mta, config.server, {:message, message}})
-        end
-
-        send_reply(socket, reply, new_transaction(txn.helo, txn))
+        if config.lmtp,
+          do: lmtp_data_end(socket, config, txn, data),
+          else: data_end(socket, config, txn, data)
 
       {:ok, <<".", rest::binary>>} ->
         receive_data(socket, config, txn, [rest | acc])
@@ -313,6 +315,31 @@ defmodule Sovite.Test.FakeMTA do
         :stop
     end
   end
+
+  defp data_end(socket, config, txn, data) do
+    reply = respond(config, :data_end, data, "250 2.0.0 OK queued")
+    if positive?(reply), do: report(config, Map.put(txn, :data, data))
+    send_reply(socket, reply, new_transaction(txn.helo, txn))
+  end
+
+  # One reply per accepted recipient (RFC 2033 §4.2).
+  defp lmtp_data_end(socket, config, txn, data) do
+    replies = Enum.map(txn.rcpt_to, &{&1, respond(config, :lmtp_data_end, &1, "250 2.0.0 OK")})
+    delivered = for {rcpt, reply} <- replies, positive?(reply), do: rcpt
+
+    if delivered != [],
+      do: report(config, txn |> Map.put(:data, data) |> Map.put(:delivered, delivered))
+
+    Enum.reduce_while(replies, {:continue, txn}, fn {_rcpt, reply}, _ ->
+      case send_reply(socket, reply, new_transaction(txn.helo, txn)) do
+        {:continue, txn} -> {:cont, {:continue, txn}}
+        :stop -> {:halt, :stop}
+      end
+    end)
+  end
+
+  defp report(config, message),
+    do: send(config.owner, {:fake_mta, config.server, {:message, message}})
 
   ## Helpers
 

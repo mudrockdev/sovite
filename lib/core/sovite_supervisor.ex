@@ -168,7 +168,8 @@ defmodule Sovite.Core.Supervisor do
      require_tls: listener.require_tls and mode != :submissions,
      auth: listener.auth,
      auth_required: listener.require_auth,
-     plaintext_auth: config.auth.plaintext}
+     plaintext_auth: config.auth.plaintext,
+     lmtp: mode == :lmtp}
   end
 
   defp tls_options(nil, _listener), do: nil

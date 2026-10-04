@@ -91,8 +91,8 @@ mode = "submissions"
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `address` | IP address | `0.0.0.0` | Address to bind. IPv6 listeners are IPv6-only, so add both `0.0.0.0` and `::` for dual stack. |
-| `mode` | `smtp` \| `submission` \| `submissions` | `smtp` | What the listener is for, which sets the defaults below. |
-| `port` | integer | `25` / `587` / `465` | TCP port, by mode. Ports below 1024 need `CAP_NET_BIND_SERVICE` or socket activation, see [Security](security.md). |
+| `mode` | `smtp` \| `submission` \| `submissions` \| `lmtp` | `smtp` | What the listener is for, which sets the defaults below. |
+| `port` | integer | `25` / `587` / `465` / `24` | TCP port, by mode. Ports below 1024 need `CAP_NET_BIND_SERVICE` or socket activation, see [Security](security.md). |
 | `auth` | boolean | `false` / `true` / `true` | Offer `AUTH`. It is only offered over TLS, unless `auth.plaintext` is set. |
 | `require_tls` | boolean | `false` / `true` / `true` | Refuse `MAIL`, `RCPT`, `DATA`, `VRFY`, and `AUTH` with `530 5.7.0` until the client has sent `STARTTLS`. Do not set it on port 25: senders on the Internet may not support TLS. |
 | `require_auth` | boolean | `false` / `true` / `true` | Refuse `MAIL` with `530 5.7.0` until the client has authenticated. Needs `auth = true`. |
@@ -100,6 +100,8 @@ mode = "submissions"
 | `tls_ciphers` | array of cipher names | `tls.ciphers` | Override for this listener. |
 
 `STARTTLS` is offered on `smtp` and `submission` listeners whenever a certificate is configured in [`[tls]`](#tls). A `submissions` listener starts TLS right after the connection opens, so it needs a certificate.
+
+An `lmtp` listener speaks LMTP (RFC 2033) instead of SMTP, for use behind another MTA that hands mail over to Sovite: the client greets with `LHLO`, and gets one reply per recipient after the message. Its defaults are those of `smtp` (no `AUTH`, no required TLS), and it must not use port 25. Relay control and restrictions apply as on any other listener.
 
 To let mail clients find the submission ports by themselves (RFC 6186), publish SRV records such as `_submissions._tcp.example.com. SRV 0 1 465 mx.example.com.` and `_submission._tcp.example.com. SRV 10 1 587 mx.example.com.`
 
@@ -170,6 +172,7 @@ Settings for all listeners. Limits apply per listener.
 | `bare_line_endings` | `reject` \| `normalize` | `reject` | What to do with a bare LF or CR (one not in a CRLF pair). `reject` closes the session with `521 5.5.2`; `normalize` turns it into CRLF. Either way only `<CRLF>.<CRLF>` ends a message, so SMTP smuggling is not possible. Use `normalize` only for old clients that send bare LF. |
 | `vrfy` | boolean | `false` | Answer `VRFY` from `domains.local_recipients`. When off, `VRFY` gets `252`. |
 | `trusted_networks` | array of networks | `[]` | Clients that may relay mail to any domain, such as your own servers. Addresses or CIDR networks: `["127.0.0.1", "192.0.2.0/24", "2001:db8::/32"]`. |
+| `max_hops` | integer | `50` | A message with more `Received:` fields than this is refused with `554 5.4.6 Too many hops`: it is most likely in a mail loop (RFC 5321 §6.3). |
 
 ## `[domains]`
 
@@ -192,9 +195,72 @@ Domains are compared case-insensitively, and only the domain of the parsed addre
 
 A message is accepted with `250 2.0.0 Ok: queued as <queue ID>` only after it is written and `fsync`ed in the queue directory.
 
+## Transports
+
+Each recipient's domain class picks a transport from `[routing]`: `local_transport` (default `"local"`) for `domains.local`, `mailbox_transport` (`"mailbox"`) for hosted domains, `relay_transport` and `remote_transport` (`"smtp"`) for relay and all other domains. The transports table (`sovitectl transport`) can override it per address or domain.
+
+| Transport | Delivers |
+|---|---|
+| `smtp`, `smtp:[host]:port` | Over SMTP, see [`[delivery]`](#delivery). |
+| `lmtp:unix:/run/dovecot/lmtp`, `lmtp:inet:host:24`, `lmtp:[192.0.2.1]:24` | Over LMTP (RFC 2033) to a mailbox server such as Dovecot, Cyrus, or Stalwart. Each recipient gets its own status code. No MX lookup, TLS, or login. |
+| `local`, `mailbox` | Into a Maildir folder, see [`[maildir]`](#maildir). |
+| `pipe:name` | To the command of the [`[pipe.name]`](#pipename) section. |
+| `error:5.1.1 text`, `retry:4.3.0 text`, `discard:text` | Bounce, retry later, or drop. |
+
+LMTP, Maildir, and pipe deliveries are final. A message whose `Delivered-To:` field already names the recipient has been here before, and fails for that recipient as a mail loop (`5.4.6`, RFC 9228). Maildir and pipe deliveries add `Return-Path:` and `Delivered-To:` at the top (RFC 5321 §4.4); an LMTP server adds its own.
+
+A typical Dovecot setup:
+
+```toml
+[domains]
+hosted = ["example.com"]
+
+[routing]
+mailbox_transport = "lmtp:unix:/run/dovecot/lmtp"
+```
+
+## `[maildir]`
+
+Maildir delivery for the `local` and `mailbox` transports. Without a folder for a transport, its mail is deferred with `4.3.5`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `local` | path template | unset | Folder for the `local` transport, such as `"/var/mail/{user}/"`. |
+| `mailbox` | path template | unset | Folder for the `mailbox` transport, such as `"/var/vmail/{domain}/{user}/"`. |
+
+Templates are absolute paths with `{user}` (the lower-cased local part without its extension), `{domain}`, and `{address}` (`user@domain`). An address that would not be a safe path component (with `/`, or `.` and `..`) fails with `5.1.3`. Folders are created as needed with mode `0700`, and must be writable by the Sovite user. Messages are written to `tmp/`, flushed to disk, and then moved into `new/`.
+
+## `[pipe.NAME]`
+
+Commands the `pipe:NAME` transport runs, once per recipient, with the message on standard input. Names may use letters, digits, `_`, and `-`.
+
+```toml
+[routing]
+local_transport = "pipe:procmail"
+
+[pipe.procmail]
+command = ["/usr/bin/procmail", "-a", "{extension}", "-d", "{user}"]
+sandbox = ["/usr/bin/systemd-run", "--quiet", "--pipe", "--wait", "--collect", "-p", "DynamicUser=yes"]
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `command` | array of strings | required | The program (an absolute path) and its arguments. |
+| `sandbox` | array of strings | unset | A program to run the command through, such as `systemd-run` or `bwrap`, with its arguments. The command's arguments are appended. |
+| `timeout` | duration | `10m` | The command is killed after this long, and the mail is retried. |
+| `directory` | absolute path | `/` | Working directory. |
+| `env` | table | `{}` | Extra environment variables. |
+| `trace_headers` | boolean | `true` | Add `Return-Path:` and `Delivered-To:` at the top of the message. Turn off for commands that send the message on, such as content filters. |
+
+The command is run directly, never through a shell: placeholders in arguments are replaced, and each argument reaches the command as it is. Placeholders: `{sender}`, `{recipient}`, `{user}`, `{extension}` (without the delimiter), `{domain}`, and `{queue_id}`. Addresses can start with `-`, so put `--` before them if the command takes options. The environment is empty apart from `PATH`, `env`, and `SENDER`, `RECIPIENT`, `USER`, `EXTENSION`, `DOMAIN`, and `QUEUE_ID`.
+
+The exit status decides the result, as in Postfix: `0` is delivered, `75` (`EX_TEMPFAIL`) and other temporary `sysexits.h` codes are retried, `67` (`EX_NOUSER`) and other permanent codes bounce, as does any other status. A command killed by a signal is retried. The first line of its output goes into the bounce.
+
+Sovite cannot switch users, so the command runs as the Sovite user unless `sandbox` changes that.
+
 ## `[delivery]`
 
-Outbound delivery over SMTP. Mail for `domains.local` is not delivered by this section: local delivery comes in a later release, and until then such mail is deferred.
+Outbound delivery over SMTP, for the `smtp` transport.
 
 | Key | Type | Default | Description |
 |---|---|---|---|

@@ -129,12 +129,12 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 5 — Local Delivery & Mailbox Hand-off
 
-- [ ] LMTP client (to Dovecot, Cyrus, Stalwart) over TCP and Unix sockets
-- [ ] LMTP server mode (optional, for use behind other MTAs)
-- [ ] Maildir delivery (optional, for simple setups)
-- [ ] Pipe transport (deliver to external command, with sandboxing)
-- [ ] `Delivered-To:` header and mail loop detection (hop count limit)
-- [ ] `Return-Path:` insertion at final delivery
+- [x] LMTP client (to Dovecot, Cyrus, Stalwart) over TCP and Unix sockets
+- [x] LMTP server mode (optional, for use behind other MTAs)
+- [x] Maildir delivery (optional, for simple setups)
+- [x] Pipe transport (deliver to external command, with sandboxing)
+- [x] `Delivered-To:` header and mail loop detection (hop count limit)
+- [x] `Return-Path:` insertion at final delivery
 
 **Standards:** RFC 2033, RFC 9228, RFC 5321 §6.3 (loop detection)
 

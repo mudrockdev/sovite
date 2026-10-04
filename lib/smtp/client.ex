@@ -23,9 +23,18 @@ defmodule Sovite.SMTP.Client do
   logs in with SASL (RFC 4954). With the `:tls` option the connection is
   encrypted from the start instead (implicit TLS, RFC 8314).
 
+  ## LMTP
+
+  With `protocol: :lmtp` the client speaks LMTP (RFC 2033) instead: it
+  greets with `LHLO`, and after the data the server answers once for
+  each accepted recipient, so every recipient gets its own result at
+  `:data_end`. LMTP servers usually listen on a Unix socket: pass
+  `{:local, path}` as the address (the port is ignored).
+
   ## Options
 
-    * `:helo` - name to send in `EHLO`/`HELO`. Required.
+    * `:helo` - name to send in `EHLO`/`HELO` (or `LHLO`). Required.
+    * `:protocol` - `:smtp` (default) or `:lmtp`.
     * `:connect_timeout` - milliseconds. Defaults to 30 seconds.
     * `:greeting_timeout` - for the `220` greeting. Defaults to 5 minutes.
     * `:command_timeout` - for `EHLO`, `MAIL`, `RCPT`, `RSET`, and `QUIT`
@@ -35,7 +44,8 @@ defmodule Sovite.SMTP.Client do
       minutes.
     * `:data_end_timeout` - for the reply after the final dot. Defaults
       to 10 minutes.
-    * `:local_address` - local IP address to connect from.
+    * `:local_address` - local IP address to connect from. Not used for
+      Unix sockets.
     * `:max_line_length` / `:max_lines` - reply limits, see
       `Sovite.SMTP.Reply.decode/2`.
     * `:tls` - `:ssl` client options to use implicit TLS: the handshake
@@ -58,7 +68,8 @@ defmodule Sovite.SMTP.Client do
     max_line_length: 2048,
     max_lines: 100,
     tls: nil,
-    tls_timeout: 60_000
+    tls_timeout: 60_000,
+    protocol: :smtp
   ]
 
   @mechanisms %{
@@ -95,6 +106,7 @@ defmodule Sovite.SMTP.Client do
           | :greeting
           | :ehlo
           | :helo
+          | :lhlo
           | :starttls
           | :auth
           | :mail
@@ -106,7 +118,7 @@ defmodule Sovite.SMTP.Client do
 
   @typedoc """
   A failure that ends the connection. The reason is a rejection reply
-  (at `:greeting`, `:ehlo`, or `:helo`), `:timeout`, `:closed`, a
+  (at `:greeting`, `:ehlo`, `:helo`, or `:lhlo`), `:timeout`, `:closed`, a
   `Sovite.SMTP.Reply.decode_error()`, a socket error, or `{:tls, reason}`
   for a failed TLS handshake (at `:tls` or `:starttls`).
   """
@@ -135,18 +147,22 @@ defmodule Sovite.SMTP.Client do
   """
   @type result :: {recipient :: String.t(), stage(), Reply.t()}
 
-  @doc "Connects, reads the greeting, and sends `EHLO` (or `HELO`)."
-  @spec connect(:inet.ip_address(), :inet.port_number(), keyword()) ::
+  @typedoc "Where to connect: an IP address, or a Unix socket."
+  @type address :: :inet.ip_address() | {:local, Path.t()}
+
+  @doc "Connects, reads the greeting, and sends `EHLO` (or `HELO`, or `LHLO`)."
+  @spec connect(address(), :inet.port_number(), keyword()) ::
           {:ok, t()} | {:error, error()}
   def connect(address, port, opts) do
     opts = Keyword.validate!(opts, [:helo] ++ @defaults)
     helo = Keyword.fetch!(opts, :helo)
 
     tcp_opts =
-      [:binary, active: false, packet: :raw, nodelay: true]
+      [:binary, active: false, packet: :raw]
       |> Kernel.++(send_timeout: opts[:send_timeout], send_timeout_close: true)
-      |> Kernel.++(if tuple_size(address) == 8, do: [:inet6], else: [])
-      |> Kernel.++(if opts[:local_address], do: [ip: opts[:local_address]], else: [])
+      |> Kernel.++(family_options(address, opts[:local_address]))
+
+    port = if match?({:local, _}, address), do: 0, else: port
 
     case :gen_tcp.connect(address, port, tcp_opts, opts[:connect_timeout]) do
       {:ok, socket} ->
@@ -165,6 +181,14 @@ defmodule Sovite.SMTP.Client do
       {:error, reason} ->
         {:error, {:connect, reason}}
     end
+  end
+
+  defp family_options({:local, _path}, _local_address), do: [:local]
+
+  defp family_options(address, local_address) do
+    [nodelay: true] ++
+      if(tuple_size(address) == 8, do: [:inet6], else: []) ++
+      if(local_address, do: [ip: local_address], else: [])
   end
 
   defp implicit_tls(%{opts: %{tls: nil}} = client), do: {:ok, client}
@@ -287,7 +311,7 @@ defmodule Sovite.SMTP.Client do
   defp auth_loop(client, _module, _state, reply), do: {:error, client, {:rejected, reply}}
 
   @doc "Returns the server's address and port."
-  @spec peer(t()) :: {:inet.ip_address(), :inet.port_number()}
+  @spec peer(t()) :: {address(), :inet.port_number()}
   def peer(%__MODULE__{address: address, port: port}), do: {address, port}
 
   @doc """
@@ -359,6 +383,20 @@ defmodule Sovite.SMTP.Client do
       {:ok, %Reply{code: 220} = reply, client} -> {:ok, %{client | greeting: reply}}
       {:ok, reply, _client} -> {:error, {:greeting, reply}}
       {:error, _} = error -> error
+    end
+  end
+
+  defp hello(%{opts: %{protocol: :lmtp}} = client, name) do
+    case command(client, :lhlo, ["LHLO ", name]) do
+      {:ok, %Reply{code: 250} = reply, client} ->
+        [first | lines] = reply.lines
+        {:ok, %{client | server_name: first_word(first), extensions: parse_extensions(lines)}}
+
+      {:ok, reply, _client} ->
+        {:error, {:lhlo, reply}}
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -527,12 +565,13 @@ defmodule Sovite.SMTP.Client do
   end
 
   # RFC 2920 §3.1: if DATA got 354 although no recipient was accepted, the
-  # client must still send the terminating dot.
+  # client must still send the terminating dot. An LMTP server answers it
+  # once per accepted recipient: not at all.
   defp finish_data_if_started(client, data_reply, results \\ nil)
 
   defp finish_data_if_started(client, %Reply{code: 354}, results) do
     with :ok <- send_raw(client, ".\r\n", :data_end),
-         {:ok, _reply, client} <- read_reply(client, :data_end, client.opts.data_end_timeout) do
+         {:ok, _replies, client} <- read_data_end(client, if(lmtp?(client), do: 0, else: 1)) do
       if results, do: {:ok, client, results}, else: {:ok, client}
     end
   end
@@ -551,12 +590,38 @@ defmodule Sovite.SMTP.Client do
         end
       end)
 
+    accepted = accepted(rcpt_replies)
+
     with {:ok, encoder} <- result,
          :ok <- send_raw(client, DataEncoder.finish(encoder), :data_end),
-         {:ok, reply, client} <- read_reply(client, :data_end, client.opts.data_end_timeout) do
-      {:ok, client, rejected(rcpt_replies) ++ all(accepted(rcpt_replies), :data_end, reply)}
+         {:ok, replies, client} <-
+           read_data_end(client, if(lmtp?(client), do: length(accepted), else: 1)) do
+      {:ok, client, rejected(rcpt_replies) ++ data_end_results(accepted, replies)}
     end
   end
+
+  # SMTP answers the final dot once; LMTP once per accepted recipient, in
+  # the order of the RCPT commands (RFC 2033 §4.2).
+  defp read_data_end(client, count) do
+    Enum.reduce_while(1..count//1, {:ok, [], client}, fn _, {:ok, acc, client} ->
+      case read_reply(client, :data_end, client.opts.data_end_timeout) do
+        {:ok, reply, client} -> {:cont, {:ok, [reply | acc], client}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, acc, client} -> {:ok, Enum.reverse(acc), client}
+      error -> error
+    end
+  end
+
+  defp data_end_results(accepted, [reply]) when length(accepted) != 1,
+    do: all(accepted, :data_end, reply)
+
+  defp data_end_results(accepted, replies),
+    do: Enum.zip_with(accepted, replies, &{&1, :data_end, &2})
+
+  defp lmtp?(client), do: client.opts.protocol == :lmtp
 
   defp accepted(rcpt_replies),
     do: for({rcpt, reply} <- rcpt_replies, Reply.positive?(reply), do: rcpt)

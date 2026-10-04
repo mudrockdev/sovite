@@ -1,10 +1,29 @@
 defmodule Sovite.Core.Delivery do
   @moduledoc """
   Delivers one job (a message to a group of recipients with the same
-  destination) over SMTP. Runs in a task started by
-  `Sovite.Core.QueueManager`.
+  destination). Runs in a task started by `Sovite.Core.QueueManager`.
 
-  For each job it:
+  The destination's transport (see `Sovite.Core.Router`) decides how:
+
+    * `:smtp` - to another server, described below.
+    * `:lmtp` - to a mailbox server such as Dovecot over LMTP
+      (RFC 2033), on a Unix socket or a host. Each recipient gets its
+      own status code after the data. LMTP connections are reused like
+      SMTP ones.
+    * `:local` and `:mailbox` - into a Maildir folder, from the
+      `maildir.local` or `maildir.mailbox` template.
+    * `:pipe` - to the command of a `[pipe.<name>]` config section, once
+      per recipient, through `Sovite.Pipe`.
+
+  These four are final deliveries. A recipient that a `Delivered-To:`
+  field of the message already names is a mail loop and fails with
+  `5.4.6` (RFC 9228). Maildir and pipe deliveries get `Return-Path:` and
+  `Delivered-To:` fields at the top (RFC 5321 §4.4); an LMTP server adds
+  its own.
+
+  ## SMTP
+
+  For each SMTP job it:
 
     1. Finds the destination's addresses: MX hosts in preference order
        (`Sovite.DNS.MX`), then each host's addresses in the configured IP
@@ -48,9 +67,22 @@ defmodule Sovite.Core.Delivery do
   address for the address family, the connection is made from it.
   """
 
+  import Sovite.Core.Delivery.Transaction,
+    only: [
+      all: 3,
+      all: 4,
+      connect_error: 3,
+      details: 4,
+      format_reason: 1,
+      remote_name: 2,
+      stage_text: 1,
+      transaction: 3
+    ]
+
+  alias Sovite.Core.Delivery.{LMTP, Local}
   alias Sovite.Core.Router
   alias Sovite.DNS.MX
-  alias Sovite.Message.Received
+  alias Sovite.Message.{Headers, Received, Trace}
   alias Sovite.Queue.{Record, Spool}
   alias Sovite.SMTP.{Client, Reply}
   alias Sovite.TLS
@@ -73,6 +105,13 @@ defmodule Sovite.Core.Delivery do
   @typedoc """
   Worker options:
 
+    * `:maildir` - `%{local: template, mailbox: template}`, Maildir path
+      templates with `{user}`, `{domain}`, and `{address}`, or `nil`.
+    * `:pipes` - pipe commands by name, from the `[pipe]` config section.
+    * `:delimiter` - the address extension delimiter.
+    * `:tmp_dir` - where pipe deliveries write the message for the
+      command to read.
+
     * `:hostname` - this server's name, for `EHLO` and loop detection.
     * `:resolver` - a `Sovite.DNS` resolver.
     * `:port` - SMTP port for MX deliveries. 25 except in tests.
@@ -94,7 +133,11 @@ defmodule Sovite.Core.Delivery do
             default: tls_level(),
             policy: %{String.t() => tls_level()},
             cacerts: [binary()] | nil
-          }
+          },
+          maildir: %{optional(:local | :mailbox) => String.t() | nil},
+          pipes: %{String.t() => map()},
+          delimiter: String.t(),
+          tmp_dir: Path.t()
         }
 
   @type tls_level :: :none | :may | :encrypt | :verify | :dane
@@ -141,15 +184,57 @@ defmodule Sovite.Core.Delivery do
     {results, connection}
   end
 
-  defp deliver(job, {client, host}, opts) do
+  defp deliver(%{destination: %{transport: :smtp}} = job, connection, opts),
+    do: smtp(job, connection, opts)
+
+  defp deliver(job, connection, opts) do
+    case loops(job) do
+      {:ok, []} ->
+        final(job, connection, opts)
+
+      {:ok, looping} ->
+        failed = details("5.4.6", "mail forwarding loop", nil, false)
+
+        results =
+          Enum.map(looping, &{&1, :failed, %{failed | reply: "mail forwarding loop for #{&1}"}})
+
+        case job.recipients -- looping do
+          [] ->
+            {results, nil, connection}
+
+          rest ->
+            {more, remote, connection} = final(%{job | recipients: rest}, connection, opts)
+            {results ++ more, remote, connection}
+        end
+
+      {:error, reason} ->
+        text = "cannot read queue file: #{:file.format_error(reason)}"
+        {all(job, "4.3.0", text), nil, connection}
+    end
+  end
+
+  defp final(%{destination: %{transport: :lmtp}} = job, connection, opts),
+    do: LMTP.deliver(job, connection, opts)
+
+  defp final(job, _connection, opts), do: {Local.deliver(job, opts), nil, nil}
+
+  # Recipients that a Delivered-To: field already names.
+  defp loops(job) do
+    with {:ok, header} <- Spool.read_headers(job.path, job.message_offset, job.message_size) do
+      fields = Headers.parse(header)
+      {:ok, Enum.filter(job.recipients, &Trace.delivered_to?(fields, &1))}
+    end
+  end
+
+  defp smtp(job, {client, host}, opts) do
     case transaction(job, client, host) do
       # The cached connection went away; start over with a fresh one.
-      {:retry, _error} -> deliver(job, nil, opts)
+      {:retry, _error} -> smtp(job, nil, opts)
       {results, remote, connection} -> {results, remote, connection}
     end
   end
 
-  defp deliver(job, nil, opts) do
+  defp smtp(job, nil, opts) do
     case addresses(job.destination, opts) do
       {:ok, addresses} ->
         try_addresses(job, Enum.take(addresses, opts.max_addresses), nil, opts)
@@ -364,37 +449,6 @@ defmodule Sovite.Core.Delivery do
     is_binary(name) and String.downcase(name, :ascii) == String.downcase(hostname, :ascii)
   end
 
-  defp transaction(job, client, remote) do
-    body = Spool.stream_message(job.path, job.message_offset, job.message_size)
-    opts = [size: job.message_size, body_type: job.body_type]
-
-    case Client.deliver(client, job.sender, job.recipients, body, opts) do
-      {:ok, client, replies} ->
-        results =
-          Enum.map(replies, fn {rcpt, stage, reply} ->
-            reply_result(rcpt, stage, reply, remote)
-          end)
-
-        {results, remote, {client, remote}}
-
-      {:error, client, refusal} ->
-        {status, text} = refusal_error(refusal, remote)
-        {all(job, status, text, remote), remote, {client, remote}}
-
-      {:error, {:data_end, reason}} ->
-        text =
-          "lost connection with #{remote} while sending end of data (#{format_reason(reason)}); " <>
-            "the message may be delivered more than once"
-
-        {all(job, "4.4.2", text, remote), remote, nil}
-
-      {:error, {stage, reason}} ->
-        {:retry,
-         {"4.4.2",
-          "lost connection with #{remote} #{stage_text(stage)} (#{format_reason(reason)})"}}
-    end
-  end
-
   ## Addresses
 
   defp addresses(%{nexthop: nexthop}, opts), do: addresses(nexthop, opts)
@@ -444,75 +498,4 @@ defmodule Sovite.Core.Delivery do
     do: {:error, "4" <> rest, "relay host #{host}: #{text}"}
 
   defp relay_errors(result, _host), do: result
-
-  ## Results
-
-  defp reply_result(rcpt, stage, reply, remote) do
-    status =
-      cond do
-        stage == :data_end and reply.code in 200..299 -> :delivered
-        reply.code >= 500 -> :failed
-        true -> :deferred
-      end
-
-    {rcpt, status, details(Reply.status(reply), Reply.to_string(reply), remote, true)}
-  end
-
-  defp all(job, status, text, remote \\ nil) do
-    result = if String.starts_with?(status, "5"), do: :failed, else: :deferred
-    details = details(status, text, remote, false)
-    Enum.map(job.recipients, &{&1, result, details})
-  end
-
-  defp details(status, reply, remote, smtp),
-    do: %{status: status, reply: reply, remote: remote, smtp: smtp, at: DateTime.utc_now()}
-
-  defp refusal_error({:message_too_large, limit}, remote),
-    do: {"5.3.4", "message size exceeds the limit of #{limit} bytes of #{remote}"}
-
-  defp refusal_error(:eight_bit_not_supported, remote),
-    do: {"5.6.3", "8-bit message, but #{remote} does not support 8BITMIME"}
-
-  defp refusal_error({:invalid_address, address}, _remote),
-    do: {"5.1.3", "invalid address #{inspect(address)}"}
-
-  defp connect_error(remote, port, {:connect, reason}),
-    do: {"4.4.1", "connect to #{remote}:#{port}: #{format_reason(reason)}"}
-
-  defp connect_error(remote, _port, {:tls, {:tls, reason}}),
-    do: {"4.7.5", "TLS with host #{remote} failed: #{TLS.format_error(reason)}"}
-
-  defp connect_error(remote, _port, {stage, %Reply{} = reply})
-       when stage in [:greeting, :ehlo, :helo],
-       do: {"4.4.1", "host #{remote} refused to talk to me: #{Reply.to_string(reply)}"}
-
-  defp connect_error(remote, _port, {stage, reason}),
-    do:
-      {"4.4.2", "lost connection with #{remote} #{stage_text(stage)} (#{format_reason(reason)})"}
-
-  defp stage_text(:greeting), do: "while receiving the initial greeting"
-  defp stage_text(:ehlo), do: "while sending EHLO"
-  defp stage_text(:helo), do: "while sending HELO"
-  defp stage_text(:mail), do: "while sending MAIL FROM"
-  defp stage_text(:rcpt), do: "while sending RCPT TO"
-  defp stage_text(:data), do: "while sending DATA"
-  defp stage_text(:data_end), do: "while sending end of data"
-  defp stage_text(:rset), do: "while sending RSET"
-  defp stage_text(:starttls), do: "while sending STARTTLS"
-  defp stage_text(:auth), do: "while authenticating"
-  defp stage_text(stage), do: "at #{stage}"
-
-  defp format_reason(:timeout), do: "timeout"
-  defp format_reason(:closed), do: "connection closed"
-  defp format_reason(:econnrefused), do: "Connection refused"
-
-  defp format_reason(reason) when is_atom(reason),
-    do: reason |> :inet.format_error() |> to_string()
-
-  defp format_reason(reason), do: inspect(reason)
-
-  defp remote_name(host, ip) do
-    literal = Received.address_literal(ip)
-    if host == literal, do: literal, else: host <> literal
-  end
 end

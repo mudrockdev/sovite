@@ -37,17 +37,19 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `message/` | `Sovite.Message` | RFC 5322 header parsing/folding, address lists (rewriting addresses in `From:`/`To:`/...), MIME, `Received:` / `Date:` / `Message-ID:` builders, streaming body handling |
+| `message/` | `Sovite.Message` | RFC 5322 header parsing/folding, address lists (rewriting addresses in `From:`/`To:`/...), MIME, `Received:` / `Date:` / `Message-ID:` builders, trace fields (`Return-Path:`, `Delivered-To:`, hop counting), streaming body handling |
 | `dns/` | `Sovite.DNS` | Resolver behaviour, default resolver, cache, MX / TXT / TLSA helpers, Null MX |
 | `ldap/` | `Sovite.LDAP` | LDAP connections (StartTLS/LDAPS), bind, search, RFC 4515 filters with injection-safe placeholders, DN escaping |
 | `sasl/` | `Sovite.SASL` | PLAIN, LOGIN, SCRAM-SHA-256, OAUTHBEARER (both server and client side) |
 | `proxy_protocol/` | `Sovite.ProxyProtocol` | HAProxy PROXY v1/v2 parser |
+| `maildir/` | `Sovite.Maildir` | Crash-safe Maildir delivery (`tmp/` then `new/`) |
+| `pipe/` | `Sovite.Pipe` | Run an external command with a file on standard input: no shell, clean environment, timeout, output limit |
 
 ### Layer 2: Protocols & Mail Authentication
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `smtp/` | `Sovite.SMTP` | Command/reply codec, enhanced status codes, server session state machine, client state machine, LMTP variant, extensions |
+| `smtp/` | `Sovite.SMTP` | Command/reply codec, enhanced status codes, server session state machine, client state machine, LMTP (client over TCP and Unix sockets, and server mode), extensions |
 | `dsn/` | `Sovite.DSN` | Build and parse delivery status notifications (RFC 3464 / 6522) |
 | `spf/` | `Sovite.SPF` | SPF evaluation (RFC 7208) |
 | `dkim/` | `Sovite.DKIM` | DKIM signing and verification (RFC 6376, 8301, 8463) |
@@ -65,7 +67,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency), bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration |
+| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration |
 
 New components are added as new folders, placed in the lowest layer their dependencies allow.
 
@@ -81,7 +83,9 @@ lib/core/
     data.ex          # helpers shared by the table modules
   config/            # config schema and cross-key checks
   cli/               # sovitectl commands
-  ...                # routing, rewriting, restrictions, delivery, queue manager
+  delivery.ex        # Sovite.Core.Delivery: runs one job, SMTP here
+  delivery/          # LMTP, local (Maildir and pipe), and the shared transaction/result code
+  ...                # routing, rewriting, restrictions, queue manager
 ```
 
 Every database table has its own migration, schema, and table module. Code outside `core/repo/`, including `sovitectl`, reaches the database only through the table modules (see `AGENTS.md`).
