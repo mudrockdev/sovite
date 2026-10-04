@@ -256,12 +256,6 @@ defmodule Sovite.Queue.SpoolTest do
       end
     end
 
-    # BUG: lib/queue/spool.ex:193-194 (parse_header/1) uses Integer.parse/1,
-    # which accepts a sign. A negative message size then reaches verify/4
-    # (lib/queue/spool.ex:203, 211), which has no clause for it, so read/1
-    # raises FunctionClauseError; a negative envelope size makes it return
-    # {:error, :badarg} from :file.read/2.
-    @tag :skip
     test "rejects signed sizes in the header", %{path: path, contents: contents} do
       <<"SOVITE-QUEUE 1 ", env, env_rest::binary-9, " ", msg, msg_rest::binary-19, rest::binary>> =
         contents

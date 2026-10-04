@@ -274,11 +274,6 @@ defmodule Sovite.ListenerTest do
     assert Listener.handshake(%{socket: make_ref()}, 10) == {:error, :timeout}
   end
 
-  # BUG: lib/listener/server.ex:155-157 (start_connection/3). If the handler
-  # process exits before the socket is handed over, controlling_process/2
-  # fails and the acceptor never closes the socket: it stays open, owned
-  # by the acceptor, while the connection's slot has already been released.
-  @tag :skip
   test "closes the socket when the connection process exits before the handover" do
     %{port: port} = start_listener(handler: ExitingHandler)
     socket = connect(port)

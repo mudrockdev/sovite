@@ -5,10 +5,7 @@ defmodule Sovite.NetTest do
   import Bitwise
   import Sovite.Net
 
-  # BUG: the format_cidr/1 doctest (lib/net/net.ex:97) writes the first
-  # group as decimal `2001` instead of `0x2001`, so it yields "7d1:db8::/32".
-  # Excluded until the doc is fixed; format_cidr/1 is tested below.
-  doctest Sovite.Net, except: [format_cidr: 1]
+  doctest Sovite.Net
 
   describe "parse_ip/1" do
     test "parses IPv4 and IPv6 addresses" do
@@ -110,11 +107,6 @@ defmodule Sovite.NetTest do
       end
     end
 
-    # BUG: lib/net/net.ex:106 (parse_prefix/2) uses Integer.parse/1, which
-    # accepts a sign, and only bounds the length, so "+8", "-0" and leading
-    # zeros ("024") are accepted as valid prefix lengths. parse_ip/1 is
-    # strict about leading zeros, so the prefix probably should be too.
-    @tag :skip
     test "rejects signed or zero-padded prefixes" do
       for s <- ["10.0.0.0/+8", "0.0.0.0/-0", "10.0.0.0/024", "10.0.0.0/08", "::/+64"] do
         assert parse_cidr(s) == {:error, :invalid_cidr}, "expected #{inspect(s)} to be invalid"
