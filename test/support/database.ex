@@ -3,7 +3,7 @@ defmodule Sovite.Test.Database do
   Starts a migrated SQLite database for one test, in its `tmp_dir`.
 
       repo = Sovite.Test.Database.start!(context.tmp_dir)
-      Sovite.Core.Users.create(repo, "alice@example.com", "secret")
+      Sovite.Core.Repo.Tables.Users.create(repo, "alice@example.com", "secret")
   """
 
   import ExUnit.Callbacks, only: [start_supervised!: 1]

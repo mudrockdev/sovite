@@ -1,4 +1,4 @@
-defmodule Sovite.Core.Users.SenderLogin do
+defmodule Sovite.Core.Repo.Schemas.SenderLogin do
   @moduledoc """
   A sender address a user may use in `MAIL FROM`: a full address
   (`sales@example.com`), every address at a domain (`@example.com`), or

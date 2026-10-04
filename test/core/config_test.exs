@@ -87,7 +87,14 @@ defmodule Sovite.Core.ConfigTest do
     assert config.smtp.trusted_networks == []
     assert config.smtp.max_message_size == 25 * 1024 * 1024
     assert config.smtp.command_timeout == 300_000
-    assert config.domains == %{local: ["mx.example.org"], relay: [], local_recipients: nil}
+
+    assert config.domains == %{
+             local: ["mx.example.org"],
+             relay: [],
+             aliased: [],
+             hosted: [],
+             local_recipients: nil
+           }
   end
 
   test "parses listeners, SMTP limits, and domains" do
@@ -133,7 +140,9 @@ defmodule Sovite.Core.ConfigTest do
     assert config.domains == %{
              local: ["example.com"],
              relay: ["backup.example"],
-             local_recipients: ["alice@example.com"]
+             local_recipients: ["alice@example.com"],
+             aliased: [],
+             hosted: []
            }
   end
 
@@ -153,7 +162,8 @@ defmodule Sovite.Core.ConfigTest do
              tls_policy: %{},
              tls_ca_file: nil,
              relayhost_username: nil,
-             relayhost_password: nil
+             relayhost_password: nil,
+             source_address: []
            }
 
     assert config.bounce == %{double_bounce_recipient: nil}

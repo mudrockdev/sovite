@@ -9,7 +9,8 @@ defmodule Sovite.Core.DatabaseAdaptersTest do
   #     mix test --only mysql
   use ExUnit.Case, async: false
 
-  alias Sovite.Core.{Repo, Users}
+  alias Sovite.Core.Repo
+  alias Sovite.Core.Repo.Tables.Users
 
   for {adapter, env} <- [postgres: "SOVITE_TEST_POSTGRES_URL", mysql: "SOVITE_TEST_MYSQL_URL"] do
     @tag adapter
@@ -28,7 +29,7 @@ defmodule Sovite.Core.DatabaseAdaptersTest do
       repo = {module, pid}
 
       # Start from a clean table each run.
-      Repo.run(repo, fn m -> m.delete_all(Users.User) end)
+      Repo.run(repo, fn m -> m.delete_all(Sovite.Core.Repo.Schemas.User) end)
 
       assert {:ok, _} = Users.create(repo, "Alice@Example.com", "secret")
 

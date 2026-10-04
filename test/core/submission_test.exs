@@ -4,7 +4,8 @@ defmodule Sovite.Core.SubmissionTest do
   use ExUnit.Case, async: true
 
   alias Sovite.Abuse.Penalty
-  alias Sovite.Core.{Config, SMTPHandler, Users}
+  alias Sovite.Core.{Config, SMTPHandler}
+  alias Sovite.Core.Repo.Tables.Users
   alias Sovite.Queue.Spool
   alias Sovite.SMTP.Client
   alias Sovite.Test.{Certs, Database, SMTPClient, TelemetryForwarder}

@@ -1,4 +1,4 @@
-defmodule Sovite.Core.Users do
+defmodule Sovite.Core.Repo.Tables.Users do
   @moduledoc """
   Users stored in Sovite's database (`Sovite.Core.Repo`), and a
   `Sovite.SASL.Backend` that authenticates against them.
@@ -16,7 +16,7 @@ defmodule Sovite.Core.Users do
   import Ecto.Query, only: [from: 2, order_by: 2]
 
   alias Sovite.Core.Repo
-  alias Sovite.Core.Users.{SenderLogin, User}
+  alias Sovite.Core.Repo.Schemas.{SenderLogin, User}
   alias Sovite.SASL.Password
 
   @doc "Creates a user. The password is hashed with `Sovite.SASL.Password.hash/1`."
@@ -77,7 +77,7 @@ defmodule Sovite.Core.Users do
     end)
   end
 
-  @doc "Allows a user to send as `address`, see `Sovite.Core.Users.SenderLogin`."
+  @doc "Allows a user to send as `address`, see `Sovite.Core.Repo.Schemas.SenderLogin`."
   @spec add_sender(Repo.t(), String.t(), String.t()) ::
           {:ok, SenderLogin.t()} | {:error, :not_found | Ecto.Changeset.t()}
   def add_sender(repo, username, address) do

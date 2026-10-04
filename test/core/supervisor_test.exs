@@ -4,8 +4,9 @@ defmodule Sovite.Core.SupervisorTest do
 
   import ExUnit.CaptureLog
 
-  alias Sovite.Core.{Config, Repo, Telemetry, Users}
+  alias Sovite.Core.{Config, Repo, Telemetry}
   alias Sovite.Core.Logging.FileHandler
+  alias Sovite.Core.Repo.Tables.Users
   alias Sovite.Queue.Spool
   alias Sovite.Test.{Certs, FakeDNS, FakeMTA, SMTPClient}
 

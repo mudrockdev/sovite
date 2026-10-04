@@ -26,7 +26,8 @@ defmodule Sovite.Core.Supervisor do
   ## Children
 
   In start order: the log file handler, the database (migrated before
-  anything else starts), the failed-login counter, the certificate store
+  anything else starts), the cache of the domains in the database, the
+  failed-login counter, the certificate store
   and the ACME client (when TLS is configured), the queue manager, and
   the listeners. They stop in reverse order, so listeners close first.
   """
@@ -36,7 +37,18 @@ defmodule Sovite.Core.Supervisor do
   require Logger
 
   alias Sovite.Abuse.Penalty
-  alias Sovite.Core.{ACME, Config, Logging, QueueManager, Repo, SMTPHandler, Telemetry}
+  alias Sovite.Core.Repo.Tables.DomainCache
+
+  alias Sovite.Core.{
+    ACME,
+    Config,
+    Logging,
+    QueueManager,
+    Repo,
+    SMTPHandler,
+    Telemetry
+  }
+
   alias Sovite.Queue.Spool
   alias Sovite.TLS.CertStore
 
@@ -74,6 +86,7 @@ defmodule Sovite.Core.Supervisor do
 
     runtime = %{
       queue_manager: manager_opts[:name],
+      resolver: manager_opts[:resolver],
       repo: repo,
       penalty: if(auth, do: @penalty),
       cert_store: if(tls, do: @cert_store)
@@ -83,10 +96,13 @@ defmodule Sovite.Core.Supervisor do
     # arrives, then the queue manager, and the log file handler last.
     children =
       Logging.child_specs(config.log) ++
-        [{Repo, {config.database, elem(repo, 1)}}] ++
+        [
+          {Repo, {config.database, elem(repo, 1)}},
+          {DomainCache, repo: repo}
+        ] ++
         if(auth, do: [penalty_spec(config)], else: []) ++
         if(tls, do: tls_specs(config), else: []) ++
-        [{QueueManager, QueueManager.opts(config) ++ manager_opts}] ++
+        [{QueueManager, QueueManager.opts(config, repo) ++ manager_opts}] ++
         Enum.map(config.listener, &listener(&1, config, runtime))
 
     Supervisor.init(children, strategy: :one_for_one)
@@ -125,10 +141,11 @@ defmodule Sovite.Core.Supervisor do
     smtp = config.smtp
 
     handler =
-      SMTPHandler.opts(config, runtime.queue_manager,
-        repo: runtime.repo,
-        penalty: runtime.penalty,
-        require_auth: listener.require_auth
+      SMTPHandler.opts(
+        config,
+        runtime.queue_manager,
+        [repo: runtime.repo, penalty: runtime.penalty, require_auth: listener.require_auth] ++
+          if(runtime.resolver, do: [resolver: runtime.resolver], else: [])
       )
 
     {Sovite.SMTP.Server,

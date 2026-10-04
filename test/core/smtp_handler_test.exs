@@ -120,7 +120,8 @@ defmodule Sovite.Core.SMTPHandlerTest do
 
     assert {250, _} = rcpt(mta, "alice@EXAMPLE.com")
 
-    assert {550, "5.1.1 <bob@example.com>: Recipient address rejected: User unknown"} =
+    assert {550,
+            "5.1.1 <bob@example.com>: Recipient address rejected: User unknown in local recipient table"} =
              rcpt(mta, "bob@example.com")
   end
 

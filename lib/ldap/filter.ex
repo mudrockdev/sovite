@@ -1,19 +1,18 @@
-defmodule Sovite.SASL.Backend.LDAP.Filter do
+defmodule Sovite.LDAP.Filter do
   @moduledoc """
   Parses RFC 4515 LDAP search filters into `:eldap` filters, with
-  placeholders filled in after parsing:
+  placeholders filled in after parsing.
 
-    * `%u` - the whole user name
-    * `%n` - the part before the last `@` (the whole name if none)
-    * `%d` - the part after the last `@` (empty if none)
-    * `%%` - a `%`
+  A placeholder is `%` and a letter; `build/2` takes the value of each
+  letter, such as `%{"u" => "alice@example.com"}`. `%%` is a `%`, and a
+  letter without a value is left as it is.
 
-  Because placeholders are replaced in the parsed values, a user name
-  cannot change the filter's structure: `*)(uid=*` is just a strange
-  name, never an injection.
+  Because placeholders are replaced in the parsed values, input cannot
+  change the filter's structure: `*)(uid=*` is just a strange name, never
+  an injection.
 
-      iex> {:ok, filter} = Sovite.SASL.Backend.LDAP.Filter.parse("(&(objectClass=person)(mail=%u))")
-      iex> Sovite.SASL.Backend.LDAP.Filter.build(filter, "a*b@example.com")
+      iex> {:ok, filter} = Sovite.LDAP.Filter.parse("(&(objectClass=person)(mail=%u))")
+      iex> Sovite.LDAP.Filter.build(filter, %{"u" => "a*b@example.com"})
       {:and, [{:equalityMatch, {:AttributeValueAssertion, ~c"objectClass", ~c"person"}}, {:equalityMatch, {:AttributeValueAssertion, ~c"mail", ~c"a*b@example.com"}}]}
   """
 
@@ -29,18 +28,30 @@ defmodule Sovite.SASL.Backend.LDAP.Filter do
     end
   end
 
-  @doc "Fills in the placeholders for `username` and returns an `:eldap` filter."
-  @spec build(t(), String.t()) :: term()
-  def build({:and, filters}, username), do: :eldap.and(Enum.map(filters, &build(&1, username)))
-  def build({:or, filters}, username), do: :eldap.or(Enum.map(filters, &build(&1, username)))
-  def build({:not, filter}, username), do: :eldap.not(build(filter, username))
-  def build({:present, attr}, _username), do: :eldap.present(attr)
+  @doc "Fills in the placeholders from `values` and returns an `:eldap` filter."
+  @spec build(t(), %{String.t() => binary()}) :: term()
+  def build({:and, filters}, values), do: :eldap.and(Enum.map(filters, &build(&1, values)))
+  def build({:or, filters}, values), do: :eldap.or(Enum.map(filters, &build(&1, values)))
+  def build({:not, filter}, values), do: :eldap.not(build(filter, values))
+  def build({:present, attr}, _values), do: :eldap.present(attr)
 
-  def build({:substrings, attr, parts}, username) do
-    :eldap.substrings(attr, for({kind, value} <- parts, do: {kind, fill(value, username)}))
+  def build({:substrings, attr, parts}, values) do
+    :eldap.substrings(attr, for({kind, value} <- parts, do: {kind, fill(value, values)}))
   end
 
-  def build({op, attr, value}, username), do: apply(:eldap, op, [attr, fill(value, username)])
+  def build({op, attr, value}, values), do: apply(:eldap, op, [attr, fill(value, values)])
+
+  @doc """
+  Replaces the placeholders in `string` with `values`, escaping each
+  value with `escape`.
+  """
+  @spec substitute(String.t(), %{String.t() => binary()}, (binary() -> binary())) :: binary()
+  def substitute(string, values, escape \\ & &1) do
+    Regex.replace(~r/%([a-z%])/, string, fn
+      "%%", _ -> "%"
+      whole, letter -> if value = values[letter], do: escape.(value), else: whole
+    end)
+  end
 
   ## Parser
 
@@ -131,20 +142,6 @@ defmodule Sovite.SASL.Backend.LDAP.Filter do
          end)}
   end
 
-  defp fill(value, username) do
-    {local, domain} =
-      case String.split(username, "@") do
-        [name] -> {name, ""}
-        parts -> {parts |> Enum.drop(-1) |> Enum.join("@"), List.last(parts)}
-      end
-
-    Regex.replace(~r/%[und%]/, value, fn
-      "%u" -> username
-      "%n" -> local
-      "%d" -> domain
-      "%%" -> "%"
-    end)
-    # Values are octet strings: keep the bytes, valid UTF-8 or not.
-    |> :binary.bin_to_list()
-  end
+  # Values are octet strings: keep the bytes, valid UTF-8 or not.
+  defp fill(value, values), do: value |> substitute(values) |> :binary.bin_to_list()
 end

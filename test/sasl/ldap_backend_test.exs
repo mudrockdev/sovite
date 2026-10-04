@@ -1,8 +1,8 @@
 defmodule Sovite.SASL.Backend.LDAPTest do
   use ExUnit.Case, async: true
 
+  alias Sovite.LDAP.Filter
   alias Sovite.SASL.Backend.LDAP
-  alias Sovite.SASL.Backend.LDAP.Filter
   alias Sovite.Test.{Certs, FakeLDAP}
 
   doctest Filter
@@ -125,7 +125,7 @@ defmodule Sovite.SASL.Backend.LDAPTest do
                 {:equalityMatch, {_, ~c"domain", ~c"example.com"}},
                 {:equalityMatch, {_, ~c"pct", ~c"100%"}},
                 {:substrings, {_, ~c"cn", [initial: ~c"al@ice"]}}
-              ]} = Filter.build(filter, "al@ice@example.com")
+              ]} = Filter.build(filter, Sovite.LDAP.user_values("al@ice@example.com"))
     end
   end
 end

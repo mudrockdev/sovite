@@ -23,7 +23,16 @@ defmodule Sovite.Core.Repo do
   @type adapter :: :sqlite | :postgres | :mysql
 
   @migrations [
-    {20_261_004_000_001, Migrations.CreateUsers}
+    {20_261_004_000_001, Migrations.CreateUsers},
+    {20_261_004_000_003, Migrations.CreateDomains},
+    {20_261_004_000_004, Migrations.CreateAliases},
+    {20_261_004_000_005, Migrations.CreateMailboxes},
+    {20_261_004_000_006, Migrations.CreateRelocatedUsers},
+    {20_261_004_000_007, Migrations.CreateTransports},
+    {20_261_004_000_008, Migrations.CreateSenderRelays},
+    {20_261_004_000_009, Migrations.CreateAccessRules},
+    {20_261_004_000_010, Migrations.CreateAddressRewrites},
+    {20_261_004_000_011, Migrations.CreateBccRules}
   ]
 
   @doc "The migrations, in order, as `{version, module}`."

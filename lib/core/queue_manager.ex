@@ -43,11 +43,9 @@ defmodule Sovite.Core.QueueManager do
 
   require Logger
 
-  alias Sovite.Core.{Bounce, Delivery, Router}
+  alias Sovite.Core.{Bounce, Delivery, Recipients, Router, Routing}
   alias Sovite.Queue.{Backoff, Entry, Spool}
   alias Sovite.SMTP.Client
-
-  @local_details {"4.3.2", "local delivery is not available yet"}
 
   defstruct [
     :opts,
@@ -68,8 +66,9 @@ defmodule Sovite.Core.QueueManager do
   ## API
 
   @doc """
-  Queue manager options from the running configuration. `start_link/1`
-  takes these, plus:
+  Queue manager options from the running configuration (`repo` is
+  Sovite's database, for `database` tables). `start_link/1` takes these,
+  plus:
 
     * `:name` - registered name, or `nil` for none. Defaults to this
       module.
@@ -81,9 +80,10 @@ defmodule Sovite.Core.QueueManager do
       Defaults to one minute.
     * `:max_active` - messages in memory at once. Defaults to 10000.
   """
-  @spec opts(Sovite.Core.Config.t()) :: keyword()
-  def opts(config) do
+  @spec opts(Sovite.Core.Config.t(), Sovite.Core.Repo.t() | nil) :: keyword()
+  def opts(config, repo \\ nil) do
     [
+      routing: Routing.new(config, repo),
       directory: config.queue.directory,
       hostname: config.server.hostname,
       local_domains: config.domains.local,
@@ -134,7 +134,13 @@ defmodule Sovite.Core.QueueManager do
       |> Map.new()
       |> Map.put_new(:scan_interval, 60_000)
       |> Map.put_new(:max_active, 10_000)
-      |> Map.update!(:local_domains, &MapSet.new/1)
+      |> Map.put_new_lazy(:routing, fn ->
+        %Routing{
+          hostname: hostname,
+          local_domains: MapSet.new(Keyword.get(opts, :local_domains, [])),
+          relayhost: Keyword.get(opts, :relayhost)
+        }
+      end)
 
     delivery = %{
       hostname: hostname,
@@ -148,10 +154,7 @@ defmodule Sovite.Core.QueueManager do
         default: Map.get(opts, :tls) || :may,
         policy: Map.get(opts, :tls_policy) || %{},
         cacerts: Map.get(opts, :tls_cacerts)
-      },
-      relay_auth:
-        opts[:relayhost_username] &&
-          %{username: opts.relayhost_username, password: opts[:relayhost_password] || ""}
+      }
     }
 
     {:ok, task_supervisor} = Task.Supervisor.start_link()
@@ -450,17 +453,16 @@ defmodule Sovite.Core.QueueManager do
   ## Planning deliveries
 
   defp plan(state, id, message) do
-    router = %{local_domains: state.opts.local_domains, relayhost: state.opts.relayhost}
-    groups = message.entry |> Entry.pending() |> Enum.group_by(&Router.route(&1, router))
-    {local, groups} = Map.pop(groups, :local, [])
-    {invalid, groups} = Map.pop(groups, :invalid, [])
-
-    immediate =
-      Enum.map(local, &{&1, :deferred, details(@local_details)}) ++
-        Enum.map(invalid, &{&1, :failed, details({"5.1.3", "bad recipient address syntax"})})
-
-    message = record_results(message, immediate)
     envelope = message.entry.envelope
+
+    {remote, immediate} =
+      message.entry
+      |> Entry.pending()
+      |> Enum.map(&{&1, Router.route(state.opts.routing, envelope.sender, &1)})
+      |> Enum.split_with(&match?({_rcpt, {:remote, _}}, &1))
+
+    message = record_results(message, Enum.map(immediate, &immediate_result/1))
+    groups = Enum.group_by(remote, fn {_rcpt, route} -> route end, &elem(&1, 0))
 
     jobs =
       for {{:remote, destination}, recipients} <- groups,
@@ -490,6 +492,15 @@ defmodule Sovite.Core.QueueManager do
       %{state | ready: ready}
     end
   end
+
+  defp immediate_result({rcpt, {:defer, status, text}}),
+    do: {rcpt, :deferred, details({status, text})}
+
+  defp immediate_result({rcpt, {:fail, status, text}}),
+    do: {rcpt, :failed, details({status, text})}
+
+  defp immediate_result({rcpt, {:discard, text}}),
+    do: {rcpt, :delivered, details({"2.0.0", "discarded: #{text}"})}
 
   defp details({status, text}),
     do: %{status: status, reply: text, remote: nil, smtp: false, at: DateTime.utc_now()}
@@ -691,7 +702,17 @@ defmodule Sovite.Core.QueueManager do
   end
 
   defp bounce_opts(state) do
-    Map.take(state.opts, [:hostname, :directory, :max_lifetime, :double_bounce_recipient])
+    routing = state.opts.routing
+
+    state.opts
+    |> Map.take([:hostname, :directory, :max_lifetime, :double_bounce_recipient])
+    |> Map.put(:expand, fn address ->
+      case Recipients.expand(routing, address) do
+        {:ok, addresses} -> addresses
+        # Keep the notification: it goes to the address as it is.
+        {:error, _kind, _text} -> [address]
+      end
+    end)
   end
 
   defp age(message) do

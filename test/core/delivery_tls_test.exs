@@ -41,6 +41,7 @@ defmodule Sovite.Core.DeliveryTLSTest do
   # `dns` gets the fake MTA's port, since TLSA names include it.
   defp start(context, mta_opts, manager_opts, dns \\ fn _port -> %{} end) do
     mta = start_supervised!({FakeMTA, [owner: self()] ++ mta_opts}, id: make_ref())
+    {extra_config, manager_opts} = Keyword.pop(manager_opts, :config, "")
 
     {:ok, config} =
       Config.parse("""
@@ -50,6 +51,7 @@ defmodule Sovite.Core.DeliveryTLSTest do
       directory = "#{context.dir}"
       min_backoff = "1h"
       max_backoff = "1h"
+      #{extra_config}
       """)
 
     base_dns = %{
@@ -212,9 +214,12 @@ defmodule Sovite.Core.DeliveryTLSTest do
 
       env =
         start(context, [],
-          relayhost: %{host: "[127.0.0.1]", port: port, mx: false},
-          relayhost_username: "alice",
-          relayhost_password: "secret"
+          config: """
+          [delivery]
+          relayhost = "[127.0.0.1]:#{port}"
+          relayhost_username = "alice"
+          relayhost_password = "secret"
+          """
         )
 
       id = send_mail(context, env, "bob@anywhere.example")
@@ -228,9 +233,12 @@ defmodule Sovite.Core.DeliveryTLSTest do
 
       env =
         start(context, [],
-          relayhost: %{host: "[127.0.0.1]", port: port, mx: false},
-          relayhost_username: "alice",
-          relayhost_password: "secret"
+          config: """
+          [delivery]
+          relayhost = "[127.0.0.1]:#{port}"
+          relayhost_username = "alice"
+          relayhost_password = "secret"
+          """
         )
 
       assert assert_deferred(send_mail(context, env, "bob@anywhere.example")) =~
@@ -248,9 +256,12 @@ defmodule Sovite.Core.DeliveryTLSTest do
 
       env =
         start(context, [],
-          relayhost: %{host: "[127.0.0.1]", port: port, mx: false},
-          relayhost_username: "alice",
-          relayhost_password: "wrong"
+          config: """
+          [delivery]
+          relayhost = "[127.0.0.1]:#{port}"
+          relayhost_username = "alice"
+          relayhost_password = "wrong"
+          """
         )
 
       assert assert_deferred(send_mail(context, env, "bob@anywhere.example")) =~

@@ -20,14 +20,16 @@ defmodule Sovite.Core.Bounce do
 
   @typedoc """
   Options: `:hostname`, `:directory` (the spool), `:max_lifetime`
-  (milliseconds, for "will retry until"), and `:double_bounce_recipient`
-  (or `nil`).
+  (milliseconds, for "will retry until"), `:double_bounce_recipient`
+  (or `nil`), and optionally `:expand`, a function that turns the
+  notification's recipient into the addresses to queue it for (aliases).
   """
   @type opts :: %{
-          hostname: String.t(),
-          directory: Path.t(),
-          max_lifetime: pos_integer(),
-          double_bounce_recipient: String.t() | nil
+          required(:hostname) => String.t(),
+          required(:directory) => Path.t(),
+          required(:max_lifetime) => pos_integer(),
+          required(:double_bounce_recipient) => String.t() | nil,
+          optional(:expand) => (String.t() -> [String.t(), ...])
         }
 
   @typedoc "Where the original message is, as returned by `Sovite.Queue.Spool.load/2`."
@@ -97,7 +99,7 @@ defmodule Sovite.Core.Bounce do
       notification_envelope = %Envelope{
         queue_id: ID.generate(),
         sender: "",
-        recipients: [to],
+        recipients: expand(opts, to),
         received_at: DateTime.utc_now(),
         protocol: "local",
         body_type: body_type,
@@ -122,6 +124,10 @@ defmodule Sovite.Core.Bounce do
       end
     end
   end
+
+  # Notifications go through the recipient's aliases, like any mail.
+  defp expand(%{expand: expand}, to), do: expand.(to)
+  defp expand(_opts, to), do: [to]
 
   defp retry_until(%Envelope{received_at: %DateTime{} = received_at}, %{max_lifetime: lifetime}),
     do: DateTime.add(received_at, lifetime, :millisecond)

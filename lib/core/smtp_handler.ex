@@ -1,18 +1,19 @@
 defmodule Sovite.Core.SMTPHandler do
   @moduledoc """
-  The MTA's `Sovite.SMTP.Server.Handler`: relay control, authentication,
-  recipient checks, and durable spooling.
+  The MTA's `Sovite.SMTP.Server.Handler`: relay control, restrictions,
+  authentication, recipient checks and expansion, and durable spooling.
 
   Recipients are checked at `RCPT` time:
 
-  1. `<Postmaster>`, and `postmaster@` and `abuse@` any local domain, are
-     always accepted (RFC 5321 §4.5.1, RFC 2142), even when
-     `domains.local_recipients` does not list them. A bare `<Postmaster>`
-     is queued as `postmaster@<server.hostname>`.
-  2. Local domains (`domains.local`): accepted if `domains.local_recipients`
-     is unset or lists the address, otherwise `550 5.1.1`.
-  3. Relay domains (`domains.relay`): accepted.
-  4. Any other destination, including address literals: accepted only from
+  1. `<Postmaster>`, and `postmaster@` and `abuse@` any hosted domain, are
+     always accepted (RFC 5321 §4.5.1, RFC 2142). A bare `<Postmaster>` is
+     queued as `postmaster@<server.hostname>`.
+  2. Domains this server handles (local, aliased, hosted, and relay; see
+     `Sovite.Core.Routing`): the recipient is
+     expanded (`Sovite.Core.Recipients.expand/2`); one that no alias
+     matched must be a known user (`Sovite.Core.Recipients.check/2`),
+     otherwise `550 5.1.1`.
+  3. Any other destination, including address literals: accepted only from
      `smtp.trusted_networks` or after `AUTH`, otherwise `554 5.7.1 Relay
      access denied`. The default config trusts no one, so it is never an
      open relay.
@@ -20,6 +21,18 @@ defmodule Sovite.Core.SMTPHandler do
   Domains are compared case-insensitively. Address tricks such as
   `user%remote@local` or source routes do not relay: only the domain of
   the parsed mailbox counts.
+
+  The restriction chains (`Sovite.Core.Restrictions`) run at connect,
+  `EHLO`, `MAIL`, `RCPT`, `DATA`, and at the end of the data, after the
+  built-in checks of each stage; they can reject, but never permit what
+  relay control or recipient validation refuses.
+
+  ## Rewriting
+
+  The sender is rewritten at `MAIL` (`Sovite.Core.Rewrite.sender/2`) and
+  each recipient at `RCPT`, before expansion. `routing.always_bcc` and
+  the BCC maps add recipients at `DATA`. Mail from trusted networks and
+  authenticated clients also gets its header addresses rewritten.
 
   ## Authentication
 
@@ -42,7 +55,16 @@ defmodule Sovite.Core.SMTPHandler do
 
   The message is accepted with `250` only after `Sovite.Queue.Spool`
   has made it durable. A `Received:` header is added at the top. The
-  queue manager given as `:queue_manager` is then told about it.
+  queue manager given as `:queue_manager` is then told about it. A
+  message a restriction put on hold goes to the hold queue instead; one
+  it discarded is accepted and dropped.
+
+  ## Telemetry
+
+    * `[:sovite, :smtp, :message, :discarded]` and `[:sovite, :smtp,
+      :message, :held]` - `%{}`, `%{session_id, queue_id, reason}`
+    * `[:sovite, :routing, :expansion_error]` - `%{}`, `%{session_id,
+      recipient, reason}`
   """
 
   @behaviour Sovite.SMTP.Server.Handler
@@ -50,7 +72,20 @@ defmodule Sovite.Core.SMTPHandler do
   require Logger
 
   alias Sovite.Abuse.Penalty
-  alias Sovite.Core.{Config, Logging, QueueManager, SenderCheck, Users}
+
+  alias Sovite.Core.{
+    Config,
+    Logging,
+    QueueManager,
+    Recipients,
+    Restrictions,
+    Rewrite,
+    Routing,
+    SenderCheck
+  }
+
+  alias Sovite.Core.Repo.Tables.{AccessRules, Users}
+
   alias Sovite.Message.{Date, Headers, MessageID, Received}
   alias Sovite.Net
   alias Sovite.Queue.{Envelope, ID, Spool}
@@ -66,8 +101,9 @@ defmodule Sovite.Core.SMTPHandler do
     * `queue_manager` - the `Sovite.Core.QueueManager` to notify about new
       messages, if any.
     * `runtime` - `:repo` (a `Sovite.Core.Repo` reference), `:penalty`
-      (the name of the `Sovite.Abuse.Penalty` for failed logins), and
-      `:require_auth` (the listener requires authentication).
+      (the name of the `Sovite.Abuse.Penalty` for failed logins),
+      `:require_auth` (the listener requires authentication), and
+      `:resolver` (for restrictions that look up domains).
   """
   @spec opts(Config.t(), GenServer.server() | nil, keyword()) :: map()
   def opts(config, queue_manager \\ nil, runtime \\ []) do
@@ -77,11 +113,13 @@ defmodule Sovite.Core.SMTPHandler do
       queue_manager: queue_manager,
       hostname: config.server.hostname,
       queue_directory: config.queue.directory,
-      local_domains: MapSet.new(config.domains.local),
-      relay_domains: MapSet.new(config.domains.relay),
+      routing: Routing.new(config, repo),
       local_recipients:
         config.domains.local_recipients && MapSet.new(config.domains.local_recipients),
       trusted_networks: config.smtp.trusted_networks,
+      restrictions: config.restrictions,
+      access: access_tables(repo),
+      resolver: Keyword.get_lazy(runtime, :resolver, &Sovite.DNS.default_resolver/0),
       repo: repo,
       penalty: runtime[:penalty],
       require_auth: Keyword.get(runtime, :require_auth, false),
@@ -94,6 +132,15 @@ defmodule Sovite.Core.SMTPHandler do
         end),
       strip_headers: config.submission.strip_headers
     }
+  end
+
+  # The access rule tables, by kind, for the restriction chains.
+  defp access_tables(nil), do: %{}
+
+  defp access_tables(repo) do
+    Map.new([:client, :helo, :sender, :recipient], fn kind ->
+      {kind, [{"access_rules", {AccessRules, %{repo: repo, kind: kind}}}]}
+    end)
   end
 
   defp auth_opts(%{auth: %{backend: :dovecot} = auth} = config, _repo) do
@@ -172,31 +219,59 @@ defmodule Sovite.Core.SMTPHandler do
         mechanism: nil,
         helo: nil,
         esmtp: false,
+        sender: nil,
+        envelope_sender: nil,
+        expansions: [],
+        session_action: nil,
+        action: nil,
         writer: nil,
         queue_id: nil,
         header: nil
       })
 
-    if opts.require_auth and banned?(state),
-      do:
-        {:close,
-         Reply.new(
-           421,
-           "4.7.0",
-           "#{opts.hostname} Too many failed logins from your address, try again later"
-         ), state},
-      else: {:ok, state}
+    if opts.require_auth and banned?(state) do
+      {:close,
+       Reply.new(
+         421,
+         "4.7.0",
+         "#{opts.hostname} Too many failed logins from your address, try again later"
+       ), state}
+    else
+      case restrict(state, :connect) do
+        {:ok, state} -> {:ok, %{state | session_action: state.action, action: nil}}
+        {:reply, reply, state} -> {:close, reply, state}
+      end
+    end
   end
 
   @impl true
-  def handle_helo(kind, name, state), do: {:ok, %{state | helo: name, esmtp: kind == :ehlo}}
+  def handle_helo(kind, name, state) do
+    state = %{state | helo: name, esmtp: kind == :ehlo}
+
+    case restrict(state, :helo) do
+      {:ok, state} ->
+        {:ok, %{state | session_action: state.action || state.session_action, action: nil}}
+
+      reply ->
+        reply
+    end
+  end
 
   @impl true
   def handle_tls(info, state), do: %{state | tls: info, helo: nil, esmtp: false}
 
   @impl true
-  def handle_mail(sender, _params, %{identity: identity, sender_check: true} = state)
-      when identity != nil do
+  def handle_mail(sender, _params, state) do
+    state = %{state | sender: sender, envelope_sender: nil, expansions: [], action: nil}
+
+    with {:ok, state} <- check_sender(sender, state),
+         {:ok, state} <- restrict(state, :mail) do
+      rewrite_sender(sender, state)
+    end
+  end
+
+  defp check_sender(sender, %{identity: identity, sender_check: true} = state)
+       when identity != nil do
     case allowed_sender?(identity, sender, state) do
       true ->
         {:ok, state}
@@ -210,7 +285,7 @@ defmodule Sovite.Core.SMTPHandler do
     end
   end
 
-  def handle_mail(_sender, _params, state), do: {:ok, state}
+  defp check_sender(_sender, state), do: {:ok, state}
 
   defp allowed_sender?(identity, sender, state) do
     configured = Map.get(state.senders, String.downcase(identity), [])
@@ -227,24 +302,108 @@ defmodule Sovite.Core.SMTPHandler do
       :error
   end
 
-  @impl true
-  def handle_rcpt(recipient, state) do
-    case classify(recipient, state) do
-      :postmaster -> {:ok, state}
-      {:local, address} -> check_local(address, recipient, state)
-      :relay -> {:ok, state}
-      :remote when state.trusted or state.identity != nil -> {:ok, state}
-      :remote -> {:reply, Reply.new(554, "5.7.1", "<#{recipient}>: Relay access denied"), state}
+  defp rewrite_sender(sender, state) do
+    case Rewrite.sender(state.routing, sender) do
+      {:ok, rewritten} -> {:ok, %{state | envelope_sender: rewritten}}
+      {:error, _table} -> {:reply, temporary_failure(), state}
     end
   end
 
-  defp check_local(address, recipient, state) do
-    if state.local_recipients == nil or MapSet.member?(state.local_recipients, address),
-      do: {:ok, state},
-      else:
-        {:reply,
-         Reply.new(550, "5.1.1", "<#{recipient}>: Recipient address rejected: User unknown"),
-         state}
+  @impl true
+  def handle_rcpt(recipient, state) do
+    case classify(recipient, state) do
+      :remote when not state.trusted and state.identity == nil ->
+        {:reply, Reply.new(554, "5.7.1", "<#{recipient}>: Relay access denied"), state}
+
+      class ->
+        with {:ok, state} <- restrict(state, :rcpt, recipient: recipient) do
+          accept_recipient(recipient, class, state)
+        end
+    end
+  end
+
+  defp accept_recipient(recipient, class, state) do
+    address = queued_address(recipient, state)
+
+    with {:ok, rewritten} <- Rewrite.recipient(state.routing, address),
+         {:ok, finals} <- expand(state, rewritten),
+         :ok <- validate(state, class, rewritten, finals) do
+      {:ok, %{state | expansions: state.expansions ++ finals}}
+    else
+      {:error, _table} -> {:reply, temporary_failure(), state}
+      {:reject, reply} -> {:reply, reply, state}
+    end
+  end
+
+  defp expand(state, address) do
+    case Recipients.expand(state.routing, address) do
+      {:ok, finals} ->
+        {:ok, finals}
+
+      {:error, _kind, reason} ->
+        :telemetry.execute([:sovite, :routing, :expansion_error], %{}, %{
+          session_id: state.connection.session_id,
+          recipient: address,
+          reason: reason
+        })
+
+        {:reject, Reply.new(451, "4.3.0", "<#{address}>: Temporary lookup failure")}
+    end
+  end
+
+  # Only an address that no alias matched must be a known user; aliased
+  # ones are checked at delivery, so one broken alias destination does
+  # not refuse the whole alias.
+  defp validate(_state, :postmaster, _address, _finals), do: :ok
+  defp validate(_state, _class, address, [final]) when final != address, do: :ok
+  defp validate(_state, _class, _address, [_, _ | _]), do: :ok
+
+  defp validate(state, _class, address, _finals) do
+    case Recipients.check(state.routing, address) do
+      {:ok, _class} -> :ok
+      {:reject, status, text} -> {:reject, Reply.new(550, status, text)}
+      {:error, _text} -> {:reject, temporary_failure()}
+    end
+  end
+
+  defp temporary_failure, do: Reply.new(451, "4.3.0", "Temporary lookup failure")
+
+  ## Restrictions
+
+  # Runs the chain for `stage`. A HOLD or DISCARD is kept in
+  # `state.action`, for the message.
+  defp restrict(state, stage, extra \\ []) do
+    checks = Map.get(state.restrictions, stage, [])
+
+    if checks == [] do
+      {:ok, state}
+    else
+      case Restrictions.run(checks, stage, restriction_context(state, extra)) do
+        :ok -> {:ok, state}
+        {:reject, reply} -> {:reply, reply, state}
+        action -> {:ok, %{state | action: stronger(state.action, action)}}
+      end
+    end
+  end
+
+  defp stronger({:discard, _} = discard, _action), do: discard
+  defp stronger(_current, action), do: action
+
+  defp restriction_context(state, extra) do
+    Map.merge(
+      %{
+        client_ip: state.connection.remote_ip,
+        helo: state.helo,
+        sender: state.sender,
+        recipient: nil,
+        trusted: state.trusted,
+        authenticated: state.identity != nil,
+        access: state.access,
+        resolver: state.resolver,
+        delimiter: state.routing.delimiter
+      },
+      Map.new(extra)
+    )
   end
 
   ## AUTH
@@ -348,8 +507,36 @@ defmodule Sovite.Core.SMTPHandler do
 
   @impl true
   def handle_data(transaction, state) do
+    with {:ok, state} <- restrict(state, :data),
+         {:ok, recipients} <- envelope_recipients(state) do
+      open_message(transaction, recipients, state)
+    end
+  end
+
+  # The expanded recipients and the BCC addresses, themselves expanded.
+  defp envelope_recipients(state) do
+    sender = state.envelope_sender || state.sender || ""
+
+    with {:ok, bcc} <- Recipients.bcc(state.routing, sender, state.expansions),
+         {:ok, bcc} <- expand_all(state, bcc) do
+      {:ok, Enum.uniq_by(state.expansions ++ bcc, &String.downcase/1)}
+    else
+      {:error, _reason} -> {:reply, temporary_failure(), state}
+      {:reject, reply} -> {:reply, reply, state}
+    end
+  end
+
+  defp expand_all(state, addresses) do
+    Enum.reduce_while(addresses, {:ok, []}, fn address, {:ok, acc} ->
+      case expand(state, address) do
+        {:ok, finals} -> {:cont, {:ok, acc ++ finals}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp open_message(transaction, recipients, state) do
     queue_id = ID.generate()
-    recipients = transaction.recipients |> Enum.map(&queued_address(&1, state)) |> Enum.uniq()
     received_at = DateTime.utc_now()
 
     protocol =
@@ -357,7 +544,7 @@ defmodule Sovite.Core.SMTPHandler do
 
     envelope = %Envelope{
       queue_id: queue_id,
-      sender: transaction.sender,
+      sender: state.envelope_sender || transaction.sender,
       recipients: recipients,
       received_at: received_at,
       session_id: state.connection.session_id,
@@ -374,7 +561,7 @@ defmodule Sovite.Core.SMTPHandler do
         by: state.hostname,
         protocol: protocol,
         id: queue_id,
-        for: if(match?([_], recipients), do: hd(recipients)),
+        for: if(match?([_], transaction.recipients), do: hd(transaction.recipients)),
         date: received_at,
         tls: state.tls && Sovite.TLS.describe(state.tls)
       })
@@ -382,13 +569,16 @@ defmodule Sovite.Core.SMTPHandler do
     with {:ok, writer} <- Spool.open(state.queue_directory, envelope),
          {:ok, writer} <- Spool.write(writer, received) do
       Logger.metadata(queue_id: queue_id)
-      # Submitted messages get their header section fixed, so hold it back.
-      header = if state.identity, do: ""
+      # Hold back the header section when it has to be fixed or rewritten.
+      header = if state.identity != nil or header_rewriting?(state), do: ""
       {:ok, %{state | writer: writer, queue_id: queue_id, header: header}}
     else
       {:error, reason} -> queue_error(state, reason)
     end
   end
+
+  defp header_rewriting?(state),
+    do: (state.trusted or state.identity != nil) and Rewrite.rewrites_headers?(state.routing)
 
   @impl true
   def handle_data_chunk(chunk, %{header: nil} = state), do: write(state, chunk)
@@ -419,21 +609,34 @@ defmodule Sovite.Core.SMTPHandler do
     end
   end
 
-  # RFC 6409 §8.1-8.3.
+  # The RFC 6409 §8.1-8.3 fixes, and address rewriting.
   defp fix_header(header, state) do
-    fields = header |> Headers.parse() |> Headers.delete(state.strip_headers)
+    fields = Headers.parse(header)
+
+    fields =
+      if state.identity,
+        do: submission_fixes(fields, state),
+        else: fields
+
+    fields =
+      if header_rewriting?(state),
+        do: Rewrite.header_fields(state.routing, fields),
+        else: fields
+
+    Headers.encode(fields)
+  end
+
+  defp submission_fixes(fields, state) do
+    fields = Headers.delete(fields, state.strip_headers)
 
     fields =
       if Headers.has?(fields, "date"),
         do: fields,
         else: Headers.append(fields, "Date", Date.format(DateTime.utc_now()))
 
-    fields =
-      if Headers.has?(fields, "message-id"),
-        do: fields,
-        else: Headers.append(fields, "Message-ID", MessageID.generate(state.hostname))
-
-    Headers.encode(fields)
+    if Headers.has?(fields, "message-id"),
+      do: fields,
+      else: Headers.append(fields, "Message-ID", MessageID.generate(state.hostname))
   end
 
   @impl true
@@ -449,11 +652,35 @@ defmodule Sovite.Core.SMTPHandler do
   end
 
   def handle_data_end(_transaction, state) do
+    checks = Map.get(state.restrictions, :end_of_data, [])
+
+    action =
+      case Restrictions.run(checks, :end_of_data, restriction_context(state, [])) do
+        :ok -> state.action
+        action -> stronger(state.action, action)
+      end
+
+    finish(action || state.session_action, state)
+  end
+
+  defp finish({:reject, reply}, state) do
+    state = abort(state)
+    {:reply, reply, %{state | action: nil}}
+  end
+
+  defp finish({:discard, reason}, state) do
+    queue_id = state.queue_id
+    state = abort(state)
+    message_event(:discarded, state, queue_id, reason)
+    {:reply, Reply.new(250, "2.0.0", "Ok: discarded as #{queue_id}"), %{state | action: nil}}
+  end
+
+  defp finish(action, state) do
     case Spool.commit(state.writer) do
       {:ok, _path, _size} ->
-        state = %{state | writer: nil}
+        state = %{state | writer: nil, action: nil}
         Logger.metadata(queue_id: nil)
-        if state.queue_manager, do: QueueManager.notify(state.queue_manager, state.queue_id)
+        release(action, state)
         {:reply, Reply.new(250, "2.0.0", "Ok: queued as #{state.queue_id}"), state}
 
       {:error, reason} ->
@@ -461,11 +688,39 @@ defmodule Sovite.Core.SMTPHandler do
     end
   end
 
+  defp release({:hold, reason}, state) do
+    case Spool.move(state.queue_directory, state.queue_id, :incoming, :hold) do
+      :ok ->
+        message_event(:held, state, state.queue_id, reason)
+
+      {:error, error} ->
+        Logger.error("cannot hold message: #{:file.format_error(error)}",
+          queue_id: state.queue_id
+        )
+
+        notify(state)
+    end
+  end
+
+  defp release(_action, state), do: notify(state)
+
+  defp notify(state) do
+    if state.queue_manager, do: QueueManager.notify(state.queue_manager, state.queue_id)
+  end
+
+  defp message_event(event, state, queue_id, reason) do
+    :telemetry.execute([:sovite, :smtp, :message, event], %{}, %{
+      session_id: state.connection.session_id,
+      queue_id: queue_id,
+      reason: reason
+    })
+  end
+
   @impl true
   def handle_data_abort(_reason, state), do: abort(state)
 
   @impl true
-  def handle_rset(state), do: abort(state)
+  def handle_rset(state), do: %{abort(state) | expansions: [], action: nil}
 
   @impl true
   def handle_vrfy(argument, state) do
@@ -506,13 +761,14 @@ defmodule Sovite.Core.SMTPHandler do
     case Sovite.Validators.split_mailbox(recipient) do
       {:ok, {local_part, domain}} ->
         domain = String.downcase(domain, :ascii)
-        local = MapSet.member?(state.local_domains, domain)
+        class = Routing.class(state.routing, domain)
+        postmaster = String.downcase(local_part, :ascii) in ["postmaster", "abuse"]
 
         cond do
-          local and String.downcase(local_part, :ascii) in ["postmaster", "abuse"] -> :postmaster
-          local -> {:local, String.downcase(recipient, :ascii)}
-          MapSet.member?(state.relay_domains, domain) -> :relay
-          true -> :remote
+          class in [:local, :aliased, :hosted] and postmaster -> :postmaster
+          class == :local -> {:local, String.downcase(recipient, :ascii)}
+          class == :remote -> :remote
+          true -> class
         end
 
       # Only a bare "Postmaster" gets this far without a domain.

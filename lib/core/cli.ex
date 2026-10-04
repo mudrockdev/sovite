@@ -10,16 +10,23 @@ defmodule Sovite.Core.CLI do
       sovitectl user list
       sovitectl user add alice@example.com        # reads the password from stdin
       sovitectl user sender add alice@example.com @example.org
+      sovitectl domain add example.com hosted
+      sovitectl mailbox add alice@example.com
+      sovitectl alias add sales@example.com alice@example.com bob@example.com
       sovitectl hash-password                     # for auth.backend = "file"
 
   Commands that use the database read the config file given with
   `--config PATH`, or the default one.
   """
 
-  alias Sovite.Core.{Config, Repo, Users}
+  import Sovite.Core.CLI.Helpers
+
+  alias Sovite.Core.{CLI, Config}
+  alias Sovite.Core.Repo.Tables.Users
   alias Sovite.SASL.Password
 
   @version Mix.Project.config()[:version]
+  @data_commands CLI.Data.commands()
 
   @usage """
   Usage: sovitectl [--config PATH] COMMAND
@@ -34,6 +41,7 @@ defmodule Sovite.Core.CLI do
     user disable NAME                Stop a user from logging in
     user sender add NAME PATTERN     Let a user send as PATTERN: an address, @domain, or *
     user sender remove NAME PATTERN  Take that permission away
+  #{String.trim_trailing(CLI.Data.usage())}
     hash-password [SCHEME]           Hash a password from standard input for an auth.file users file.
                                      SCHEME: scram-sha-256 (default), sha512-crypt, sha256-crypt
     version                          Print the Sovite version
@@ -92,6 +100,13 @@ defmodule Sovite.Core.CLI do
         )
       )
 
+  defp run([command | _] = argv, path) when command in @data_commands do
+    case CLI.Data.run(argv, path) do
+      :usage -> usage_error()
+      status -> status
+    end
+  end
+
   defp run(["hash-password" | scheme], _path) do
     case scheme(scheme) do
       {:ok, scheme} ->
@@ -140,10 +155,6 @@ defmodule Sovite.Core.CLI do
     end
   end
 
-  defp print_config_errors(path, errors) do
-    for error <- errors, do: IO.puts(:stderr, "#{path}: " <> Exception.message(error))
-  end
-
   ## Users
 
   defp create_user(repo, name, password) do
@@ -162,82 +173,5 @@ defmodule Sovite.Core.CLI do
     end
 
     0
-  end
-
-  defp result({:ok, _}, message), do: done(message)
-  defp result(:ok, message), do: done(message)
-  defp result({:error, :not_found}, _message), do: fail("no such user")
-
-  defp result({:error, %Ecto.Changeset{} = changeset}, _message) do
-    changeset
-    |> Ecto.Changeset.traverse_errors(fn {message, opts} ->
-      Enum.reduce(opts, message, fn {key, value}, acc ->
-        String.replace(acc, "%{#{key}}", to_string(value))
-      end)
-    end)
-    |> Enum.map_join("; ", fn {field, messages} -> "#{field} #{Enum.join(messages, ", ")}" end)
-    |> fail()
-  end
-
-  defp done(message) do
-    IO.puts(message)
-    0
-  end
-
-  defp fail(message) do
-    IO.puts(:stderr, "error: " <> message)
-    1
-  end
-
-  # Starts the database from the config, runs `fun` with it, and stops it.
-  defp with_repo(path, fun) do
-    case Config.load(path) do
-      {:ok, config} ->
-        database = config.database
-        {:ok, _} = Application.ensure_all_started(:ecto_sql)
-        {:ok, _} = Application.ensure_all_started(Repo.driver(database.adapter))
-
-        case Repo.start_link(database, nil) do
-          {:ok, pid} ->
-            try do
-              fun.({Repo.module(database.adapter), pid})
-            after
-              Supervisor.stop(pid)
-            end
-
-          {:error, reason} ->
-            fail("cannot open the database: #{inspect(reason)}")
-        end
-
-      {:error, errors} ->
-        print_config_errors(path, errors)
-        1
-    end
-  end
-
-  # Reads one line. On a terminal the input is not echoed.
-  defp with_password(fun) do
-    IO.write(:stderr, "Password: ")
-    echo = :io.getopts(:standard_io)[:echo]
-    _ = :io.setopts(:standard_io, echo: false)
-
-    line =
-      try do
-        IO.gets(:standard_io, "")
-      after
-        if echo != nil, do: :io.setopts(:standard_io, echo: echo)
-        IO.write(:stderr, "\n")
-      end
-
-    case line do
-      line when is_binary(line) ->
-        case String.trim_trailing(line, "\n") |> String.trim_trailing("\r") do
-          "" -> fail("empty password")
-          password -> fun.(password)
-        end
-
-      _ ->
-        fail("no password given")
-    end
   end
 end

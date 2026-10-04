@@ -1,7 +1,8 @@
 defmodule Sovite.Core.UsersTest do
   use ExUnit.Case, async: true
 
-  alias Sovite.Core.{Repo, Users}
+  alias Sovite.Core.Repo
+  alias Sovite.Core.Repo.Tables.Users
   alias Sovite.Test.Database
 
   @moduletag :tmp_dir

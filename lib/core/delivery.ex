@@ -43,8 +43,9 @@ defmodule Sovite.Core.Delivery do
   (not offered) or `4.7.5` (handshake or certificate failure). Relay
   hosts on port 465 get implicit TLS.
 
-  With `delivery.relayhost_username` set, the client authenticates to the
-  relay host, but only over TLS.
+  When the destination has credentials (see `Sovite.Core.Router`), the
+  client authenticates to the next hop, but only over TLS. With a source
+  address for the address family, the connection is made from it.
   """
 
   alias Sovite.Core.Router
@@ -81,7 +82,6 @@ defmodule Sovite.Core.Delivery do
     * `:tls` - `%{default, policy, cacerts}`: the default level, a map of
       destination (domain, relay host, or address literal) to level, and
       the CAs for `:verify` (`nil` for the system's).
-    * `:relay_auth` - `%{username, password}` for the relay host, or `nil`.
   """
   @type opts :: %{
           hostname: String.t(),
@@ -94,8 +94,7 @@ defmodule Sovite.Core.Delivery do
             default: tls_level(),
             policy: %{String.t() => tls_level()},
             cacerts: [binary()] | nil
-          },
-          relay_auth: %{username: String.t(), password: String.t()} | nil
+          }
         }
 
   @type tls_level :: :none | :may | :encrypt | :verify | :dane
@@ -167,17 +166,29 @@ defmodule Sovite.Core.Delivery do
 
   defp try_addresses(job, [{host, ip, port} | rest], _last_error, opts) do
     remote = remote_name(host, ip)
+    opts = %{opts | client: source_option(opts.client, job.destination, ip)}
 
     result =
-      with {:ok, plan} <- tls_plan(job.destination, host, port, opts),
+      with {:ok, plan} <- tls_plan(job.destination.nexthop, host, port, opts),
            {:ok, client} <- open(ip, port, remote, plan, opts),
-           {:ok, client} <- relay_auth(client, job.destination, remote, opts) do
+           {:ok, client} <- relay_auth(client, job.destination.auth, remote) do
         connected(job, client, remote, opts)
       end
 
     case result do
       {:retry, error} -> try_addresses(job, rest, error, opts)
       result -> result
+    end
+  end
+
+  # Connect from the destination's source address for this family, if any.
+  defp source_option(client, %{source: source}, ip) do
+    family = if tuple_size(ip) == 4, do: :ipv4, else: :ipv6
+    client = Keyword.delete(client, :local_address)
+
+    case Map.fetch(source || %{}, family) do
+      {:ok, local} -> Keyword.put(client, :local_address, local)
+      :error -> client
     end
   end
 
@@ -217,7 +228,7 @@ defmodule Sovite.Core.Delivery do
     key =
       case destination do
         {:mx, domain} -> domain
-        {:relayhost, %{host: host}} -> host
+        {:host, %{host: host}} -> host
         {:literal, ip} -> Received.address_literal(ip)
       end
 
@@ -311,7 +322,9 @@ defmodule Sovite.Core.Delivery do
     end
   end
 
-  defp relay_auth(client, {:relayhost, _}, remote, %{relay_auth: %{} = credentials}) do
+  defp relay_auth(client, nil, _remote), do: {:ok, client}
+
+  defp relay_auth(client, credentials, remote) do
     if Client.tls(client) == nil do
       Client.quit(client)
       {:retry, {"4.7.0", "will not send credentials to #{remote} without TLS"}}
@@ -331,8 +344,6 @@ defmodule Sovite.Core.Delivery do
       end
     end
   end
-
-  defp relay_auth(client, _destination, _remote, _opts), do: {:ok, client}
 
   defp auth_error({:rejected, reply}), do: Reply.to_string(reply)
   defp auth_error(:no_mechanism), do: "no supported mechanism offered"
@@ -386,12 +397,13 @@ defmodule Sovite.Core.Delivery do
 
   ## Addresses
 
+  defp addresses(%{nexthop: nexthop}, opts), do: addresses(nexthop, opts)
   defp addresses({:mx, domain}, opts), do: mx_addresses(domain, opts.port, opts)
 
-  defp addresses({:relayhost, %{mx: true, host: host, port: port}}, opts),
+  defp addresses({:host, %{mx: true, host: host, port: port}}, opts),
     do: relay_errors(mx_addresses(host, port, opts), host)
 
-  defp addresses({:relayhost, %{mx: false, host: host, port: port}}, opts) do
+  defp addresses({:host, %{mx: false, host: host, port: port}}, opts) do
     case MX.addresses(opts.resolver, host, opts.families) do
       {:ok, [_ | _] = ips} -> {:ok, Enum.map(ips, &{host, &1, port})}
       {:ok, []} -> {:error, "4.4.4", "relay host #{host} has no address"}

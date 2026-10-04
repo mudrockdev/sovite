@@ -1,4 +1,4 @@
-defmodule Sovite.Core.Users.User do
+defmodule Sovite.Core.Repo.Schemas.User do
   @moduledoc """
   A user who can authenticate (SMTP AUTH), with the sender addresses
   they may use.
@@ -16,7 +16,7 @@ defmodule Sovite.Core.Users.User do
     field(:username, :string)
     field(:password_hash, :string, redact: true)
     field(:enabled, :boolean, default: true)
-    has_many(:sender_logins, Sovite.Core.Users.SenderLogin)
+    has_many(:sender_logins, Sovite.Core.Repo.Schemas.SenderLogin)
     timestamps(type: :utc_datetime)
   end
 

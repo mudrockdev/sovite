@@ -10,8 +10,8 @@ defmodule Sovite.Core.Config do
   `get/0`.
   """
 
-  alias Sovite.Core.Config.{Error, Schema}
-  alias Sovite.Core.Repo
+  alias Sovite.Core.Config.{Error, RoutingRules, Schema}
+  alias Sovite.Core.{Repo, Restrictions}
 
   @default_path "/etc/sovite/sovite.toml"
 
@@ -97,8 +97,26 @@ defmodule Sovite.Core.Config do
       [
         {:local, {:list, :domain}, []},
         {:relay, {:list, :domain}, default: []},
+        {:aliased, {:list, :domain}, default: []},
+        {:hosted, {:list, :domain}, default: []},
         {:local_recipients, {:list, :mailbox}, []}
       ]}, []},
+    {:routing,
+     {:section,
+      [
+        {:extension_delimiter, :delimiter, default: ""},
+        {:hide_subdomains, {:list, :hide_subdomain}, default: []},
+        {:hide_subdomains_exceptions, {:list, :string}, default: []},
+        {:always_bcc, :mailbox, []},
+        {:local_transport, :transport, default: "local"},
+        {:mailbox_transport, :transport, default: "mailbox"},
+        {:relay_transport, :transport, default: "smtp"},
+        {:remote_transport, :transport, default: "smtp"},
+        {:rewrite_headers, :boolean, default: true}
+      ]}, []},
+    {:restrictions,
+     {:section,
+      for(stage <- Restrictions.stages(), do: {stage, {:list, :restriction}, default: []})}, []},
     {:delivery,
      {:section,
       [
@@ -114,7 +132,8 @@ defmodule Sovite.Core.Config do
         {:tls_policy, {:map, :tls_destination, {:enum, @tls_levels}}, default: %{}},
         {:tls_ca_file, :absolute_path, []},
         {:relayhost_username, :string, []},
-        {:relayhost_password, :string, []}
+        {:relayhost_password, :string, []},
+        {:source_address, {:list, :ip_address}, default: []}
       ]}, []},
     {:auth,
      {:section,
@@ -179,6 +198,8 @@ defmodule Sovite.Core.Config do
     :tls,
     :smtp,
     :domains,
+    :routing,
+    :restrictions,
     :delivery,
     :auth,
     :submission,
@@ -238,8 +259,12 @@ defmodule Sovite.Core.Config do
           domains: %{
             local: [String.t()],
             relay: [String.t()],
-            local_recipients: [String.t()] | nil
+            local_recipients: [String.t()] | nil,
+            aliased: [String.t()],
+            hosted: [String.t()]
           },
+          routing: map(),
+          restrictions: %{atom() => [String.t()]},
           delivery: %{
             relayhost: %{host: String.t(), port: :inet.port_number(), mx: boolean()} | nil,
             max_deliveries: pos_integer(),
@@ -253,7 +278,8 @@ defmodule Sovite.Core.Config do
             tls_policy: %{String.t() => tls_level()},
             tls_ca_file: Path.t() | nil,
             relayhost_username: String.t() | nil,
-            relayhost_password: String.t() | nil
+            relayhost_password: String.t() | nil,
+            source_address: [:inet.ip_address()]
           },
           auth: map(),
           submission: %{strip_headers: [String.t()]},
@@ -302,18 +328,19 @@ defmodule Sovite.Core.Config do
   @spec validate(map()) :: {:ok, t()} | {:error, [Error.t()]}
   def validate(map) do
     with {:ok, values} <- Schema.validate(map, @schema),
-         values = listener_defaults(values),
+         values = values |> listener_defaults() |> local_domains(),
          :ok <- check(values) do
-      # Like Postfix's mydestination, the server is its own final
-      # destination unless told otherwise.
-      values =
-        update_in(values.domains.local, fn
-          nil -> [String.downcase(values.server.hostname, :ascii)]
-          local -> local
-        end)
-
       {:ok, struct!(__MODULE__, values)}
     end
+  end
+
+  # Like Postfix's mydestination, the server is its own final destination
+  # unless told otherwise.
+  defp local_domains(values) do
+    update_in(values.domains.local, fn
+      nil -> [String.downcase(values.server.hostname, :ascii)]
+      local -> local
+    end)
   end
 
   # Unset listener keys get the defaults of the listener's mode.
@@ -382,6 +409,7 @@ defmodule Sovite.Core.Config do
       |> Kernel.++(listener_errors(values))
       |> Kernel.++(auth_errors(values))
       |> Kernel.++(acme_errors(values.tls.acme))
+      |> Kernel.++(RoutingRules.errors(values))
       |> Enum.filter(& &1)
 
     if errors == [], do: :ok, else: {:error, errors}

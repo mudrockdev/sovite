@@ -7,7 +7,8 @@ defmodule Sovite.Test.FakeLDAP do
         passwords: %{"uid=alice,ou=people,dc=test" => "secret", "cn=svc,dc=test" => "svcpw"}
       )
 
-  Supports simple bind, search (equality, presence, and, or, not), StartTLS
+  Supports simple bind, search (equality, presence, and, or, not; the
+  requested attributes are returned), StartTLS
   (with `tls: ssl_server_opts`), and unbind. Every search filter is sent
   to the owner as `{:fake_ldap, :search, filter}`, every bind as
   `{:fake_ldap, :bind, dn}`.
@@ -95,14 +96,19 @@ defmodule Sovite.Test.FakeLDAP do
   end
 
   defp handle({:searchRequest, request}, id, conn, config, bound) do
-    {:SearchRequest, _base, _scope, _deref, _size, _time, _types, filter, _attrs} = request
+    {:SearchRequest, _base, _scope, _deref, _size, _time, _types, filter, wanted} = request
     send(config.owner, {:fake_ldap, :search, filter})
 
     if Map.get(config, :require_bind, false) and bound in [nil, ""] do
       reply(conn, id, {:searchResDone, result(:insufficientAccessRights)})
     else
       for {dn, attrs} <- config.entries, matches?(filter, attrs) do
-        reply(conn, id, {:searchResEntry, {:SearchResultEntry, String.to_charlist(dn), []}})
+        reply(
+          conn,
+          id,
+          {:searchResEntry,
+           {:SearchResultEntry, String.to_charlist(dn), attributes(attrs, wanted)}}
+        )
       end
 
       reply(conn, id, {:searchResDone, result(:success)})
@@ -131,6 +137,14 @@ defmodule Sovite.Test.FakeLDAP do
 
   defp handle({:unbindRequest, _}, _id, {transport, socket}, _config, _bound),
     do: transport.close(socket)
+
+  # The requested attributes the entry has, as PartialAttributes.
+  defp attributes(attrs, wanted) do
+    for name <- wanted,
+        values = Map.get(attrs, to_string(name)),
+        values != nil,
+        do: {:PartialAttribute, name, Enum.map(values, &String.to_charlist/1)}
+  end
 
   defp result(code), do: {:LDAPResult, code, ~c"", ~c"", :asn1_NOVALUE}
 
