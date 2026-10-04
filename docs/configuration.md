@@ -101,6 +101,8 @@ mode = "submissions"
 
 `STARTTLS` is offered on `smtp` and `submission` listeners whenever a certificate is configured in [`[tls]`](#tls). A `submissions` listener starts TLS right after the connection opens, so it needs a certificate.
 
+To let mail clients find the submission ports by themselves (RFC 6186), publish SRV records such as `_submissions._tcp.example.com. SRV 0 1 465 mx.example.com.` and `_submission._tcp.example.com. SRV 10 1 587 mx.example.com.`
+
 ## `[tls]`
 
 Certificates for `STARTTLS` and implicit TLS, and the TLS settings for all listeners. Only TLS 1.2 and 1.3 are enabled (RFC 8996), and only forward-secret AEAD cipher suites (BCP 195, RFC 9325): ECDHE with AES-GCM or ChaCha20-Poly1305. The server chooses the cipher, and renegotiation started by a client is refused.

@@ -111,7 +111,8 @@ defmodule Sovite.SMTP.Client do
   for a failed TLS handshake (at `:tls` or `:starttls`).
   """
   @type error ::
-          {stage(), Reply.t() | :timeout | :closed | Reply.decode_error() | {:tls, term()} | atom()}
+          {stage(),
+           Reply.t() | :timeout | :closed | Reply.decode_error() | {:tls, term()} | atom()}
 
   @typedoc """
   Why `deliver/5` did not start a transaction. The connection stays

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Refuses the commit when lint or Dialyzer fails.
+# Enabled by `mix setup` (git config core.hooksPath .githooks).
+# Note: checks the working tree, not only the staged changes.
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+echo "pre-commit: mix lint"
+if ! MIX_ENV=test mix lint; then
+  echo "pre-commit: mix lint failed, commit refused" >&2
+  exit 1
+fi
+
+echo "pre-commit: mix dialyzer"
+if ! MIX_ENV=test mix dialyzer; then
+  echo "pre-commit: mix dialyzer failed, commit refused" >&2
+  exit 1
+fi
