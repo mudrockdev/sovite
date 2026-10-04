@@ -24,3 +24,4 @@ sovite-*.tar
 
 .elixir_ls
 /priv/plts/
+sovite.toml
