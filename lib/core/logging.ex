@@ -27,6 +27,14 @@ defmodule Sovite.Core.Logging do
           symlink: String.t() | nil
         }
 
+  @doc """
+  Formats an IP address for the `:remote_ip` metadata key. The text
+  formatter skips tuples, so addresses are logged as strings.
+  """
+  @spec format_ip(:inet.ip_address() | nil) :: String.t() | nil
+  def format_ip(nil), do: nil
+  def format_ip(ip), do: ip |> :inet.ntoa() |> List.to_string()
+
   @doc "Metadata keys included in every log format."
   @spec metadata_keys() :: [atom()]
   def metadata_keys, do: @metadata_keys

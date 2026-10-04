@@ -2,9 +2,9 @@
 
 A modern, secure Mail Transfer Agent written in Elixir/OTP, meant as an alternative to Postfix.
 
-> **Status:** early development. Phase 0 (foundations) is done; the SMTP receiver is next. See the [roadmap](ROADMAP.md).
+> **Status:** early development. Sovite receives mail over SMTP and queues it durably (Phase 1); outbound delivery is next. See the [roadmap](ROADMAP.md).
 
-Sovite is also a library: its components (address validators, DNS, and later SMTP, DKIM, SPF, ...) can be used from any Elixir project without running the MTA. See [STRUCTURE.md](STRUCTURE.md).
+Sovite is also a library: its components (address validators, DNS, an SMTP server, and later DKIM, SPF, ...) can be used from any Elixir project without running the MTA. See [STRUCTURE.md](STRUCTURE.md).
 
 ## Development
 

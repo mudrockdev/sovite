@@ -13,6 +13,38 @@
 # Spool directory. Must be owned by the sovite user and not readable by others.
 directory = "/var/spool/sovite"
 
+# Where to accept SMTP. Repeat the table for more addresses; add "::" for IPv6.
+[[listener]]
+address = "0.0.0.0"
+port = 25
+
+[smtp]
+# Largest message accepted: bytes, or a number with K, M, or G.
+max_message_size = "25M"
+max_recipients = 100
+max_connections = 1000
+max_connections_per_ip = 20
+# Error replies before the session is closed.
+max_errors = 10
+# Seconds, or a number with ms, s, m, h, or d.
+command_timeout = "5m"
+data_timeout = "5m"
+# "reject" closes sessions that send a bare LF or CR; "normalize" converts
+# them to CRLF. Only <CRLF>.<CRLF> ever ends a message.
+bare_line_endings = "reject"
+# Answer VRFY from domains.local_recipients.
+vrfy = false
+# Clients that may relay to any domain. Empty: relay for no one.
+trusted_networks = []
+
+[domains]
+# Domains this server is the final destination for. Defaults to the hostname.
+# local = ["example.com"]
+# Domains accepted from anyone and forwarded, for example as a backup MX.
+relay = []
+# The only addresses that exist at local domains. Unset: accept any address.
+# local_recipients = ["postmaster@example.com", "alice@example.com"]
+
 [log]
 # One of: debug, info, notice, warning, error
 level = "info"

@@ -31,6 +31,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | Folder | Namespace | Contents |
 |---|---|---|
 | `validators/` | `Sovite.Validators` | Syntax checks for addresses (RFC 5321/5322), domains, hostnames, IP literals, HELO names |
+| `net/` | `Sovite.Net` | IP address and CIDR network parsing and matching |
 
 ### Layer 1: Formats & Infrastructure
 

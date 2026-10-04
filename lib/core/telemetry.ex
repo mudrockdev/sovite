@@ -13,18 +13,21 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :listener, :connection, :rejected]` | | `listener`, `remote_ip`, `reason` |
   | `[:sovite, :smtp, :server, :session, :start]` | `system_time` | `session_id`, `remote_ip` |
   | `[:sovite, :smtp, :server, :session, :stop]` | `duration` | `session_id`, `remote_ip` |
-  | `[:sovite, :smtp, :server, :command, :stop]` | `duration` | `session_id`, `command`, `reply_code` |
+  | `[:sovite, :smtp, :server, :command, :stop]` | `duration` | `session_id`, `remote_ip`, `command`, `argument`, `reply_code`, `reply` |
   | `[:sovite, :queue, :message, :enqueued]` | `size`, `recipients` | `queue_id`, `session_id`, `sender` |
   | `[:sovite, :queue, :message, :removed]` | | `queue_id`, `reason` |
   | `[:sovite, :smtp, :client, :delivery, :start]` | `system_time` | `queue_id`, `relay` |
   | `[:sovite, :smtp, :client, :delivery, :stop]` | `duration` | `queue_id`, `relay`, `recipient`, `status`, `reply` |
   | `[:sovite, :smtp, :client, :delivery, :exception]` | `duration` | `queue_id`, `relay`, `kind`, `reason` |
 
-  Message lifecycle events (`:queue` and `:delivery` stop) are logged at
-  `:info`. All other events are logged at `:debug`.
+  Message lifecycle events (`:queue` and `:delivery` stop) and SMTP
+  commands that got a 4xx or 5xx reply are logged at `:info`. All other
+  events are logged at `:debug`.
   """
 
   require Logger
+
+  alias Sovite.Core.Logging
 
   @handler_id {__MODULE__, :logger}
 
@@ -69,26 +72,33 @@ defmodule Sovite.Core.Telemetry do
 
   @doc false
   def handle_event(event, measurements, metadata, _config) do
-    level = if event in @info_events, do: :info, else: :debug
+    level = if event in @info_events or rejected?(event, metadata), do: :info, else: :debug
     name = event |> tl() |> Enum.join(".")
 
     Logger.log(level, fn -> format(name, measurements, metadata) end,
       queue_id: metadata[:queue_id],
       session_id: metadata[:session_id],
-      remote_ip: metadata[:remote_ip],
+      remote_ip: format_ip(metadata[:remote_ip]),
       event: name
     )
   end
+
+  defp format_ip(ip) when is_tuple(ip), do: Logging.format_ip(ip)
+  defp format_ip(ip), do: ip
+
+  defp rejected?([:sovite, :smtp, :server, :command, :stop], %{reply_code: code}), do: code >= 400
+  defp rejected?(_event, _metadata), do: false
 
   # Postfix-style "key=value, key=value" so existing log tooling stays usable.
   defp format(name, measurements, metadata) do
     pairs =
       measurements
       |> Map.update(:duration, nil, &System.convert_time_unit(&1, :native, :millisecond))
-      |> Map.reject(fn {key, value} -> key == :system_time or is_nil(value) end)
+      |> Map.delete(:system_time)
       |> Map.merge(
         Map.drop(metadata, [:queue_id, :session_id, :remote_ip, :telemetry_span_context])
       )
+      |> Map.reject(fn {_key, value} -> is_nil(value) end)
       |> Enum.sort()
       |> Enum.map_join(", ", fn {key, value} -> "#{key}=#{format_value(value)}" end)
 

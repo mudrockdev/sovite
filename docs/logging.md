@@ -62,6 +62,7 @@ All keys are in the [configuration reference](configuration.md#log).
 Reusable components never write logs. They emit `:telemetry` events named `[:sovite, component, ...]`, and the host application decides what to do with them. Sovite itself attaches `Sovite.Core.Telemetry`, which logs each event:
 
 - message lifecycle events (enqueue, removal, delivery results) at `info`
+- SMTP commands that were rejected (4xx/5xx replies), with the command, its argument, and the reply, at `info`
 - everything else at `debug`
 
 The full event catalog, with measurements and metadata, is in the `Sovite.Core.Telemetry` module docs. Metrics exporters (Prometheus, OpenTelemetry; roadmap Phase 12) attach to the same events.

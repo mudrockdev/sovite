@@ -59,16 +59,16 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 1 — Core SMTP Receiver (MVP inbound)
 
-- [ ] TCP listener with acceptor pool, connection limits (global and per-IP)
-- [ ] SMTP session state machine: `EHLO`/`HELO`, `MAIL`, `RCPT`, `DATA`, `RSET`, `NOOP`, `QUIT`, `VRFY` (disabled by default), `HELP`
-- [ ] Strict command-line parsing, line length limits, bare-LF / bare-CR handling (SMTP smuggling protection)
-- [ ] ESMTP extensions: `PIPELINING`, `SIZE`, `8BITMIME`, `ENHANCEDSTATUSCODES`
-- [ ] Timeouts per RFC 5321 §4.5.3.2
-- [ ] Dot-stuffing / un-stuffing, message size enforcement while streaming
-- [ ] `Received:` header with RFC 3848 transmission types
-- [ ] Recipient validation against configured local/relay domains (reject unknown users at RCPT time)
-- [ ] Open relay prevention: relay only for authenticated users or trusted networks
-- [ ] Durable spool: write + `fsync` before replying `250`
+- [x] TCP listener with acceptor pool, connection limits (global and per-IP)
+- [x] SMTP session state machine: `EHLO`/`HELO`, `MAIL`, `RCPT`, `DATA`, `RSET`, `NOOP`, `QUIT`, `VRFY` (disabled by default), `HELP`
+- [x] Strict command-line parsing, line length limits, bare-LF / bare-CR handling (SMTP smuggling protection)
+- [x] ESMTP extensions: `PIPELINING`, `SIZE`, `8BITMIME`, `ENHANCEDSTATUSCODES`
+- [x] Timeouts per RFC 5321 §4.5.3.2
+- [x] Dot-stuffing / un-stuffing, message size enforcement while streaming
+- [x] `Received:` header with RFC 3848 transmission types
+- [x] Recipient validation against configured local/relay domains (reject unknown users at RCPT time)
+- [x] Open relay prevention: relay only for authenticated users or trusted networks
+- [x] Durable spool: write + `fsync` before replying `250`
 
 **Standards:** RFC 5321, RFC 5322, RFC 1870, RFC 6152, RFC 2920, RFC 2034, RFC 3463, RFC 5248, RFC 3848
 

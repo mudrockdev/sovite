@@ -46,7 +46,7 @@ defmodule Sovite.Core.ConfigTest do
 
     assert {:ok, config} = Config.parse(toml)
 
-    assert config == %Config{
+    assert Map.take(config, [:server, :queue, :log]) == %{
              server: %{hostname: "mail.example.com"},
              queue: %{directory: "/srv/sovite/queue"},
              log: %{
@@ -61,6 +61,88 @@ defmodule Sovite.Core.ConfigTest do
                symlink: "current.log"
              }
            }
+  end
+
+  test "defaults to one SMTP listener and no relaying" do
+    assert {:ok, config} = Config.parse(~s([server]\nhostname = "MX.Example.org"))
+    assert config.listener == [%{address: {0, 0, 0, 0}, port: 25}]
+    assert config.smtp.trusted_networks == []
+    assert config.smtp.max_message_size == 25 * 1024 * 1024
+    assert config.smtp.command_timeout == 300_000
+    assert config.domains == %{local: ["mx.example.org"], relay: [], local_recipients: nil}
+  end
+
+  test "parses listeners, SMTP limits, and domains" do
+    toml = """
+    [[listener]]
+    address = "::"
+    port = 2525
+
+    [[listener]]
+    address = "192.0.2.1"
+
+    [smtp]
+    max_message_size = "50M"
+    command_timeout = "30s"
+    data_timeout = 600
+    bare_line_endings = "normalize"
+    trusted_networks = ["127.0.0.1", "192.0.2.0/24", "2001:db8::/32"]
+
+    [domains]
+    local = ["Example.COM"]
+    relay = ["backup.example"]
+    local_recipients = ["Alice@Example.com"]
+    """
+
+    assert {:ok, config} = Config.parse(toml)
+
+    assert config.listener == [
+             %{address: {0, 0, 0, 0, 0, 0, 0, 0}, port: 2525},
+             %{address: {192, 0, 2, 1}, port: 25}
+           ]
+
+    assert config.smtp.max_message_size == 50 * 1024 * 1024
+    assert config.smtp.command_timeout == 30_000
+    assert config.smtp.data_timeout == 600_000
+    assert config.smtp.bare_line_endings == :normalize
+
+    assert config.smtp.trusted_networks == [
+             {{127, 0, 0, 1}, 32},
+             {{192, 0, 2, 0}, 24},
+             {{0x2001, 0xDB8, 0, 0, 0, 0, 0, 0}, 32}
+           ]
+
+    assert config.domains == %{
+             local: ["example.com"],
+             relay: ["backup.example"],
+             local_recipients: ["alice@example.com"]
+           }
+  end
+
+  test "names array elements in errors" do
+    toml = """
+    [[listener]]
+    port = 70000
+
+    [smtp]
+    trusted_networks = ["192.0.2.1/24", "nope"]
+    command_timeout = "5 minutes"
+
+    [domains]
+    local = "example.com"
+    local_recipients = ["not an address"]
+    """
+
+    assert {:error, errors} = Config.parse(toml)
+
+    assert Enum.map(errors, &Exception.message/1) == [
+             "listener[0].port: expected an integer from 0 to 65535, got 70000",
+             ~s(smtp.command_timeout: expected a duration like "30s", "5m", or "1h", got "5 minutes"),
+             ~s(smtp.trusted_networks[0]: "192.0.2.1/24" has bits set after the prefix length),
+             ~s(smtp.trusted_networks[1]: "nope" is not a valid network, expected an address or CIDR),
+             ~s(domains.local: expected an array, got "example.com"),
+             ~s(domains.local_recipients[0]: "not an address" is not a valid email address)
+           ]
   end
 
   test "reports every problem with its key path" do

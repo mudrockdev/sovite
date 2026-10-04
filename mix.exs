@@ -95,7 +95,12 @@ defmodule Sovite.MixProject do
       ],
       groups_for_modules: [
         Validators: [~r/^Sovite\.Validators/],
+        Net: [~r/^Sovite\.Net/],
+        Message: [~r/^Sovite\.Message/],
         DNS: [~r/^Sovite\.DNS/],
+        Queue: [~r/^Sovite\.Queue/],
+        Listener: [~r/^Sovite\.Listener/],
+        SMTP: [~r/^Sovite\.SMTP/],
         Core: [~r/^Sovite\.Core/, Sovite]
       ]
     ]

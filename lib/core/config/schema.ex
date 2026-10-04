@@ -11,6 +11,11 @@ defmodule Sovite.Core.Config.Schema do
   #   :file_name_pattern       - a file name with one "{n}" and optional "{date}"
   #   :strftime                - a Calendar.strftime/2 format
   #   :byte_size               - bytes as an integer or "512K", "100M", "1G"
+  #   :duration                - milliseconds, from seconds or "500ms", "30s", "5m", "1h", "1d"
+  #   :domain | :mailbox       - validated and lower-cased
+  #   :ip_address              - an :inet tuple
+  #   :cidr                    - {ip, prefix_length}, from "192.0.2.0/24" or a single address
+  #   {:list, type}            - an array; errors name the index, as in "key[0]"
   #   {:integer, min, max}
   #   {:enum, [atom]}          - the input string must equal one of the atom names
   #   {:section, [field]}      - a nested table
@@ -64,8 +69,8 @@ defmodule Sovite.Core.Config.Schema do
             value -> value
           end
 
-        with {:error, reason} <- cast(type, value) do
-          {:error, [%Error{path: path, reason: reason <> " (default value)"}]}
+        with {:error, errors} <- check(type, value, path) do
+          {:error, Enum.map(errors, &%{&1 | reason: &1.reason <> " (default value)"})}
         end
 
       Keyword.get(opts, :required, false) ->
@@ -76,10 +81,29 @@ defmodule Sovite.Core.Config.Schema do
     end
   end
 
-  defp validate_field({:ok, value}, {:section, fields}, _opts, path),
-    do: validate(value, fields, path)
+  defp validate_field({:ok, value}, type, _opts, path), do: check(type, value, path)
 
-  defp validate_field({:ok, value}, type, _opts, path) do
+  defp check({:section, fields}, value, path), do: validate(value, fields, path)
+
+  defp check({:list, type}, values, path) when is_list(values) do
+    values
+    |> Enum.with_index()
+    |> Enum.reduce({[], []}, fn {value, index}, {acc, errors} ->
+      case check(type, value, path ++ ["[#{index}]"]) do
+        {:ok, value} -> {[value | acc], errors}
+        {:error, new_errors} -> {acc, errors ++ new_errors}
+      end
+    end)
+    |> case do
+      {acc, []} -> {:ok, Enum.reverse(acc)}
+      {_acc, errors} -> {:error, errors}
+    end
+  end
+
+  defp check({:list, _type}, value, path),
+    do: {:error, [%Error{path: path, reason: "expected an array, got #{inspect(value)}"}]}
+
+  defp check(type, value, path) do
     with {:error, reason} <- cast(type, value) do
       {:error, [%Error{path: path, reason: reason}]}
     end
@@ -167,6 +191,58 @@ defmodule Sovite.Core.Config.Schema do
 
   defp cast(:strftime, value), do: type_error("a strftime format string", value)
 
+  defp cast(:domain, value) when is_binary(value) do
+    if Sovite.Validators.domain?(value),
+      do: {:ok, String.downcase(value, :ascii)},
+      else: {:error, "#{inspect(value)} is not a valid domain"}
+  end
+
+  defp cast(:domain, value), do: type_error("a domain", value)
+
+  # Lower-cased, since recipients are compared case-insensitively.
+  defp cast(:mailbox, value) when is_binary(value) do
+    if Sovite.Validators.mailbox?(value),
+      do: {:ok, String.downcase(value, :ascii)},
+      else: {:error, "#{inspect(value)} is not a valid email address"}
+  end
+
+  defp cast(:mailbox, value), do: type_error("an email address", value)
+
+  defp cast(:ip_address, value) when is_binary(value) do
+    case Sovite.Net.parse_ip(value) do
+      {:ok, ip} -> {:ok, ip}
+      {:error, _} -> {:error, "#{inspect(value)} is not a valid IP address"}
+    end
+  end
+
+  defp cast(:ip_address, value), do: type_error("an IP address", value)
+
+  defp cast(:cidr, value) when is_binary(value) do
+    case Sovite.Net.parse_cidr(value) do
+      {:ok, network} ->
+        {:ok, network}
+
+      {:error, :host_bits_set} ->
+        {:error, "#{inspect(value)} has bits set after the prefix length"}
+
+      {:error, _} ->
+        {:error, "#{inspect(value)} is not a valid network, expected an address or CIDR"}
+    end
+  end
+
+  defp cast(:cidr, value), do: type_error("a network", value)
+
+  defp cast(:duration, value) when is_integer(value) and value > 0, do: {:ok, value * 1000}
+
+  defp cast(:duration, value) when is_binary(value) do
+    case Regex.run(~r/\A(\d{1,9})\s*(ms|s|m|h|d)\z/, String.trim(value)) do
+      [_, amount, unit] when amount != "0" -> {:ok, String.to_integer(amount) * unit_ms(unit)}
+      _ -> duration_error(value)
+    end
+  end
+
+  defp cast(:duration, value), do: duration_error(value)
+
   defp cast(:byte_size, value) when is_integer(value) and value > 0, do: {:ok, value}
 
   defp cast(:byte_size, value) when is_binary(value) do
@@ -188,6 +264,14 @@ defmodule Sovite.Core.Config.Schema do
   defp unit_size("G"), do: 1024 * 1024 * 1024
 
   defp byte_size_error(value), do: type_error(~s(a size like "512M" or "1G"), value)
+
+  defp unit_ms("ms"), do: 1
+  defp unit_ms("s"), do: 1000
+  defp unit_ms("m"), do: 60_000
+  defp unit_ms("h"), do: 3_600_000
+  defp unit_ms("d"), do: 86_400_000
+
+  defp duration_error(value), do: type_error(~s(a duration like "30s", "5m", or "1h"), value)
 
   defp type_error(expected, value), do: {:error, "expected #{expected}, got #{inspect(value)}"}
 

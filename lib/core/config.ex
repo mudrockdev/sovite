@@ -17,6 +17,34 @@ defmodule Sovite.Core.Config do
   @schema [
     {:server, {:section, [{:hostname, :hostname, default: &__MODULE__.system_hostname/0}]}, []},
     {:queue, {:section, [{:directory, :absolute_path, default: "/var/spool/sovite"}]}, []},
+    {:listener,
+     {:list,
+      {:section,
+       [
+         {:address, :ip_address, default: "0.0.0.0"},
+         {:port, {:integer, 0, 65_535}, default: 25}
+       ]}}, default: [%{}]},
+    {:smtp,
+     {:section,
+      [
+        {:max_message_size, :byte_size, default: "25M"},
+        {:max_recipients, {:integer, 1, 100_000}, default: 100},
+        {:max_connections, {:integer, 1, 1_000_000}, default: 1000},
+        {:max_connections_per_ip, {:integer, 1, 1_000_000}, default: 20},
+        {:max_errors, {:integer, 1, 1000}, default: 10},
+        {:command_timeout, :duration, default: "5m"},
+        {:data_timeout, :duration, default: "5m"},
+        {:bare_line_endings, {:enum, [:reject, :normalize]}, default: :reject},
+        {:vrfy, :boolean, default: false},
+        {:trusted_networks, {:list, :cidr}, default: []}
+      ]}, []},
+    {:domains,
+     {:section,
+      [
+        {:local, {:list, :domain}, []},
+        {:relay, {:list, :domain}, default: []},
+        {:local_recipients, {:list, :mailbox}, []}
+      ]}, []},
     {:log,
      {:section,
       [
@@ -32,11 +60,29 @@ defmodule Sovite.Core.Config do
       ]}, []}
   ]
 
-  defstruct [:server, :queue, :log]
+  defstruct [:server, :queue, :listener, :smtp, :domains, :log]
 
   @type t :: %__MODULE__{
           server: %{hostname: String.t()},
           queue: %{directory: Path.t()},
+          listener: [%{address: :inet.ip_address(), port: :inet.port_number()}],
+          smtp: %{
+            max_message_size: pos_integer(),
+            max_recipients: pos_integer(),
+            max_connections: pos_integer(),
+            max_connections_per_ip: pos_integer(),
+            max_errors: pos_integer(),
+            command_timeout: pos_integer(),
+            data_timeout: pos_integer(),
+            bare_line_endings: :reject | :normalize,
+            vrfy: boolean(),
+            trusted_networks: [Sovite.Net.network()]
+          },
+          domains: %{
+            local: [String.t()],
+            relay: [String.t()],
+            local_recipients: [String.t()] | nil
+          },
           log: Sovite.Core.Logging.config()
         }
 
@@ -81,6 +127,14 @@ defmodule Sovite.Core.Config do
   @spec validate(map()) :: {:ok, t()} | {:error, [Error.t()]}
   def validate(map) do
     with {:ok, values} <- Schema.validate(map, @schema) do
+      # Like Postfix's mydestination, the server is its own final
+      # destination unless told otherwise.
+      values =
+        update_in(values.domains.local, fn
+          nil -> [String.downcase(values.server.hostname, :ascii)]
+          local -> local
+        end)
+
       {:ok, struct!(__MODULE__, values)}
     end
   end
