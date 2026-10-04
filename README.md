@@ -2,9 +2,9 @@
 
 A modern, secure Mail Transfer Agent written in Elixir/OTP, meant as an alternative to Postfix.
 
-> **Status:** early development. Sovite receives mail over SMTP, queues it durably, and relays it to other servers with retries and bounces (Phases 1–2). It speaks TLS both ways (STARTTLS, implicit TLS, SNI, ACME, DANE) and accepts mail from authenticated clients on submission ports (Phase 3). Routing and local delivery are next. See the [roadmap](ROADMAP.md).
+> **Status:** early development. Sovite receives mail over SMTP, queues it durably, and relays it to other servers with retries and bounces (Phases 1–2). It speaks TLS both ways (STARTTLS, implicit TLS, SNI, ACME, DANE) and accepts mail from authenticated clients on submission ports (Phase 3). It routes mail by its own database: hosted domains, aliases, mailboxes, transports, address rewriting, BCC, and access rules at every SMTP stage, all managed with `sovitectl` (Phase 4). Local delivery and LMTP hand-off are next. See the [roadmap](ROADMAP.md).
 
-Sovite is also a library: its components (address validators, DNS and MX resolution, an SMTP server and client, TLS with DANE and ACME, SASL, delivery status notifications, and later DKIM, SPF, ...) can be used from any Elixir project without running the MTA. See [STRUCTURE.md](STRUCTURE.md).
+Sovite is also a library: its components (address validators, DNS and MX resolution, an SMTP server and client, TLS with DANE and ACME, SASL, LDAP, RFC 5322 address lists, delivery status notifications, and later DKIM, SPF, ...) can be used from any Elixir project without running the MTA. See [STRUCTURE.md](STRUCTURE.md).
 
 ## Development
 
@@ -18,6 +18,16 @@ mix dialyzer
 ```
 
 The pre-commit hook (`.githooks/pre-commit`) runs `mix lint` and `mix dialyzer` and refuses the commit if either fails. The first Dialyzer run builds its PLT and takes a few minutes; later runs are incremental.
+
+Manage routing data (stored in Sovite's database):
+
+```sh
+sovitectl domain add example.com hosted
+sovitectl mailbox add alice@example.com
+sovitectl alias add sales@example.com alice@example.com bob@example.com
+sovitectl transport set example.com lmtp:unix:/run/dovecot/lmtp
+sovitectl access set client 192.0.2 REJECT spam source   # used by client_access in [restrictions]
+```
 
 Run the MTA locally:
 

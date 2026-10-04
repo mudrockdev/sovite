@@ -35,7 +35,7 @@ This document lists the features to build, the standards to implement, and the o
 | SMTP client | Outbound delivery with MX resolution, TLS policy, connection reuse | `smtp` |
 | Local/LMTP delivery | Hand-off to mailbox servers, pipes, Maildir | `local`, `lmtp`, `virtual`, `pipe` |
 | Bounce service | DSN generation, delay warnings | `bounce` |
-| Lookup tables | Aliases, virtual domains, transports, access maps | `*_maps`, `postmap` |
+| Routing data | Domains, aliases, mailboxes, transports, access rules: typed tables in Sovite's database, managed with `sovitectl` | `*_maps`, `postmap` |
 | CLI | Queue inspection, flush, hold, delete, config check | `postqueue`, `postsuper`, `postconf`, `mailq` |
 
 ---
@@ -112,20 +112,20 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 **Done when:** Thunderbird, Apple Mail, and Outlook can submit mail; testssl.sh reports no weak configuration.
 
-### Phase 4 — Routing, Rewriting & Lookup Tables
+### Phase 4 — Routing, Rewriting & Routing Data
 
-- [ ] Lookup table abstraction with backends: flat file (compiled to an indexed form), SQL (PostgreSQL, MySQL, SQLite), LDAP, regex/PCRE, in-memory, HTTP/JSON (optional)
-- [ ] Aliases (`aliases(5)`-compatible format), `.forward`-style forwarding (optional)
-- [ ] Virtual domains and virtual mailbox maps
-- [ ] Canonical (sender/recipient) rewriting, masquerading
-- [ ] Relocated users, recipient BCC, sender BCC
-- [ ] Transport maps: per-domain/per-recipient next hop and transport
-- [ ] Sender-dependent relayhost and sender-dependent outbound IP
-- [ ] Address extensions (`user+tag@`) with configurable delimiter
-- [ ] Access maps / restriction chains at CONNECT, HELO, MAIL, RCPT, DATA, END-OF-DATA stages
-- [ ] Hot reload of tables without restart
+- [x] Routing data in Sovite's database: a migration and typed schema per table (domains, aliases, mailboxes, moved users, transports, sender relays, access rules, address rewrites, BCC rules), managed with `sovitectl`
+- [x] Aliases: full address, local part, and `@domain` catch-all, expanded recursively with loop and size limits
+- [x] Domain classes: local, aliased, hosted (mailboxes), relay
+- [x] Sender/recipient address rewriting, hiding subdomains, rewriting header addresses for trusted and authenticated clients
+- [x] Moved users (`5.1.6`), recipient BCC, sender BCC, always-BCC
+- [x] Transports: per-domain/per-recipient next hop and transport (`smtp`, `lmtp`, `local`, `mailbox`, `error`, `retry`, `discard`)
+- [x] Sender-dependent relay host, outbound IP, and relay credentials
+- [x] Address extensions (`user+tag@`) with configurable delimiter
+- [x] Restriction chains with access rules at CONNECT, HELO, MAIL, RCPT, DATA, END-OF-DATA stages (reject, defer, discard, hold, warn)
+- [x] Changes apply without restart (tables read live; domains cached for a few seconds)
 
-**Done when:** a typical Postfix virtual-hosting setup (virtual domains + aliases + transport to LMTP) can be expressed in Sovite config.
+**Done when:** a typical virtual-hosting setup (hosted domains + aliases + transport to LMTP) can be expressed in Sovite. (LMTP delivery itself arrives in Phase 5.)
 
 ### Phase 5 — Local Delivery & Mailbox Hand-off
 
@@ -223,7 +223,7 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 12 — Operations & Observability
 
-- [ ] CLI: `sovite queue list|show|flush|hold|release|delete|requeue`, `sovite config check|show|diff`, `sovite tables compile|query`, `sovite status`
+- [ ] CLI: `sovite queue list|show|flush|hold|release|delete|requeue`, `sovite config check|show|diff`, `sovite route ADDRESS` (show how the routing tables resolve an address), `sovite status`
 - [ ] Message tracing: follow a message from connection to final delivery by queue ID or Message-ID
 - [ ] Prometheus metrics endpoint; OpenTelemetry traces
 - [ ] Structured JSON logs + classic syslog-style output

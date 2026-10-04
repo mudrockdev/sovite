@@ -37,11 +37,11 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `message/` | `Sovite.Message` | RFC 5322 header parsing/folding, MIME, `Received:` / `Date:` / `Message-ID:` builders, streaming body handling |
+| `message/` | `Sovite.Message` | RFC 5322 header parsing/folding, address lists (rewriting addresses in `From:`/`To:`/...), MIME, `Received:` / `Date:` / `Message-ID:` builders, streaming body handling |
 | `dns/` | `Sovite.DNS` | Resolver behaviour, default resolver, cache, MX / TXT / TLSA helpers, Null MX |
+| `ldap/` | `Sovite.LDAP` | LDAP connections (StartTLS/LDAPS), bind, search, RFC 4515 filters with injection-safe placeholders, DN escaping |
 | `sasl/` | `Sovite.SASL` | PLAIN, LOGIN, SCRAM-SHA-256, OAUTHBEARER (both server and client side) |
 | `proxy_protocol/` | `Sovite.ProxyProtocol` | HAProxy PROXY v1/v2 parser |
-| `tables/` | `Sovite.Tables` | Lookup table behaviour + backends (file, SQL, LDAP, regex, memory) |
 
 ### Layer 2: Protocols & Mail Authentication
 
@@ -65,9 +65,26 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, cleanup pipeline, restriction chains, delivery orchestration (per-destination concurrency), bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration |
+| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency), bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration |
 
 New components are added as new folders, placed in the lowest layer their dependencies allow.
+
+### Inside `core/`
+
+```
+lib/core/
+  repo.ex            # Sovite.Core.Repo: picks the adapter, migrates at startup
+  repo/
+    migrations/      # one migration module per table (Sovite.Core.Repo.Migrations.*)
+    schemas/         # one typed Ecto schema per table (Sovite.Core.Repo.Schemas.*)
+    tables/          # one module per table that reads and writes it (Sovite.Core.Repo.Tables.*)
+    data.ex          # helpers shared by the table modules
+  config/            # config schema and cross-key checks
+  cli/               # sovitectl commands
+  ...                # routing, rewriting, restrictions, delivery, queue manager
+```
+
+Every database table has its own migration, schema, and table module. Code outside `core/repo/`, including `sovitectl`, reaches the database only through the table modules (see `AGENTS.md`).
 
 ---
 

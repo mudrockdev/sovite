@@ -16,6 +16,10 @@ defmodule Sovite.Core.Repo.Tables.Domains do
   alias Sovite.Core.Repo.Data
   alias Sovite.Core.Repo.Schemas.Domain
 
+  @doc "The domain classes: `:local`, `:aliased`, `:hosted`, `:relay`."
+  @spec kinds() :: [Domain.kind()]
+  defdelegate kinds, to: Domain
+
   @doc "Adds a domain of class `kind`."
   @spec add(Repo.t(), String.t(), Domain.kind() | String.t()) ::
           {:ok, Domain.t()} | {:error, Ecto.Changeset.t()}

@@ -6,8 +6,6 @@ defmodule Sovite.Core.CLI.Data do
 
   import Sovite.Core.CLI.Helpers
 
-  alias Sovite.Core.Repo.Schemas.Domain
-
   alias Sovite.Core.Repo.Tables.{
     AccessRules,
     AddressRewrites,
@@ -65,7 +63,7 @@ defmodule Sovite.Core.CLI.Data do
   def run(["domain", "list"], path), do: with_repo(path, &list_domains/1)
 
   def run(["domain", "add", name, kind], path) do
-    if kind in Enum.map(Domain.kinds(), &Atom.to_string/1),
+    if kind in Enum.map(Domains.kinds(), &Atom.to_string/1),
       do: with_repo(path, &result(Domains.add(&1, name, kind), "added #{name} (#{kind})")),
       else: fail("unknown kind #{inspect(kind)}: use local, aliased, hosted, or relay")
   end
