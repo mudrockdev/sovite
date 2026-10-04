@@ -23,7 +23,7 @@ defmodule Sovite.MixProject do
   def application do
     [
       mod: {Sovite, []},
-      extra_applications: [:logger]
+      extra_applications: [:logger, :crypto, :public_key, :ssl]
     ]
   end
 

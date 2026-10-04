@@ -64,8 +64,63 @@ defmodule Sovite.SMTP.Server.Handler do
   @doc "`VRFY`, only when enabled. Without this callback the reply is `252`."
   @callback handle_vrfy(argument :: String.t(), state()) :: result()
 
+  @doc """
+  The connection is now encrypted (after `STARTTLS`). The session has
+  been reset: forget the `EHLO` name and anything else learned before.
+  """
+  @callback handle_tls(Sovite.TLS.info(), state()) :: state()
+
+  @doc """
+  SASL mechanisms to offer in the `EHLO` reply, upper-case, for example
+  `["PLAIN", "SCRAM-SHA-256"]`. Called only when the session offers
+  `AUTH`, and on every `EHLO` and `AUTH`, so the list may depend on the
+  state. Without this callback, no mechanism is offered.
+  """
+  @callback auth_mechanisms(state()) :: [String.t()]
+
+  @typedoc """
+  A step of the SASL exchange:
+
+    * `{:ok, identity, state}` - authenticated as `identity`: `235`.
+    * `{:challenge, data, state}` - send `data` (raw bytes; the session
+      encodes it) with `334` and wait for the client's response.
+    * `{:error, reply, state}` - the exchange failed: send `reply`.
+      Use `535 5.7.8` for bad credentials (counted towards
+      `:max_auth_failures`), `454 4.7.0` for a temporary failure.
+    * `{:close, reply, state}` - send `reply` and close the connection.
+  """
+  @type auth_result ::
+          {:ok, identity :: String.t(), state()}
+          | {:challenge, binary(), state()}
+          | {:error, Reply.t(), state()}
+          | {:close, Reply.t(), state()}
+
+  @doc """
+  `AUTH` with an offered mechanism. `initial_response` is the decoded
+  initial response, `""` when the client sent `=`, and `nil` when it sent
+  none.
+  """
+  @callback handle_auth(mechanism :: String.t(), initial_response :: binary() | nil, state()) ::
+              auth_result()
+
+  @doc "The client's (decoded) response to a challenge."
+  @callback handle_auth_response(response :: binary(), state()) :: auth_result()
+
+  @doc """
+  The exchange ended without a result: the client cancelled with `*`,
+  sent an invalid response, or the session ended.
+  """
+  @callback handle_auth_abort(state()) :: state()
+
   @doc "The session ended."
   @callback terminate(reason :: term(), state()) :: any()
 
-  @optional_callbacks handle_rset: 1, handle_vrfy: 2, terminate: 2
+  @optional_callbacks handle_rset: 1,
+                      handle_vrfy: 2,
+                      handle_tls: 2,
+                      auth_mechanisms: 1,
+                      handle_auth: 3,
+                      handle_auth_response: 2,
+                      handle_auth_abort: 1,
+                      terminate: 2
 end

@@ -34,6 +34,8 @@ defmodule Sovite.SMTP.Command do
           | {:noop, String.t()}
           | {:vrfy, String.t()}
           | {:help, String.t()}
+          | :starttls
+          | {:auth, mechanism :: String.t(), initial_response :: String.t() | nil}
 
   @typedoc """
   Why a line did not parse:
@@ -66,10 +68,12 @@ defmodule Sovite.SMTP.Command do
     "QUIT" => :quit,
     "NOOP" => :noop,
     "VRFY" => :vrfy,
-    "HELP" => :help
+    "HELP" => :help,
+    "STARTTLS" => :starttls,
+    "AUTH" => :auth
   }
 
-  @not_implemented ~w(EXPN TURN ETRN ATRN STARTTLS AUTH BDAT SEND SOML SAML XCLIENT XFORWARD)
+  @not_implemented ~w(EXPN TURN ETRN ATRN BDAT SEND SOML SAML XCLIENT XFORWARD)
   @http ~w(GET POST HEAD PUT DELETE OPTIONS CONNECT PATCH TRACE)
 
   @doc "Parses one command line. Returns the verb, if known, with errors."
@@ -105,7 +109,7 @@ defmodule Sovite.SMTP.Command do
   defp parse_verb(:mail, argument), do: parse_path(:mail, argument, "FROM:", :invalid_sender)
   defp parse_verb(:rcpt, argument), do: parse_path(:rcpt, argument, "TO:", :invalid_recipient)
 
-  defp parse_verb(verb, argument) when verb in [:data, :rset, :quit] do
+  defp parse_verb(verb, argument) when verb in [:data, :rset, :quit, :starttls] do
     if String.trim(argument) == "", do: {:ok, verb}, else: {:error, verb, :syntax}
   end
 
@@ -119,7 +123,23 @@ defmodule Sovite.SMTP.Command do
     end
   end
 
+  # AUTH mechanism [initial-response] (RFC 4954 §4). The response stays
+  # base64; "=" stands for an empty one.
+  defp parse_verb(:auth, argument) do
+    case String.split(argument, " ") do
+      [mechanism] -> auth(mechanism, nil)
+      [mechanism, response] -> auth(mechanism, response)
+      _ -> {:error, :auth, :syntax}
+    end
+  end
+
   ## Paths and parameters
+
+  defp auth(mechanism, response) do
+    if String.match?(mechanism, ~r/\A[A-Za-z0-9_-]{1,20}\z/) and response != "",
+      do: {:ok, {:auth, String.upcase(mechanism, :ascii), response}},
+      else: {:error, :auth, :syntax}
+  end
 
   defp parse_path(verb, argument, prefix, path_error) do
     size = byte_size(prefix)

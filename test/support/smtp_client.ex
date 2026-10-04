@@ -12,9 +12,9 @@ defmodule Sovite.Test.SMTPClient do
 
   @timeout 5_000
 
-  defstruct [:socket]
+  defstruct [:socket, transport: :gen_tcp]
 
-  @type t :: %__MODULE__{socket: :gen_tcp.socket()}
+  @type t :: %__MODULE__{socket: term(), transport: :gen_tcp | :ssl}
   @type reply :: {code :: 100..599, lines :: [String.t()]}
 
   @doc "Connects to `host:port`. The greeting is not read."
@@ -25,6 +25,27 @@ defmodule Sovite.Test.SMTPClient do
 
     with {:ok, socket} <- :gen_tcp.connect(host, port, opts, @timeout) do
       {:ok, %__MODULE__{socket: socket}}
+    end
+  end
+
+  @doc "Connects with implicit TLS. The greeting is not read."
+  def connect_tls(port, ssl_opts) do
+    opts = [:binary, active: false, packet: :line, buffer: 65_536]
+
+    with {:ok, socket} <- :ssl.connect({127, 0, 0, 1}, port, opts ++ ssl_opts, @timeout) do
+      {:ok, %__MODULE__{socket: socket, transport: :ssl}}
+    end
+  end
+
+  @doc "Sends STARTTLS and, on 220, runs the TLS handshake."
+  def starttls(client, ssl_opts) do
+    with {:ok, {220, _}} <- command(client, "STARTTLS"), do: upgrade(client, ssl_opts)
+  end
+
+  @doc "Runs a client TLS handshake on the connection."
+  def upgrade(%__MODULE__{transport: :gen_tcp, socket: socket}, ssl_opts) do
+    with {:ok, ssl} <- :ssl.connect(socket, ssl_opts, @timeout) do
+      {:ok, %__MODULE__{socket: ssl, transport: :ssl}}
     end
   end
 
@@ -68,22 +89,26 @@ defmodule Sovite.Test.SMTPClient do
 
   @doc "Sends raw bytes as-is."
   @spec send_raw(t(), iodata()) :: :ok | {:error, term()}
-  def send_raw(%__MODULE__{socket: socket}, data), do: :gen_tcp.send(socket, data)
+  def send_raw(%__MODULE__{transport: transport, socket: socket}, data),
+    do: transport.send(socket, data)
 
   @doc "Reads one (possibly multi-line) reply."
   @spec read_reply(t(), timeout()) :: {:ok, reply()} | {:error, term()}
-  def read_reply(%__MODULE__{socket: socket}, timeout \\ @timeout),
-    do: read_lines(socket, timeout, [])
+  def read_reply(%__MODULE__{} = client, timeout \\ @timeout),
+    do: read_lines(client, timeout, [])
 
   @doc "Closes the connection."
   @spec close(t()) :: :ok
-  def close(%__MODULE__{socket: socket}), do: :gen_tcp.close(socket)
+  def close(%__MODULE__{transport: transport, socket: socket}) do
+    _ = transport.close(socket)
+    :ok
+  end
 
-  defp read_lines(socket, timeout, acc) do
-    with {:ok, line} <- :gen_tcp.recv(socket, 0, timeout) do
+  defp read_lines(%{transport: transport, socket: socket} = client, timeout, acc) do
+    with {:ok, line} <- transport.recv(socket, 0, timeout) do
       case String.trim_trailing(line, "\r\n") do
         <<_code::binary-size(3), "-", text::binary>> ->
-          read_lines(socket, timeout, [text | acc])
+          read_lines(client, timeout, [text | acc])
 
         <<code::binary-size(3), " ", text::binary>> ->
           finish(code, [text | acc])

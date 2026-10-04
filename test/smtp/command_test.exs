@@ -76,11 +76,22 @@ defmodule Sovite.SMTP.CommandTest do
   test "classifies unknown, unsupported, and non-SMTP commands" do
     assert parse("FOO bar") == {:error, nil, :unrecognized}
     assert parse("") == {:error, nil, :unrecognized}
-    assert parse("STARTTLS") == {:error, nil, :not_implemented}
-    assert parse("AUTH PLAIN AGFiAGM=") == {:error, nil, :not_implemented}
     assert parse("EXPN staff") == {:error, nil, :not_implemented}
+    assert parse("BDAT 100 LAST") == {:error, nil, :not_implemented}
     assert parse("GET / HTTP/1.1") == {:error, nil, :non_smtp}
     assert parse("POST /form HTTP/1.1") == {:error, nil, :non_smtp}
+  end
+
+  test "parses STARTTLS and AUTH" do
+    assert parse("STARTTLS") == {:ok, :starttls}
+    assert parse("starttls x") == {:error, :starttls, :syntax}
+    assert parse("AUTH plain") == {:ok, {:auth, "PLAIN", nil}}
+    assert parse("AUTH PLAIN AGFiAGM=") == {:ok, {:auth, "PLAIN", "AGFiAGM="}}
+    assert parse("AUTH SCRAM-SHA-256 =") == {:ok, {:auth, "SCRAM-SHA-256", "="}}
+    assert parse("AUTH") == {:error, :auth, :syntax}
+    assert parse("AUTH PLAIN a b") == {:error, :auth, :syntax}
+    assert parse("AUTH PL/AIN") == {:error, :auth, :syntax}
+    assert parse("AUTH " <> String.duplicate("X", 21)) == {:error, :auth, :syntax}
   end
 
   test "rejects control and non-ASCII characters" do

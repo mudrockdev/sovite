@@ -13,6 +13,25 @@ defmodule Sovite.SMTP.Server.Session do
   Pipelined commands (RFC 2920) need no special handling: all complete
   lines in the input are processed, and their replies returned together.
 
+  ## STARTTLS
+
+  With `starttls: true`, `STARTTLS` (RFC 3207) is offered until the
+  connection is encrypted. On `STARTTLS` the session replies `220` and
+  returns `{:starttls, replies, session}`: send the replies, run the TLS
+  handshake, then call `handle_tls/2`. Input received after the
+  `STARTTLS` command and before the handshake is discarded, so a
+  man-in-the-middle cannot inject commands into the encrypted session.
+  After the handshake the session starts over, as the RFC requires: the
+  client must send `EHLO` again.
+
+  ## AUTH
+
+  With `auth: true`, `AUTH` (RFC 4954) is offered with the mechanisms the
+  handler's `auth_mechanisms/1` returns, but only over TLS unless
+  `plaintext_auth: true`. The handler runs the SASL exchange, see
+  `Sovite.SMTP.Server.Handler`. Lines of up to 12288 bytes are accepted
+  while `AUTH` is offered, for large initial responses and tokens.
+
   ## Options
 
     * `:hostname` - name in the greeting and `EHLO` reply. Required.
@@ -30,6 +49,20 @@ defmodule Sovite.SMTP.Server.Session do
     * `:bare_line_endings` - `:reject` (default) or `:normalize`, see
       `Sovite.SMTP.DataDecoder`. Under `:reject`, a bare LF or CR in a
       command or in the data closes the session with `521`.
+    * `:starttls` - offer `STARTTLS`. Defaults to `false`.
+    * `:require_tls` - refuse `MAIL`, `RCPT`, `DATA`, `VRFY`, and `AUTH`
+      with `530 5.7.0` until the connection is encrypted. Defaults to
+      `false`.
+    * `:auth` - offer `AUTH`. Defaults to `false`.
+    * `:auth_required` - refuse `MAIL` with `530 5.7.0` until the client
+      has authenticated. Defaults to `false`.
+    * `:plaintext_auth` - offer `AUTH` on unencrypted connections too.
+      Defaults to `false`: passwords are never sent in the clear.
+    * `:max_auth_failures` - failed `AUTH` attempts before the session is
+      closed. Defaults to 3.
+
+  The connection map may carry `:tls` (a `Sovite.TLS.info()`) when it is
+  encrypted from the start (implicit TLS, RFC 8314).
 
   ## Telemetry
 
@@ -37,7 +70,8 @@ defmodule Sovite.SMTP.Server.Session do
   `%{duration}` and `%{session_id, remote_ip, command, argument,
   reply_code, reply}`. `command` is the verb (`"MAIL"`), `"UNKNOWN"`, or
   `"END-OF-MESSAGE"` for the final dot. `argument` is only set for `EHLO`,
-  `HELO`, `MAIL`, `RCPT`, and `VRFY`, and is network input.
+  `HELO`, `MAIL`, `RCPT`, and `VRFY`, and is network input. For `AUTH` it
+  is the mechanism; SASL responses are never included.
   """
 
   alias Sovite.SMTP.{Command, DataDecoder, Reply}
@@ -50,7 +84,8 @@ defmodule Sovite.SMTP.Server.Session do
           optional(:remote_port) => :inet.port_number(),
           optional(:local_ip) => :inet.ip_address(),
           optional(:local_port) => :inet.port_number(),
-          optional(:listener) => String.t()
+          optional(:listener) => String.t(),
+          optional(:tls) => Sovite.TLS.info() | nil
         }
 
   @typedoc "`MAIL FROM` parameters. `body` is `nil` when not given."
@@ -63,7 +98,10 @@ defmodule Sovite.SMTP.Server.Session do
           recipients: [String.t()]
         }
 
-  @type result :: {:continue | :close, iodata(), t()}
+  @type result :: {:continue | :close | :starttls, iodata(), t()}
+
+  # RFC 4954 §4: AUTH lines of at least 12288 octets must be accepted.
+  @auth_line_length 12_288 + 2
 
   @defaults [
     max_message_size: 10 * 1024 * 1024,
@@ -73,7 +111,13 @@ defmodule Sovite.SMTP.Server.Session do
     command_timeout: 300_000,
     data_timeout: 300_000,
     vrfy: false,
-    bare_line_endings: :reject
+    bare_line_endings: :reject,
+    starttls: false,
+    require_tls: false,
+    auth: false,
+    auth_required: false,
+    plaintext_auth: false,
+    max_auth_failures: 3
   ]
 
   defstruct [
@@ -85,11 +129,13 @@ defmodule Sovite.SMTP.Server.Session do
     :helo,
     :transaction,
     :data,
+    :identity,
     phase: :command,
     esmtp: false,
     buffer: <<>>,
     discarding: false,
-    errors: 0
+    errors: 0,
+    auth_failures: 0
   ]
 
   @opaque t :: %__MODULE__{}
@@ -129,6 +175,40 @@ defmodule Sovite.SMTP.Server.Session do
   @spec session_id(t()) :: String.t()
   def session_id(%__MODULE__{connection: connection}), do: connection.session_id
 
+  @doc "Returns the TLS details if the connection is encrypted, else `nil`."
+  @spec tls(t()) :: Sovite.TLS.info() | nil
+  def tls(%__MODULE__{connection: connection}), do: Map.get(connection, :tls)
+
+  @doc "Returns the authenticated identity, or `nil`."
+  @spec identity(t()) :: String.t() | nil
+  def identity(%__MODULE__{identity: identity}), do: identity
+
+  @doc """
+  The TLS handshake after `STARTTLS` succeeded. Resets the session to
+  its initial state, as RFC 3207 §4.2 requires, and tells the handler.
+  """
+  @spec handle_tls(t(), Sovite.TLS.info()) :: result()
+  def handle_tls(%__MODULE__{phase: :starttls} = session, info) do
+    session = reset_transaction(session)
+
+    state =
+      if function_exported?(session.handler, :handle_tls, 2),
+        do: session.handler.handle_tls(info, session.handler_state),
+        else: session.handler_state
+
+    session = %{
+      session
+      | connection: Map.put(session.connection, :tls, info),
+        handler_state: state,
+        phase: :command,
+        helo: nil,
+        esmtp: false,
+        buffer: <<>>
+    }
+
+    {:continue, [], session}
+  end
+
   @doc "Milliseconds to wait for more input before calling `handle_timeout/1`."
   @spec timeout(t()) :: timeout()
   def timeout(%__MODULE__{phase: :data, opts: opts}), do: opts.data_timeout
@@ -145,7 +225,7 @@ defmodule Sovite.SMTP.Server.Session do
   @doc "The client sent nothing for `timeout/1` milliseconds."
   @spec handle_timeout(t()) :: result()
   def handle_timeout(%__MODULE__{} = session) do
-    session = abort_data(session, :timeout)
+    session = session |> abort_data(:timeout) |> abort_auth()
     reply = Reply.new(421, "4.4.2", "#{session.hostname} Error: timeout exceeded")
     {:close, Reply.encode(reply), %{session | phase: :closed}}
   end
@@ -169,12 +249,18 @@ defmodule Sovite.SMTP.Server.Session do
   defp process(%{phase: :closed} = session, out), do: {:close, Enum.reverse(out), session}
   defp process(%{phase: :data} = session, out), do: process_data(session, out)
 
+  # Input after STARTTLS is dropped until the handshake, see the moduledoc.
+  defp process(%{phase: :starttls} = session, out),
+    do: {:starttls, Enum.reverse(out), %{session | buffer: <<>>}}
+
   defp process(session, out) do
+    max_line_length = line_limit(session)
+
     case :binary.match(session.buffer, "\n") do
       :nomatch when session.discarding ->
         {:continue, Enum.reverse(out), %{session | buffer: <<>>}}
 
-      :nomatch when byte_size(session.buffer) > session.opts.max_line_length ->
+      :nomatch when byte_size(session.buffer) > max_line_length ->
         # Drop the line so far and the rest of it as it arrives.
         session = %{session | buffer: <<>>, discarding: true}
         reply(session, out, "UNKNOWN", nil, line_too_long())
@@ -190,7 +276,8 @@ defmodule Sovite.SMTP.Server.Session do
           session.discarding ->
             process(%{session | discarding: false}, out)
 
-          index + 1 > session.opts.max_line_length ->
+          index + 1 > max_line_length ->
+            session = abort_auth(session)
             reply(session, out, "UNKNOWN", nil, line_too_long())
 
           true ->
@@ -199,21 +286,27 @@ defmodule Sovite.SMTP.Server.Session do
     end
   end
 
+  defp line_limit(%{opts: %{auth: true, max_line_length: max}}), do: max(max, @auth_line_length)
+  defp line_limit(%{opts: opts}), do: opts.max_line_length
+
   defp command_line(session, out, line) do
     cond do
       String.ends_with?(line, "\r") ->
-        command(session, out, binary_part(line, 0, byte_size(line) - 1))
+        dispatch(session, out, binary_part(line, 0, byte_size(line) - 1))
 
       session.opts.bare_line_endings == :normalize ->
-        command(session, out, line)
+        dispatch(session, out, line)
 
       true ->
         bare_line_ending(session, out, "UNKNOWN", :bare_lf)
     end
   end
 
+  defp dispatch(%{phase: {:auth, _}} = session, out, line), do: auth_response(session, out, line)
+  defp dispatch(session, out, line), do: command(session, out, line)
+
   defp bare_line_ending(session, out, command, reason) do
-    session = abort_data(session, reason)
+    session = session |> abort_data(reason) |> abort_auth()
     text = if reason == :bare_lf, do: "<LF>", else: "<CR>"
     reply = Reply.new(521, "5.5.2", "#{session.hostname} Error: bare #{text} received")
     session = %{session | phase: :closed}
@@ -227,7 +320,10 @@ defmodule Sovite.SMTP.Server.Session do
 
     case Command.parse(line) do
       {:ok, command} ->
-        execute(command, session, out, started)
+        case gate(command, session) do
+          :ok -> execute(command, session, out, started)
+          {:error, reply} -> reply(session, out, command_name(command), nil, reply, started)
+        end
 
       {:error, verb, reason} ->
         if reason == :invalid_characters and :binary.match(line, "\r") != :nomatch and
@@ -238,6 +334,18 @@ defmodule Sovite.SMTP.Server.Session do
         end
     end
   end
+
+  # Commands that need TLS first, under require_tls.
+  defp gate(command, %{opts: %{require_tls: true}} = session) do
+    if command_name(command) in ~w(MAIL RCPT DATA VRFY AUTH) and tls(session) == nil,
+      do: {:error, Reply.new(530, "5.7.0", "Must issue a STARTTLS command first")},
+      else: :ok
+  end
+
+  defp gate(_command, _session), do: :ok
+
+  defp command_name(command) when is_atom(command), do: verb_name(command)
+  defp command_name(command), do: command |> elem(0) |> verb_name()
 
   defp execute({kind, name}, session, out, started) when kind in [:ehlo, :helo] do
     verb = verb_name(kind)
@@ -263,6 +371,53 @@ defmodule Sovite.SMTP.Server.Session do
       end
     else
       reply(session, out, verb, name, Reply.new(501, "5.5.2", "Invalid hostname"), started)
+    end
+  end
+
+  defp execute(:starttls, session, out, started) do
+    cond do
+      tls(session) != nil ->
+        reply(
+          session,
+          out,
+          "STARTTLS",
+          nil,
+          Reply.new(503, "5.5.1", "TLS already active"),
+          started
+        )
+
+      not session.opts.starttls ->
+        reply(
+          session,
+          out,
+          "STARTTLS",
+          nil,
+          Reply.new(502, "5.5.1", "Command not implemented"),
+          started
+        )
+
+      true ->
+        session = %{reset_transaction(session) | phase: :starttls}
+
+        reply(
+          session,
+          out,
+          "STARTTLS",
+          nil,
+          Reply.new(220, "2.0.0", "Ready to start TLS"),
+          started
+        )
+    end
+  end
+
+  defp execute({:auth, mechanism, initial}, session, out, started) do
+    case check_auth(mechanism, initial, session) do
+      {:ok, initial} ->
+        session.handler.handle_auth(mechanism, initial, session.handler_state)
+        |> auth_result(%{session | phase: {:auth, mechanism}}, out, started)
+
+      {:error, reply} ->
+        reply(session, out, "AUTH", mechanism, reply, started)
     end
   end
 
@@ -364,9 +519,137 @@ defmodule Sovite.SMTP.Server.Session do
   end
 
   defp execute({:help, _argument}, session, out, started) do
-    text = "Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT VRFY HELP"
+    text = "Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT VRFY HELP STARTTLS AUTH"
     reply(session, out, "HELP", nil, Reply.new(214, "2.0.0", text), started)
   end
+
+  ## AUTH
+
+  defp auth_offered?(session) do
+    session.opts.auth and (tls(session) != nil or session.opts.plaintext_auth)
+  end
+
+  defp mechanisms(session) do
+    if function_exported?(session.handler, :auth_mechanisms, 1),
+      do: session.handler.auth_mechanisms(session.handler_state),
+      else: []
+  end
+
+  defp check_auth(mechanism, initial, session) do
+    cond do
+      not session.opts.auth ->
+        {:error, Reply.new(503, "5.5.1", "Authentication not enabled")}
+
+      not session.esmtp ->
+        {:error, Reply.new(503, "5.5.1", "Send EHLO first")}
+
+      session.identity != nil ->
+        {:error, Reply.new(503, "5.5.1", "Already authenticated")}
+
+      session.transaction != nil ->
+        {:error, Reply.new(503, "5.5.1", "MAIL transaction in progress")}
+
+      not auth_offered?(session) ->
+        {:error,
+         Reply.new(538, "5.7.11", "Encryption required for requested authentication mechanism")}
+
+      mechanism not in mechanisms(session) ->
+        {:error, Reply.new(504, "5.5.4", "Unrecognized authentication type")}
+
+      true ->
+        decode_response(initial)
+    end
+  end
+
+  defp decode_response(nil), do: {:ok, nil}
+  defp decode_response("="), do: {:ok, ""}
+
+  defp decode_response(data) do
+    case Base.decode64(data) do
+      {:ok, decoded} -> {:ok, decoded}
+      :error -> {:error, Reply.new(501, "5.5.2", "Cannot decode response")}
+    end
+  end
+
+  defp auth_response(session, out, line) do
+    started = System.monotonic_time()
+    {:auth, mechanism} = session.phase
+
+    if line == "*" do
+      session = abort_auth(session)
+
+      reply(
+        session,
+        out,
+        "AUTH",
+        mechanism,
+        Reply.new(501, "5.0.0", "Authentication cancelled"),
+        started
+      )
+    else
+      case decode_response(line) do
+        {:ok, data} ->
+          session.handler.handle_auth_response(data, session.handler_state)
+          |> auth_result(session, out, started)
+
+        {:error, reply} ->
+          reply(abort_auth(session), out, "AUTH", mechanism, reply, started)
+      end
+    end
+  end
+
+  # A challenge is not a final reply: no telemetry, not counted as an error.
+  defp auth_result({:challenge, data, state}, session, out, _started) do
+    challenge = Reply.new(334, Base.encode64(data))
+    process(%{session | handler_state: state}, [Reply.encode(challenge) | out])
+  end
+
+  defp auth_result({:ok, identity, state}, session, out, started) do
+    {:auth, mechanism} = session.phase
+    session = %{session | handler_state: state, identity: identity, phase: :command}
+
+    reply(
+      session,
+      out,
+      "AUTH",
+      mechanism,
+      Reply.new(235, "2.7.0", "Authentication successful"),
+      started
+    )
+  end
+
+  defp auth_result({:error, reply, state}, session, out, started) do
+    {:auth, mechanism} = session.phase
+    failures = session.auth_failures + if(reply.code == 535, do: 1, else: 0)
+    session = %{session | handler_state: state, phase: :command, auth_failures: failures}
+
+    if failures >= session.opts.max_auth_failures do
+      closing =
+        Reply.new(421, "4.7.0", "#{session.hostname} Error: too many failed authentications")
+
+      session = %{session | phase: :closed}
+      reply(session, [Reply.encode(reply) | out], "AUTH", mechanism, closing, started)
+    else
+      reply(session, out, "AUTH", mechanism, reply, started)
+    end
+  end
+
+  defp auth_result({:close, reply, state}, session, out, started) do
+    {:auth, mechanism} = session.phase
+    session = %{session | handler_state: state, phase: :closed}
+    reply(session, out, "AUTH", mechanism, reply, started)
+  end
+
+  defp abort_auth(%{phase: {:auth, _}} = session) do
+    state =
+      if function_exported?(session.handler, :handle_auth_abort, 1),
+        do: session.handler.handle_auth_abort(session.handler_state),
+        else: session.handler_state
+
+    %{session | phase: :command, handler_state: state}
+  end
+
+  defp abort_auth(session), do: session
 
   # Runs `on_accept` on the session when the handler accepts.
   defp accept({:ok, state}, session, out, verb, argument, started, default, on_accept) do
@@ -391,17 +674,33 @@ defmodule Sovite.SMTP.Server.Session do
   defp helo_reply(session, :helo), do: Reply.new(250, session.hostname)
 
   defp helo_reply(session, :ehlo) do
-    Reply.new(250, [
-      session.hostname,
-      "PIPELINING",
-      "SIZE #{session.opts.max_message_size}",
-      "8BITMIME",
-      "ENHANCEDSTATUSCODES"
-    ])
+    starttls = if session.opts.starttls and tls(session) == nil, do: ["STARTTLS"], else: []
+
+    auth =
+      with true <- auth_offered?(session) and session.identity == nil,
+           [_ | _] = mechanisms <- mechanisms(session) do
+        ["AUTH " <> Enum.join(mechanisms, " ")]
+      else
+        _ -> []
+      end
+
+    Reply.new(
+      250,
+      [
+        session.hostname,
+        "PIPELINING",
+        "SIZE #{session.opts.max_message_size}",
+        "8BITMIME",
+        "ENHANCEDSTATUSCODES"
+      ] ++ starttls ++ auth
+    )
   end
 
   defp check_mail(_params, %{helo: nil}),
     do: {:error, Reply.new(503, "5.5.1", "Send HELO/EHLO first")}
+
+  defp check_mail(_params, %{identity: nil, opts: %{auth_required: true}}),
+    do: {:error, Reply.new(530, "5.7.0", "Authentication required")}
 
   defp check_mail(_params, %{transaction: transaction}) when transaction != nil,
     do: {:error, Reply.new(503, "5.5.1", "Nested MAIL command")}
@@ -425,6 +724,7 @@ defmodule Sovite.SMTP.Server.Session do
 
   defp add_mail_param(param, {:ok, acc}, session) do
     case mail_param(param, session) do
+      {:ok, :auth, _value} -> {:cont, {:ok, acc}}
       {:ok, key, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
       {:error, reply} -> {:halt, {:error, reply}}
     end
@@ -450,6 +750,11 @@ defmodule Sovite.SMTP.Server.Session do
       _ -> {:error, Reply.new(501, "5.5.4", "Invalid BODY parameter")}
     end
   end
+
+  # RFC 4954 §5. Accepted and not used: Sovite does not relay
+  # authenticated identities between trusted servers.
+  defp mail_param({"AUTH", value}, %{opts: %{auth: true}}) when is_binary(value),
+    do: {:ok, :auth, nil}
 
   defp mail_param({key, _value}, _session) when key in ["SIZE", "BODY"],
     do: {:error, Reply.new(501, "5.5.4", "Invalid #{key} parameter")}
@@ -489,6 +794,7 @@ defmodule Sovite.SMTP.Server.Session do
   defp usage(:mail), do: "MAIL FROM:<address> [parameters]"
   defp usage(:rcpt), do: "RCPT TO:<address>"
   defp usage(:vrfy), do: "VRFY address"
+  defp usage(:auth), do: "AUTH mechanism [initial-response]"
   defp usage(verb), do: verb_name(verb)
 
   defp verb_name(nil), do: "UNKNOWN"
@@ -612,6 +918,9 @@ defmodule Sovite.SMTP.Server.Session do
     cond do
       session.phase == :closed or reply.code == 421 ->
         {:close, Enum.reverse(out), %{session | phase: :closed}}
+
+      session.phase == :starttls ->
+        {:starttls, Enum.reverse(out), %{session | buffer: <<>>}}
 
       session.errors >= session.opts.max_errors ->
         closing = Reply.new(421, "4.7.0", "#{session.hostname} Error: too many errors")

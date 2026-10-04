@@ -46,6 +46,33 @@ defmodule Sovite.SMTP.Server.SessionTest do
     def handle_vrfy(argument, state), do: respond(:vrfy, argument, state)
 
     @impl true
+    def handle_tls(info, state) do
+      send(state.test, {:tls, info})
+      state
+    end
+
+    @impl true
+    def auth_mechanisms(state), do: Map.get(state, :mechanisms, ["PLAIN", "LOGIN"])
+
+    @impl true
+    def handle_auth(mechanism, initial, state) do
+      send(state.test, {:auth, mechanism, initial})
+      if state[:auth], do: state.auth.({mechanism, initial}, state), else: {:ok, "user", state}
+    end
+
+    @impl true
+    def handle_auth_response(response, state) do
+      send(state.test, {:auth_response, response})
+      state.auth_response.(response, state)
+    end
+
+    @impl true
+    def handle_auth_abort(state) do
+      send(state.test, :auth_abort)
+      state
+    end
+
+    @impl true
     def terminate(reason, state), do: send(state.test, {:terminate, reason})
 
     defp respond(stage, argument, state) do
@@ -350,7 +377,8 @@ defmodule Sovite.SMTP.Server.SessionTest do
           {"RCPT TO:<a@@x>", "501 5.1.3 Bad recipient address syntax"},
           {"MAIL FROM:<a@x.test> =x", "501 5.5.4 Invalid parameter syntax"},
           {"NOOP \x01", "500 5.5.2 Invalid characters"},
-          {"HELP", "214 2.0.0 Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT VRFY HELP"}
+          {"HELP",
+           "214 2.0.0 Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT VRFY HELP STARTTLS AUTH"}
         ] do
       {:continue, out, _} = input(session, line <> "\r\n")
       assert replies(out) == [reply], "for #{line}"
@@ -440,5 +468,226 @@ defmodule Sovite.SMTP.Server.SessionTest do
                        reply_code: 503,
                        reply: "503 5.5.1 Need MAIL command"
                      }}
+  end
+
+  describe "STARTTLS" do
+    @tls %{protocol: "TLSv1.3", cipher: "TLS_AES_128_GCM_SHA256", bits: 128, sni: nil}
+
+    test "is only offered when enabled" do
+      {:continue, out, _} = input(started(), "EHLO c.test\r\nSTARTTLS\r\n")
+      refute out =~ "STARTTLS"
+      assert replies(out) |> List.last() == "502 5.5.1 Command not implemented"
+    end
+
+    test "replies 220, drops pipelined input, and resets the session after the handshake" do
+      session = in_transaction([], starttls: true)
+
+      assert {:starttls, out, session} = input(session, "STARTTLS\r\nRCPT TO:<c@y.test>\r\n")
+      assert replies(out) == ["220 2.0.0 Ready to start TLS"]
+      assert_received :rset
+      refute_received {:rcpt, "c@y.test"}
+
+      assert {:continue, [], session} = Session.handle_tls(session, @tls)
+      assert_received {:tls, @tls}
+      assert Session.tls(session) == @tls
+
+      {:continue, out, session} = input(session, "MAIL FROM:<a@x.test>\r\n")
+      assert replies(out) == ["503 5.5.1 Send HELO/EHLO first"]
+
+      {:continue, out, _} = input(session, "EHLO c.test\r\nSTARTTLS\r\n")
+      refute out =~ "STARTTLS\r\n"
+      assert replies(out) |> List.last() == "503 5.5.1 TLS already active"
+    end
+
+    test "takes no argument" do
+      {:continue, out, _} = input(started([], starttls: true), "STARTTLS now\r\n")
+      assert replies(out) == ["501 5.5.4 Syntax: STARTTLS"]
+    end
+
+    test "require_tls refuses mail commands until then" do
+      session = started([], starttls: true, require_tls: true)
+
+      {:continue, out, _} =
+        input(session, "EHLO c.test\r\nMAIL FROM:<a@x.test>\r\nVRFY a\r\nNOOP\r\n")
+
+      assert replies(out) |> tl() == [
+               "530 5.7.0 Must issue a STARTTLS command first",
+               "530 5.7.0 Must issue a STARTTLS command first",
+               "250 2.0.0 Ok"
+             ]
+    end
+  end
+
+  describe "AUTH" do
+    defp auth_session(handler_opts \\ [], opts \\ []) do
+      opts = Keyword.merge([auth: true, plaintext_auth: true], opts)
+      {:continue, _, session} = input(started(handler_opts, opts), "EHLO c.test\r\n")
+      session
+    end
+
+    test "is refused when not enabled, before EHLO, and without TLS" do
+      {:continue, out, _} = input(started(), "EHLO c.test\r\nAUTH PLAIN\r\n")
+      refute out =~ "AUTH"
+      assert replies(out) |> List.last() == "503 5.5.1 Authentication not enabled"
+
+      {:continue, out, _} = input(started([], auth: true), "HELO c.test\r\nAUTH PLAIN\r\n")
+      assert replies(out) |> List.last() == "503 5.5.1 Send EHLO first"
+
+      {:continue, out, _} = input(started([], auth: true), "EHLO c.test\r\nAUTH PLAIN\r\n")
+      refute out =~ "250-AUTH"
+      refute out =~ "250 AUTH"
+
+      assert replies(out) |> List.last() ==
+               "538 5.7.11 Encryption required for requested authentication mechanism"
+    end
+
+    test "is offered over TLS" do
+      connection = %{remote_ip: {192, 0, 2, 7}, session_id: "S1", tls: %{protocol: "TLSv1.3"}}
+      opts = [hostname: "mx.test", handler: {Handler, test: self()}, auth: true]
+      {:continue, _, session} = Session.new(connection, opts)
+      {:continue, out, _} = input(session, "EHLO c.test\r\nAUTH PLAIN AHUAcA==\r\n")
+      assert out =~ "250 AUTH PLAIN LOGIN\r\n"
+      assert replies(out) |> List.last() == "235 2.7.0 Authentication successful"
+    end
+
+    test "accepts an initial response" do
+      session = auth_session()
+      {:continue, out, session} = input(session, "AUTH plain AHUAcA==\r\n")
+      assert replies(out) == ["235 2.7.0 Authentication successful"]
+      assert_received {:auth, "PLAIN", <<0, "u", 0, "p">>}
+      assert Session.identity(session) == "user"
+
+      {:continue, out, _} = input(session, "EHLO c.test\r\nAUTH PLAIN\r\n")
+      refute out =~ "AUTH PLAIN LOGIN"
+      assert replies(out) |> List.last() == "503 5.5.1 Already authenticated"
+    end
+
+    test "passes = as an empty initial response" do
+      {:continue, _, _} = input(auth_session(), "AUTH PLAIN =\r\n")
+      assert_received {:auth, "PLAIN", ""}
+    end
+
+    test "runs a challenge-response exchange" do
+      session =
+        auth_session(
+          auth: fn {"LOGIN", nil}, s -> {:challenge, "Username:", s} end,
+          auth_response: fn
+            "alice", s -> {:challenge, "Password:", s}
+            "secret", s -> {:ok, "alice", s}
+          end
+        )
+
+      {:continue, out, session} = input(session, "AUTH LOGIN\r\n")
+      assert out == "334 VXNlcm5hbWU6\r\n"
+      {:continue, out, session} = input(session, "YWxpY2U=\r\n")
+      assert out == "334 UGFzc3dvcmQ6\r\n"
+      {:continue, out, session} = input(session, "c2VjcmV0\r\n")
+      assert replies(out) == ["235 2.7.0 Authentication successful"]
+      assert Session.identity(session) == "alice"
+    end
+
+    test "sends an empty challenge as a bare 334" do
+      session = auth_session(auth: fn _, s -> {:challenge, "", s} end)
+      {:continue, out, _} = input(session, "AUTH PLAIN\r\n")
+      assert out == "334 \r\n"
+    end
+
+    test "can be cancelled, and rejects undecodable responses" do
+      session = auth_session(auth: fn _, s -> {:challenge, "", s} end)
+
+      {:continue, _, session} = input(session, "AUTH PLAIN\r\n")
+      {:continue, out, session} = input(session, "*\r\n")
+      assert replies(out) == ["501 5.0.0 Authentication cancelled"]
+      assert_received :auth_abort
+
+      {:continue, _, session} = input(session, "AUTH PLAIN\r\n")
+      {:continue, out, session} = input(session, "not base64!\r\n")
+      assert replies(out) == ["501 5.5.2 Cannot decode response"]
+      assert_received :auth_abort
+
+      {:continue, out, _} = input(session, "AUTH PLAIN %%%\r\n")
+      assert replies(out) == ["501 5.5.2 Cannot decode response"]
+    end
+
+    test "refuses unknown mechanisms and AUTH during a transaction" do
+      {:continue, out, _} = input(auth_session(), "AUTH CRAM-MD5\r\n")
+      assert replies(out) == ["504 5.5.4 Unrecognized authentication type"]
+
+      session = in_transaction([], auth: true, plaintext_auth: true)
+      {:continue, out, _} = input(session, "AUTH PLAIN AHUAcA==\r\n")
+      assert replies(out) == ["503 5.5.1 MAIL transaction in progress"]
+    end
+
+    test "closes after too many failures" do
+      failure = Reply.new(535, "5.7.8", "Authentication credentials invalid")
+      session = auth_session(auth: fn _, s -> {:error, failure, s} end)
+
+      {:continue, out, session} = input(session, "AUTH PLAIN AHUAcA==\r\nAUTH PLAIN AHUAcA==\r\n")
+      assert codes(out) == [535, 535]
+
+      {:close, out, _} = input(session, "AUTH PLAIN AHUAcA==\r\n")
+
+      assert replies(out) == [
+               "535 5.7.8 Authentication credentials invalid",
+               "421 4.7.0 mx.test Error: too many failed authentications"
+             ]
+    end
+
+    test "temporary failures do not count" do
+      failure = Reply.new(454, "4.7.0", "Temporary authentication failure")
+      session = auth_session([auth: fn _, s -> {:error, failure, s} end], max_errors: 100)
+      {:continue, out, _} = input(session, String.duplicate("AUTH PLAIN =\r\n", 5))
+      assert codes(out) == [454, 454, 454, 454, 454]
+    end
+
+    test "accepts long lines while AUTH is offered" do
+      token = Base.encode64(String.duplicate("t", 9000))
+
+      session =
+        auth_session(
+          auth: fn _, s -> {:challenge, "", s} end,
+          auth_response: fn _, s -> {:ok, "u", s} end
+        )
+
+      {:continue, out, session} = input(session, "AUTH PLAIN " <> token <> "\r\n")
+      assert out == "334 \r\n"
+      {:continue, out, _} = input(session, token <> "\r\n")
+      assert codes(out) == [235]
+    end
+
+    test "requires authentication before MAIL when configured" do
+      session = auth_session([], auth_required: true)
+      {:continue, out, session} = input(session, "MAIL FROM:<a@x.test>\r\n")
+      assert replies(out) == ["530 5.7.0 Authentication required"]
+
+      {:continue, out, _} =
+        input(session, "AUTH PLAIN AHUAcA==\r\nMAIL FROM:<a@x.test> AUTH=<>\r\n")
+
+      assert codes(out) == [235, 250]
+    end
+
+    test "the AUTH= MAIL parameter needs AUTH" do
+      {:continue, out, _} = input(started(), "EHLO c.test\r\nMAIL FROM:<a@x.test> AUTH=<>\r\n")
+      assert replies(out) |> List.last() == "555 5.5.4 Unsupported parameter"
+    end
+
+    test "telemetry shows the mechanism, never the response" do
+      ref = make_ref()
+      id = {__MODULE__, ref}
+
+      :telemetry.attach(
+        id,
+        [:sovite, :smtp, :server, :command, :stop],
+        &__MODULE__.forward_event/4,
+        {self(), ref}
+      )
+
+      on_exit(fn -> :telemetry.detach(id) end)
+
+      {:continue, _, _} = input(auth_session(), "AUTH PLAIN AHUAcA==\r\n")
+
+      assert_received {^ref, _,
+                       %{session_id: "S1", command: "AUTH", argument: "PLAIN", reply_code: 235}}
+    end
   end
 end
