@@ -65,6 +65,29 @@ defmodule Sovite.SMTP.Server.Session do
   `NOOP`, ...), or after any command before `PIPELINING` was offered,
   gets `554 5.5.0` and is disconnected: it did not wait for the reply.
 
+  ## XCLIENT and XFORWARD
+
+  Clients in `:xclient_networks` may use Postfix's `XCLIENT` command, and
+  clients in `:xforward_networks` its `XFORWARD` command (see
+  https://www.postfix.org/XCLIENT_README.html and XFORWARD_README.html).
+  Both are offered in the `EHLO` reply only to those clients.
+
+  `XCLIENT` is for proxies such as nginx: it replaces what the session
+  knows about the client (`ADDR`, `PORT`, `NAME`, `REVERSE_NAME`,
+  `DESTADDR`, `DESTPORT`, `HELO`, `PROTO`, `LOGIN`), as if the client
+  had connected itself. The handler's state is ended with `terminate/2`
+  and started again with `init/2` and the new connection map, which has
+  `:client_name`, `:reverse_name`, and `:login` when given; `HELO` is
+  passed to `handle_helo/3`, and `LOGIN` counts as authenticated. The
+  reply is a new greeting. The client that may use `XCLIENT` is decided
+  at connect, so it may send it again.
+
+  `XFORWARD` is for content filters that send mail back: the attributes
+  (`NAME`, `ADDR`, `PORT`, `PROTO`, `HELO`, `IDENT`, `SOURCE`) describe
+  the original client of the next transaction only, and reach the
+  handler in the transaction's `:xforward` map. They change nothing
+  else.
+
   ## Options
 
     * `:hostname` - name in the greeting and `EHLO` reply. Required.
@@ -103,6 +126,8 @@ defmodule Sovite.SMTP.Server.Session do
     * `:tarpit_delay` - milliseconds per error reply after that. Defaults
       to 0: no tarpit.
     * `:forbid_unauth_pipelining` - see "Pipelining". Defaults to `false`.
+    * `:xclient_networks` / `:xforward_networks` - `Sovite.Net` networks
+      whose clients may use `XCLIENT` / `XFORWARD`. Default to `[]`.
 
   The connection map may carry `:tls` (a `Sovite.TLS.info()`) when it is
   encrypted from the start (implicit TLS, RFC 8314).
@@ -117,6 +142,7 @@ defmodule Sovite.SMTP.Server.Session do
   is the mechanism; SASL responses are never included.
   """
 
+  alias Sovite.Net
   alias Sovite.SMTP.{Command, DataDecoder, Reply}
   alias Sovite.Validators
 
@@ -128,7 +154,10 @@ defmodule Sovite.SMTP.Server.Session do
           optional(:local_ip) => :inet.ip_address(),
           optional(:local_port) => :inet.port_number(),
           optional(:listener) => String.t(),
-          optional(:tls) => Sovite.TLS.info() | nil
+          optional(:tls) => Sovite.TLS.info() | nil,
+          optional(:client_name) => String.t() | nil,
+          optional(:reverse_name) => String.t() | nil,
+          optional(:login) => String.t() | nil
         }
 
   @typedoc "`MAIL FROM` parameters. `size` and `body` are `nil` when not given."
@@ -138,11 +167,27 @@ defmodule Sovite.SMTP.Server.Session do
           requiretls: boolean()
         }
 
+  @typedoc """
+  What `XFORWARD` said about the original client, see "XCLIENT and
+  XFORWARD". `:addr` is an IP address, `:port` an integer, `:source`
+  `"LOCAL"` or `"REMOTE"`; the others are strings.
+  """
+  @type xforward :: %{
+          optional(:name) => String.t() | nil,
+          optional(:addr) => :inet.ip_address() | nil,
+          optional(:port) => :inet.port_number() | nil,
+          optional(:proto) => String.t() | nil,
+          optional(:helo) => String.t() | nil,
+          optional(:ident) => String.t() | nil,
+          optional(:source) => String.t() | nil
+        }
+
   @typedoc "The current mail transaction. Recipients are in the order given."
   @type transaction :: %{
           sender: String.t(),
           params: mail_params(),
-          recipients: [String.t()]
+          recipients: [String.t()],
+          xforward: xforward()
         }
 
   @type result :: {:continue | :close | :starttls, iodata(), t()}
@@ -169,18 +214,24 @@ defmodule Sovite.SMTP.Server.Session do
     requiretls: false,
     tarpit_after: 3,
     tarpit_delay: 0,
-    forbid_unauth_pipelining: false
+    forbid_unauth_pipelining: false,
+    xclient_networks: [],
+    xforward_networks: []
   ]
 
   # RFC 2920 §3.1: these may only be the last command of a group. QUIT
   # closes anyway, and input after STARTTLS is dropped.
-  @group_end ~w(EHLO HELO LHLO DATA VRFY NOOP AUTH)
+  @group_end ~w(EHLO HELO LHLO DATA VRFY NOOP AUTH XCLIENT)
+
+  @xclient_attributes ~w(NAME REVERSE_NAME ADDR PORT PROTO HELO LOGIN DESTADDR DESTPORT)
+  @xforward_attributes ~w(NAME ADDR PORT PROTO HELO IDENT SOURCE)
 
   defstruct [
     :connection,
     :hostname,
     :handler,
     :handler_state,
+    :handler_opts,
     :opts,
     :helo,
     :transaction,
@@ -192,7 +243,10 @@ defmodule Sovite.SMTP.Server.Session do
     discarding: false,
     errors: 0,
     auth_failures: 0,
-    delay: 0
+    delay: 0,
+    xclient: false,
+    xforward: false,
+    xforward_attributes: %{}
   ]
 
   @opaque t :: %__MODULE__{}
@@ -215,7 +269,10 @@ defmodule Sovite.SMTP.Server.Session do
       connection: connection,
       hostname: Keyword.fetch!(opts, :hostname),
       handler: module,
-      opts: Map.new(opts)
+      handler_opts: handler_opts,
+      opts: Map.new(opts),
+      xclient: Net.in_networks?(connection.remote_ip, opts[:xclient_networks]),
+      xforward: Net.in_networks?(connection.remote_ip, opts[:xforward_networks])
     }
 
     case module.init(connection, handler_opts) do
@@ -241,8 +298,7 @@ defmodule Sovite.SMTP.Server.Session do
 
     case result do
       {:ok, state} ->
-        protocol = if session.opts.lmtp, do: "LMTP", else: "ESMTP"
-        greeting = Reply.new(220, "#{session.hostname} #{protocol}")
+        greeting = greeting(session)
         session = %{session | handler_state: state, phase: :command}
 
         if session.buffer == "",
@@ -252,6 +308,11 @@ defmodule Sovite.SMTP.Server.Session do
       {:close, reply, state} ->
         {:close, Reply.encode(reply), %{session | handler_state: state, phase: :closed}}
     end
+  end
+
+  defp greeting(session) do
+    protocol = if session.opts.lmtp, do: "LMTP", else: "ESMTP"
+    Reply.new(220, "#{session.hostname} #{protocol}")
   end
 
   @doc "Returns the session ID."
@@ -563,7 +624,13 @@ defmodule Sovite.SMTP.Server.Session do
   defp execute({:mail, sender, params}, session, out, started) do
     case check_mail(params, session) do
       {:ok, mail_params} ->
-        transaction = %{sender: sender, params: mail_params, recipients: []}
+        transaction = %{
+          sender: sender,
+          params: mail_params,
+          recipients: [],
+          xforward: session.xforward_attributes
+        }
+
         accepted = Reply.new(250, "2.1.0", "Ok")
 
         session.handler.handle_mail(sender, mail_params, session.handler_state)
@@ -574,7 +641,7 @@ defmodule Sovite.SMTP.Server.Session do
           sender,
           started,
           accepted,
-          &%{&1 | transaction: transaction}
+          &%{&1 | transaction: transaction, xforward_attributes: %{}}
         )
 
       {:error, reply} ->
@@ -657,11 +724,214 @@ defmodule Sovite.SMTP.Server.Session do
     end
   end
 
+  defp execute({:xclient, attributes}, session, out, started) do
+    with :ok <- check_proxy_command(session, session.xclient),
+         {:ok, changes} <- xclient_changes(attributes, session.connection) do
+      xclient(session, out, changes, started)
+    else
+      {:error, reply} -> reply(session, out, "XCLIENT", nil, reply, started)
+    end
+  end
+
+  defp execute({:xforward, attributes}, session, out, started) do
+    with :ok <- check_proxy_command(session, session.xforward),
+         {:ok, forwarded} <- xforward_attributes(attributes) do
+      session = %{
+        session
+        | xforward_attributes: Map.merge(session.xforward_attributes, forwarded)
+      }
+
+      reply(session, out, "XFORWARD", nil, Reply.new(250, "2.0.0", "Ok"), started)
+    else
+      {:error, reply} -> reply(session, out, "XFORWARD", nil, reply, started)
+    end
+  end
+
   defp execute({:help, _argument}, session, out, started) do
     greeting = if session.opts.lmtp, do: "LHLO", else: "EHLO HELO"
     text = "Commands: #{greeting} MAIL RCPT DATA RSET NOOP QUIT VRFY HELP STARTTLS AUTH"
     reply(session, out, "HELP", nil, Reply.new(214, "2.0.0", text), started)
   end
+
+  ## XCLIENT and XFORWARD
+
+  defp check_proxy_command(_session, false),
+    do: {:error, Reply.new(550, "5.7.0", "Error: insufficient authorization")}
+
+  defp check_proxy_command(%{transaction: transaction}, true) when transaction != nil,
+    do: {:error, Reply.new(503, "5.5.1", "Error: MAIL transaction in progress")}
+
+  defp check_proxy_command(_session, true), do: :ok
+
+  # The connection map changes, and the HELO and PROTO to apply after.
+  defp xclient_changes(attributes, connection) do
+    Enum.reduce_while(attributes, {:ok, {connection, %{}}}, fn {name, value}, {:ok, acc} ->
+      case xclient_attribute(name, value, acc) do
+        {:ok, acc} -> {:cont, {:ok, acc}}
+        :error -> {:halt, {:error, bad_attribute("XCLIENT", name)}}
+      end
+    end)
+  end
+
+  defp xclient_attribute(name, _value, _acc) when name not in @xclient_attributes, do: :error
+
+  defp xclient_attribute(name, value, {connection, hello}) when name in ~w(ADDR DESTADDR) do
+    key = if name == "ADDR", do: :remote_ip, else: :local_ip
+
+    case value && parse_xaddr(value) do
+      # An unknown address keeps the one the session knows.
+      nil -> {:ok, {connection, hello}}
+      {:ok, ip} -> {:ok, {Map.put(connection, key, ip), hello}}
+      :error -> :error
+    end
+  end
+
+  defp xclient_attribute(name, value, {connection, hello}) when name in ~w(PORT DESTPORT) do
+    key = if name == "PORT", do: :remote_port, else: :local_port
+
+    case value && parse_port(value) do
+      nil -> {:ok, {Map.delete(connection, key), hello}}
+      {:ok, port} -> {:ok, {Map.put(connection, key, port), hello}}
+      :error -> :error
+    end
+  end
+
+  defp xclient_attribute(name, value, {connection, hello}) when name in ~w(NAME REVERSE_NAME) do
+    key = if name == "NAME", do: :client_name, else: :reverse_name
+
+    if value == nil or Validators.hostname?(value),
+      do: {:ok, {Map.put(connection, key, value && String.downcase(value, :ascii)), hello}},
+      else: :error
+  end
+
+  defp xclient_attribute("LOGIN", value, {connection, hello}),
+    do: {:ok, {Map.put(connection, :login, value), hello}}
+
+  defp xclient_attribute("HELO", value, {connection, hello}) do
+    if value == nil or Validators.helo?(value),
+      do: {:ok, {connection, Map.put(hello, :helo, value)}},
+      else: :error
+  end
+
+  defp xclient_attribute("PROTO", value, {connection, hello}) do
+    case value && String.upcase(value, :ascii) do
+      nil -> {:ok, {connection, Map.delete(hello, :proto)}}
+      "SMTP" -> {:ok, {connection, Map.put(hello, :proto, :helo)}}
+      "ESMTP" -> {:ok, {connection, Map.put(hello, :proto, :ehlo)}}
+      _ -> :error
+    end
+  end
+
+  # Starts over as if the client had connected itself.
+  defp xclient(session, out, {connection, hello}, started) do
+    if function_exported?(session.handler, :terminate, 2),
+      do: session.handler.terminate(:xclient, session.handler_state)
+
+    session = %{
+      session
+      | connection: connection,
+        helo: nil,
+        esmtp: false,
+        identity: Map.get(connection, :login),
+        xforward_attributes: %{}
+    }
+
+    case session.handler.init(connection, session.handler_opts) do
+      {:ok, state} ->
+        xclient_greet(session, out, state, hello, started)
+
+      # No greeting delay: the proxy has waited already.
+      {:pause, _delay, state} ->
+        xclient_greet(session, out, state, hello, started)
+
+      {:close, reply, state} ->
+        session = %{session | handler_state: state, phase: :closed}
+        reply(session, out, "XCLIENT", nil, reply, started)
+    end
+  end
+
+  defp xclient_greet(session, out, state, hello, started) do
+    session = xclient_helo(%{session | handler_state: state}, hello)
+    reply(session, out, "XCLIENT", nil, greeting(session), started)
+  end
+
+  defp xclient_helo(session, %{helo: helo} = hello) when helo != nil do
+    kind = Map.get(hello, :proto, :ehlo)
+
+    case session.handler.handle_helo(kind, helo, session.handler_state) do
+      {:ok, state} -> %{session | handler_state: state, helo: helo, esmtp: kind == :ehlo}
+      {_reply_or_close, _reply, state} -> %{session | handler_state: state}
+    end
+  end
+
+  defp xclient_helo(session, _hello), do: session
+
+  defp xforward_attributes(attributes) do
+    Enum.reduce_while(attributes, {:ok, %{}}, fn {name, value}, {:ok, acc} ->
+      case xforward_attribute(name, value) do
+        {:ok, key, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
+        :error -> {:halt, {:error, bad_attribute("XFORWARD", name)}}
+      end
+    end)
+  end
+
+  defp xforward_attribute(name, nil) when name in @xforward_attributes,
+    do: {:ok, xforward_key(name), nil}
+
+  defp xforward_attribute("ADDR", value) do
+    with {:ok, ip} <- parse_xaddr(value), do: {:ok, :addr, ip}
+  end
+
+  defp xforward_attribute("PORT", value) do
+    with {:ok, port} <- parse_port(value), do: {:ok, :port, port}
+  end
+
+  defp xforward_attribute("SOURCE", value) do
+    case String.upcase(value, :ascii) do
+      source when source in ["LOCAL", "REMOTE"] -> {:ok, :source, source}
+      _ -> :error
+    end
+  end
+
+  defp xforward_attribute(name, value) when name in ~w(NAME PROTO HELO IDENT),
+    do: {:ok, xforward_key(name), value}
+
+  defp xforward_attribute(_name, _value), do: :error
+
+  defp xforward_key("NAME"), do: :name
+  defp xforward_key("ADDR"), do: :addr
+  defp xforward_key("PORT"), do: :port
+  defp xforward_key("PROTO"), do: :proto
+  defp xforward_key("HELO"), do: :helo
+  defp xforward_key("IDENT"), do: :ident
+  defp xforward_key("SOURCE"), do: :source
+
+  # "192.0.2.1", "IPV6:2001:db8::1".
+  defp parse_xaddr(value) do
+    address =
+      case value do
+        <<prefix::binary-size(5), rest::binary>> when prefix in ["IPV6:", "ipv6:", "IPv6:"] ->
+          rest
+
+        _ ->
+          value
+      end
+
+    case Net.parse_ip(address) do
+      {:ok, ip} -> {:ok, Net.normalize(ip)}
+      {:error, _} -> :error
+    end
+  end
+
+  defp parse_port(value) do
+    case Integer.parse(value) do
+      {port, ""} when port in 0..65_535 -> {:ok, port}
+      _ -> :error
+    end
+  end
+
+  defp bad_attribute(command, name),
+    do: Reply.new(501, "5.5.4", "Bad #{command} attribute: #{name}")
 
   ## AUTH
 
@@ -818,6 +1088,12 @@ defmodule Sovite.SMTP.Server.Session do
     starttls = if session.opts.starttls and tls(session) == nil, do: ["STARTTLS"], else: []
     requiretls = if requiretls_offered?(session), do: ["REQUIRETLS"], else: []
 
+    xclient =
+      if session.xclient, do: ["XCLIENT " <> Enum.join(@xclient_attributes, " ")], else: []
+
+    xforward =
+      if session.xforward, do: ["XFORWARD " <> Enum.join(@xforward_attributes, " ")], else: []
+
     auth =
       with true <- auth_offered?(session) and session.identity == nil,
            [_ | _] = mechanisms <- mechanisms(session) do
@@ -834,7 +1110,7 @@ defmodule Sovite.SMTP.Server.Session do
         "SIZE #{session.opts.max_message_size}",
         "8BITMIME",
         "ENHANCEDSTATUSCODES"
-      ] ++ starttls ++ requiretls ++ auth
+      ] ++ starttls ++ requiretls ++ auth ++ xclient ++ xforward
     )
   end
 

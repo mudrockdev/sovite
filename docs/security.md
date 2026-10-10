@@ -34,7 +34,7 @@ Out of scope: an attacker with root, or with the Sovite user's privileges, on th
 - The spool directory (`[queue] directory`) is owned by `sovite`, mode `0700`. Queue files are `0600`.
 - The config file and lookup tables are owned by `root`, group `sovite`, mode `0640`. Sovite reads them but cannot modify them.
 - TLS and DKIM private keys are owned by `root`, group `sovite`, mode `0640`.
-- The `sendmail(1)` compatibility binary (Phase 9) submits mail over a local socket and is not setuid.
+- The `sendmail(1)` compatibility command submits mail over SMTP to a local listener and is not setuid. It reads the config file only when the user running it can, so local users never need access to its secrets. Like Postfix's, it lets a local user choose the envelope sender (`-f`); relaying needs the local listener's address in `smtp.trusted_networks`.
 
 ## 4. Rules for All Code
 
@@ -74,6 +74,8 @@ These apply to every component and are checked in code review.
 | Spam and bot traffic | Postscreen-style screen (greeting delay against early talkers, weighted DNSBL/DNSWL/RHSBL scores), greylisting, reverse DNS and `EHLO` checks, per-client rate limits, tarpit after errors | 8 |
 | Protocol abuse and SMTP smuggling | Clients that pipeline where RFC 2920 forbids it (including message data sent before `354`) are disconnected; HTTP requests and header lines close the session; bare LF or CR is refused | 8 |
 | Compromised accounts | Per-user sending quotas; users suspended when too much of their mail fails | 8 |
+| Client address spoofing through proxy features | PROXY protocol headers only on listeners that enable it (and from `smtp.proxy_networks`), `XCLIENT` and `XFORWARD` only from `smtp.xclient_networks` and `smtp.xforward_networks`, none by default; strict, bounded PROXY v1/v2 parsing that never reads past the header; a missing or invalid header closes the connection | 9 |
+| Hostile or failing milters and policy servers | Bounded packets and replies (64 MiB milter packets, 4 KiB policy replies), timeouts on every wait, no atoms from their input; failures answer with a temporary error by default (`default_action`), so mail is never accepted unchecked; `spawn:` policy programs run without a shell | 9 |
 
 ## 6. Supply Chain
 

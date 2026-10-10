@@ -29,7 +29,9 @@ defmodule Sovite.Test.FakeMTA do
     * `:unix` - listen on this Unix socket path instead of a TCP port.
 
   Messages also carry `:tls` (the `Sovite.TLS.info()` of the connection,
-  or `nil`) and `:auth` (the authenticated user, or `nil`).
+  or `nil`), `:auth` (the authenticated user, or `nil`), and `:xforward`
+  (the arguments of the `XFORWARD` commands before `MAIL`, when an
+  `XFORWARD` extension is advertised).
 
   ## Responses
 
@@ -142,6 +144,7 @@ defmodule Sovite.Test.FakeMTA do
       mail_from: nil,
       mail_args: nil,
       rcpt_to: [],
+      xforward: [],
       tls: session.tls,
       auth: session.auth
     }
@@ -277,6 +280,12 @@ defmodule Sovite.Test.FakeMTA do
   defp handle_command("QUIT", _arg, socket, config, _txn) do
     _ = reply(socket, respond(config, :quit, nil, "221 2.0.0 Bye"))
     :stop
+  end
+
+  defp handle_command("XFORWARD", arg, socket, config, txn) do
+    if Enum.any?(config.extensions, &String.starts_with?(&1, "XFORWARD")),
+      do: send_reply(socket, "250 2.0.0 Ok", %{txn | xforward: txn.xforward ++ [arg]}),
+      else: send_reply(socket, "500 5.5.2 Command not recognized", txn)
   end
 
   defp handle_command(_verb, _arg, socket, _config, txn) do

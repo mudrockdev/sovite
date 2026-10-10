@@ -17,9 +17,14 @@ defmodule Sovite.ListenerTest do
     @impl true
     def start_link(info, opts) do
       Task.start_link(fn ->
-        :ok = Listener.handshake(info)
-        send(Keyword.fetch!(opts, :test), {:connected, self(), info})
-        echo(info.socket)
+        case Listener.handshake(info) do
+          {:ok, info} ->
+            send(Keyword.fetch!(opts, :test), {:connected, self(), info})
+            echo(info.socket)
+
+          {:error, reason} ->
+            send(Keyword.fetch!(opts, :test), {:handshake_failed, self(), reason})
+        end
       end)
     end
 
@@ -278,5 +283,136 @@ defmodule Sovite.ListenerTest do
     %{port: port} = start_listener(handler: ExitingHandler)
     socket = connect(port)
     assert :gen_tcp.recv(socket, 0, 1_000) == {:error, :closed}
+  end
+
+  describe "PROXY protocol" do
+    alias Sovite.ProxyProtocol
+    alias Sovite.ProxyProtocol.Header
+
+    @v1 "PROXY TCP4 192.0.2.1 198.51.100.1 56324 25\r\n"
+
+    defp attach_proxy_telemetry do
+      handler_id = "listener-proxy-test-#{System.unique_integer([:positive])}"
+      event = [:sovite, :listener, :proxy, :error]
+      :ok = :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, self())
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+    end
+
+    # Connects from `source`, sends `data`, and waits until the handler
+    # has the connection.
+    defp connect_proxied!(port, data, source \\ @localhost) do
+      opts = [:binary, active: false, packet: :line, ip: source]
+      {:ok, socket} = :gen_tcp.connect(@localhost, port, opts, 1_000)
+      {:ok, {_ip, client_port}} = :inet.sockname(socket)
+      :ok = :gen_tcp.send(socket, data)
+      assert_receive {:connected, _pid, %{peer_port: ^client_port} = info}
+      {socket, info}
+    end
+
+    test "the connection info names the client from the header" do
+      %{port: port} = start_listener(proxy_protocol: true)
+      {socket, info} = connect_proxied!(port, @v1 <> "hello\n")
+      {:ok, {_ip, client_port}} = :inet.sockname(socket)
+
+      assert %{
+               remote_ip: {192, 0, 2, 1},
+               remote_port: 56_324,
+               local_ip: {198, 51, 100, 1},
+               local_port: 25,
+               peer_ip: @localhost,
+               peer_port: ^client_port,
+               proxy: %Header{version: 1, transport: :tcp4}
+             } = info
+
+      # What followed the header is left for the handler.
+      assert :gen_tcp.recv(socket, 0, 1_000) == {:ok, "hello\n"}
+    end
+
+    test "normalizes IPv4-mapped addresses in version 2 headers" do
+      %{port: port} = start_listener(proxy_protocol: true)
+
+      header = %Header{
+        transport: :tcp6,
+        source: {{0, 0, 0, 0, 0, 0xFFFF, 0xC000, 0x0201}, 1234},
+        destination: {{0, 0, 0, 0, 0, 0xFFFF, 0xC633, 0x6401}, 587},
+        tlvs: [ProxyProtocol.tlv(:authority, "mx.example.com"), ProxyProtocol.tlv(:crc32c)]
+      }
+
+      {socket, info} = connect_proxied!(port, ProxyProtocol.encode_v2(header) <> "hello\n")
+
+      assert %{remote_ip: {192, 0, 2, 1}, remote_port: 1234} = info
+      assert %{local_ip: {198, 51, 100, 1}, local_port: 587} = info
+      assert info.proxy.authority == "mx.example.com"
+      assert :gen_tcp.recv(socket, 0, 1_000) == {:ok, "hello\n"}
+    end
+
+    test "LOCAL, UNKNOWN, and non-TCP headers keep the peer's addresses" do
+      %{port: port} = start_listener(proxy_protocol: true)
+
+      unix = %Header{transport: :unix, source: {:local, "/a"}, destination: {:local, "/b"}}
+
+      for header <- [
+            ProxyProtocol.encode_v2(%Header{command: :local}),
+            "PROXY UNKNOWN\r\n",
+            ProxyProtocol.encode_v2(unix)
+          ] do
+        {socket, info} = connect_proxied!(port, header)
+        {:ok, {_ip, client_port}} = :inet.sockname(socket)
+        {:ok, parsed, ""} = ProxyProtocol.parse(header)
+
+        assert %{
+                 remote_ip: @localhost,
+                 remote_port: ^client_port,
+                 local_ip: @localhost,
+                 local_port: ^port,
+                 proxy: ^parsed
+               } = info
+      end
+    end
+
+    test "an invalid header closes the connection" do
+      %{port: port, id: id} = start_listener(proxy_protocol: true)
+      attach_proxy_telemetry()
+
+      socket = connect(port)
+      :ok = :gen_tcp.send(socket, "EHLO client.example\r\n")
+      assert :gen_tcp.recv(socket, 0, 1_000) == {:error, :closed}
+      assert_receive {:handshake_failed, _pid, {:proxy, :invalid_signature}}
+
+      assert_receive {:telemetry, [:sovite, :listener, :proxy, :error], measurements, metadata}
+      assert measurements == %{}
+      assert metadata == %{listener: id, remote_ip: @localhost, reason: :invalid_signature}
+    end
+
+    test "a missing header times out and closes the connection" do
+      %{port: port} = start_listener(proxy_protocol: true, proxy_timeout: 50)
+      attach_proxy_telemetry()
+
+      socket = connect(port)
+      assert :gen_tcp.recv(socket, 0, 1_000) == {:error, :closed}
+      assert_receive {:handshake_failed, _pid, {:proxy, :timeout}}
+      assert_receive {:telemetry, [:sovite, :listener, :proxy, :error], _, %{reason: :timeout}}
+    end
+
+    test "only peers in :proxy_networks must send a header" do
+      %{port: port} =
+        start_listener(proxy_protocol: true, proxy_networks: [{@localhost, 32}])
+
+      {_socket, info} = connect_proxied!(port, @v1)
+      assert info.remote_ip == {192, 0, 2, 1}
+
+      # Another peer is a direct client: a header is just data.
+      {socket, info} = connect_proxied!(port, @v1, {127, 0, 0, 2})
+      assert %{remote_ip: {127, 0, 0, 2}, peer_ip: {127, 0, 0, 2}, proxy: nil} = info
+      assert :gen_tcp.recv(socket, 0, 1_000) == {:ok, @v1}
+    end
+
+    test "the per-IP limit counts the proxy, not the clients" do
+      %{port: port} = start_listener(proxy_protocol: true, max_connections_per_ip: 1)
+
+      {_socket, info} = connect_proxied!(port, @v1)
+      assert info.remote_ip == {192, 0, 2, 1}
+      assert_rejected(port, :max_connections_per_ip)
+    end
   end
 end

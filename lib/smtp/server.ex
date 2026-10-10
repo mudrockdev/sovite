@@ -4,7 +4,8 @@ defmodule Sovite.SMTP.Server do
   `Sovite.SMTP.Server.Session`.
 
   Supports `PIPELINING`, `SIZE`, `8BITMIME`, `ENHANCEDSTATUSCODES`,
-  `STARTTLS`, `AUTH`, and `REQUIRETLS`. What happens to messages is decided by a
+  `STARTTLS`, `AUTH`, `REQUIRETLS`, and Postfix's `XCLIENT` and
+  `XFORWARD`. What happens to messages is decided by a
   `Sovite.SMTP.Server.Handler`:
 
       children = [
@@ -18,7 +19,9 @@ defmodule Sovite.SMTP.Server do
   ## Options
 
   Listener options (see `Sovite.Listener`): `:port`, `:ip`, `:id`,
-  `:name`, `:acceptors`, `:max_connections`, `:max_connections_per_ip`.
+  `:name`, `:acceptors`, `:max_connections`, `:max_connections_per_ip`,
+  `:proxy_protocol`, `:proxy_networks`, `:proxy_timeout`. With the PROXY
+  protocol, the session sees the client named in the header.
 
   TLS options:
 
@@ -37,7 +40,18 @@ defmodule Sovite.SMTP.Server do
   except with implicit TLS.
   """
 
-  @listener_keys [:port, :ip, :id, :name, :acceptors, :max_connections, :max_connections_per_ip]
+  @listener_keys [
+    :port,
+    :ip,
+    :id,
+    :name,
+    :acceptors,
+    :max_connections,
+    :max_connections_per_ip,
+    :proxy_protocol,
+    :proxy_networks,
+    :proxy_timeout
+  ]
   @connection_keys [:tls, :implicit_tls, :tls_handshake_timeout]
 
   @doc false

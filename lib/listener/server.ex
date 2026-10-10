@@ -44,6 +44,7 @@ defmodule Sovite.Listener.Server do
           handler_opts: opts[:handler_opts],
           acceptors: opts[:acceptors],
           max_per_ip: opts[:max_connections_per_ip],
+          proxy: opts[:proxy_protocol] && {opts[:proxy_networks], opts[:proxy_timeout]},
           counts: :ets.new(__MODULE__, [:set, :public, write_concurrency: true]),
           connections: nil,
           monitors: %{}
@@ -109,7 +110,16 @@ defmodule Sovite.Listener.Server do
 
   defp start_acceptor(state) do
     context =
-      Map.take(state, [:socket, :id, :handler, :handler_opts, :max_per_ip, :counts, :connections])
+      Map.take(state, [
+        :socket,
+        :id,
+        :handler,
+        :handler_opts,
+        :max_per_ip,
+        :proxy,
+        :counts,
+        :connections
+      ])
 
     server = self()
     spawn_link(fn -> accept_loop(Map.put(context, :server, server)) end)
@@ -142,7 +152,10 @@ defmodule Sovite.Listener.Server do
         remote_ip: remote_ip,
         remote_port: remote_port,
         local_ip: Net.normalize(local_ip),
-        local_port: local_port
+        local_port: local_port,
+        peer_ip: remote_ip,
+        peer_port: remote_port,
+        proxy: nil
       }
 
       if claim(context, remote_ip),
@@ -173,7 +186,7 @@ defmodule Sovite.Listener.Server do
 
         case :gen_tcp.controlling_process(socket, pid) do
           :ok ->
-            send(pid, {:sovite_listener, :ready, socket})
+            send(pid, {:sovite_listener, :ready, socket, proxy_timeout(context, info.peer_ip)})
 
           # The connection process is gone already; the socket is still ours.
           {:error, _reason} ->
@@ -208,6 +221,14 @@ defmodule Sovite.Listener.Server do
 
     :gen_tcp.close(socket)
   end
+
+  # The PROXY header timeout if this peer must send one, otherwise nil.
+  defp proxy_timeout(%{proxy: {nil, timeout}}, _ip), do: timeout
+
+  defp proxy_timeout(%{proxy: {networks, timeout}}, ip),
+    do: if(Net.in_networks?(ip, networks), do: timeout)
+
+  defp proxy_timeout(_context, _ip), do: nil
 
   ## Per-IP counts
 

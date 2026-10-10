@@ -49,7 +49,7 @@ defmodule Sovite.TLS.MTASTS.Server do
   defp serve(info, opts) do
     deadline = System.monotonic_time(:millisecond) + @timeout
 
-    with :ok <- Sovite.Listener.handshake(info),
+    with {:ok, _info} <- Sovite.Listener.handshake(info),
          ssl_opts when is_list(ssl_opts) <- Keyword.fetch!(opts, :tls).(),
          {:ok, socket} <- handshake(info.socket, ssl_opts, deadline) do
       with {:ok, request} <- read(socket, "", deadline) do

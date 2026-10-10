@@ -75,6 +75,25 @@ defmodule Sovite.SMTP.ServerTest do
     assert_receive {:terminate, :normal, %{remote_ip: {127, 0, 0, 1}, local_port: ^port}}
   end
 
+  test "the session sees the client named by a PROXY protocol header" do
+    {_server, port} = start_server(proxy_protocol: true)
+    client = connect(port)
+
+    # The header and the first command arrive together.
+    :ok = SMTPClient.send_raw(client, "PROXY TCP6 2001:db8::1 2001:db8::25 1234 25\r\nQUIT\r\n")
+    assert {:ok, {220, _}} = SMTPClient.read_reply(client)
+    assert {:ok, {221, _}} = SMTPClient.read_reply(client)
+
+    assert_receive {:terminate, :normal, connection}
+
+    assert %{
+             remote_ip: {0x2001, 0xDB8, 0, 0, 0, 0, 0, 1},
+             remote_port: 1234,
+             local_ip: {0x2001, 0xDB8, 0, 0, 0, 0, 0, 0x25},
+             local_port: 25
+           } = connection
+  end
+
   test "answers a whole pipelined transaction sent in one write" do
     {_server, port} = start_server()
     client = connect(port)

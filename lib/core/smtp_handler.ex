@@ -29,7 +29,12 @@ defmodule Sovite.Core.SMTPHandler do
   The restriction chains (`Sovite.Core.Restrictions`) run at connect,
   `EHLO`, `MAIL`, `RCPT`, `DATA`, and at the end of the data, after the
   built-in checks of each stage; they can reject, but never permit what
-  relay control or recipient validation refuses.
+  relay control or recipient validation refuses. Policy servers in them
+  (`Sovite.Core.PolicyService`) may also add header fields, redirect or
+  copy the message, or send it to a content filter.
+
+  The listener's milters (`Sovite.Core.Milters`) see each stage last,
+  and change the message at the end of the data.
 
   ## Rewriting
 
@@ -82,6 +87,19 @@ defmodule Sovite.Core.SMTPHandler do
   at the end of the data with `554 5.4.6` (RFC 5321 §6.3): it is most
   likely going round in circles.
 
+  ## Proxies and content filters
+
+  A client that used `XCLIENT` (from `smtp.xclient_networks`) is
+  treated as the client it named: its `LOGIN` counts as authenticated,
+  and its `NAME` as its verified reverse DNS name.
+
+  On a listener with a content filter, messages are queued for the
+  filter (`Sovite.Core.QueueManager`). A `reinjection` listener is
+  where filters send them back: email authentication is skipped there,
+  as it ran when the message first arrived. `XFORWARD` attributes from
+  the filter (`smtp.xforward_networks`) are kept as the message's
+  original client.
+
   ## Queueing
 
   The message is accepted with `250` only after `Sovite.Queue.Spool`
@@ -108,11 +126,14 @@ defmodule Sovite.Core.SMTPHandler do
     Config,
     Logging,
     MailAuth,
+    Milters,
     Outbound,
+    PolicyService,
     QueueManager,
     Recipients,
     Restrictions,
     Rewrite,
+    Router,
     Routing,
     Screen,
     SenderCheck
@@ -122,6 +143,7 @@ defmodule Sovite.Core.SMTPHandler do
 
   alias Sovite.{AuthResults, SASL, SRS}
   alias Sovite.Message.{Date, Headers, MessageID, Received, Trace}
+  alias Sovite.Milter.Headers, as: MilterHeaders
   alias Sovite.Net
   alias Sovite.Queue.{Envelope, ID, Spool}
   alias Sovite.SMTP.Reply
@@ -134,12 +156,14 @@ defmodule Sovite.Core.SMTPHandler do
 
     * `queue_manager` - the `Sovite.Core.QueueManager` to notify about new
       messages, if any.
-    * `runtime` - `:repo` (a `Sovite.Core.Repo` reference), `:penalty`
+    * `runtime` - `:repo` (a `Sovite.Core.Repo` reference), `:milters`
+      (the names of the listener's milters), `:penalty`
       (the name of the `Sovite.Abuse.Penalty` for failed logins),
       `:require_auth` (the listener requires authentication),
       `:resolver` (for restrictions that look up domains), and the
       `Sovite.Core.Screen` options `:screen`, `:screen_cache`,
-      `:rate_limit`, and `:outbound`.
+      `:rate_limit`, and `:outbound`, and the listener's
+      `:content_filter` and `:reinjection`.
   """
   @spec opts(Config.t(), GenServer.server() | nil, keyword()) :: map()
   def opts(config, queue_manager \\ nil, runtime \\ []) do
@@ -173,8 +197,17 @@ defmodule Sovite.Core.SMTPHandler do
       srs: config.srs,
       screen: Screen.opts(config, runtime),
       own_names: Enum.uniq([String.downcase(config.server.hostname) | config.domains.local]),
-      reverse_dns: Restrictions.reverse_dns?(config.restrictions)
+      reverse_dns: Restrictions.reverse_dns?(config.restrictions),
+      content_filter: runtime[:content_filter],
+      reinjection: Keyword.get(runtime, :reinjection, false),
+      milter_configs: Milters.opts(config, Keyword.get(runtime, :milters, [])),
+      policy: policy_opts(config.policy)
     }
+  end
+
+  defp policy_opts(policy) do
+    {:ok, default} = Sovite.Policy.parse_action(policy.default_action)
+    %{timeout: policy.timeout, default_action: default}
   end
 
   # The access rule tables, by kind, for the restriction chains.
@@ -257,7 +290,8 @@ defmodule Sovite.Core.SMTPHandler do
         connection: connection,
         trusted: Net.in_networks?(connection.remote_ip, opts.trusted_networks),
         tls: Map.get(connection, :tls),
-        identity: nil,
+        # Set by XCLIENT.
+        identity: Map.get(connection, :login),
         sasl: nil,
         mechanism: nil,
         helo: nil,
@@ -275,7 +309,16 @@ defmodule Sovite.Core.SMTPHandler do
         auth_work: nil,
         prefix: [],
         score: Screen.new(),
-        client_dns: nil
+        client_dns: nil,
+        milters: nil,
+        transactions: 0,
+        next_id: nil,
+        size: nil,
+        effects: [],
+        session_effects: [],
+        received: nil,
+        header_fields: nil,
+        header_end: nil
       })
 
     if opts.require_auth and banned?(state) do
@@ -293,12 +336,58 @@ defmodule Sovite.Core.SMTPHandler do
 
   defp connect(state) do
     case restrict(state, :connect) do
-      {:ok, state} -> Screen.connect(%{state | session_action: state.action, action: nil})
+      {:ok, state} -> screen(%{state | session_action: state.action, action: nil})
       {:reply, reply, state} -> {:close, reply, state}
     end
   end
 
-  # Looked up once, for the restrictions that need it.
+  defp screen(state) do
+    case Screen.connect(state) do
+      {:ok, state} ->
+        connect_milters(state)
+
+      {:pause, delay, state} ->
+        with {:ok, state} <- connect_milters(state), do: {:pause, delay, state}
+    end
+  end
+
+  defp connect_milters(state) do
+    case Milters.connect(state.milter_configs, milter_info(state)) do
+      {:ok, milters} -> {:ok, %{state | milters: milters}}
+      {:close, reply, milters} -> {:close, reply, %{state | milters: milters}}
+    end
+  end
+
+  defp milter_info(state) do
+    %{
+      hostname: state.hostname,
+      connection: state.connection,
+      client_dns: state.client_dns,
+      tls: state.tls,
+      identity: state.identity,
+      mechanism: state.mechanism,
+      queue_id: state.next_id
+    }
+  end
+
+  # Runs a milter step; its result replaces the session's milters.
+  defp milters(state, fun) do
+    case fun.(state.milters) do
+      {:ok, milters} -> {:ok, %{state | milters: milters}}
+      {:reply, reply, milters} -> {:reply, reply, %{state | milters: milters}}
+      {:close, reply, milters} -> {:close, reply, %{state | milters: milters}}
+    end
+  end
+
+  # Looked up once, for the restrictions that need it. A proxy that used
+  # XCLIENT has looked it up already.
+  defp client_dns(%{connection: %{client_name: name}}) when name != nil, do: {:ok, name}
+
+  defp client_dns(%{connection: %{reverse_name: name}}) when name != nil,
+    do: {:unconfirmed, [name]}
+
+  defp client_dns(%{connection: connection}) when is_map_key(connection, :client_name), do: :none
+
   defp client_dns(%{reverse_dns: true, trusted: false} = state),
     do: ReverseDNS.check(state.resolver, state.connection.remote_ip)
 
@@ -312,7 +401,8 @@ defmodule Sovite.Core.SMTPHandler do
     state = %{state | helo: name, esmtp: kind != :helo, lmtp: kind == :lhlo}
 
     with {:ok, state} <- Screen.helo(state),
-         {:ok, state} <- restrict(state, :helo) do
+         {:ok, state} <- restrict(state, :helo),
+         {:ok, state} <- milters(state, &Milters.helo(&1, name, milter_info(state))) do
       {:ok, %{state | session_action: state.action || state.session_action, action: nil}}
     end
   end
@@ -321,14 +411,26 @@ defmodule Sovite.Core.SMTPHandler do
   def handle_tls(info, state), do: %{state | tls: info, helo: nil, esmtp: false}
 
   @impl true
-  def handle_mail(sender, _params, state) do
-    state = %{state | sender: sender, envelope_sender: nil, expansions: [], action: nil, spf: nil}
+  def handle_mail(sender, params, state) do
+    state = %{
+      state
+      | sender: sender,
+        envelope_sender: nil,
+        expansions: [],
+        action: nil,
+        spf: nil,
+        effects: [],
+        size: params.size,
+        transactions: state.transactions + 1,
+        next_id: ID.generate()
+    }
 
     with {:ok, state} <- Screen.mail(sender, state),
          {:ok, state} <- check_sender(sender, state),
          {:ok, state} <- restrict(state, :mail),
-         {:ok, state} <- check_spf(sender, state) do
-      rewrite_sender(sender, state)
+         {:ok, state} <- check_spf(sender, state),
+         {:ok, state} <- rewrite_sender(sender, state) do
+      milters(state, &Milters.mail(&1, sender, params, milter_info(state)))
     end
   end
 
@@ -344,8 +446,10 @@ defmodule Sovite.Core.SMTPHandler do
   end
 
   # Mail from clients that are neither trusted nor authenticated. Over
-  # LMTP the client is the MTA that already checked the mail.
-  defp inbound?(state), do: not state.trusted and state.identity == nil and not state.lmtp
+  # LMTP the client is the MTA that already checked the mail, and on a
+  # re-injection listener Sovite itself did.
+  defp inbound?(state),
+    do: not state.trusted and state.identity == nil and not state.lmtp and not state.reinjection
 
   defp check_sender(sender, %{identity: identity, sender_check: true} = state)
        when identity != nil do
@@ -389,10 +493,13 @@ defmodule Sovite.Core.SMTPHandler do
   @impl true
   def handle_rcpt(recipient, state) do
     with {:ok, checked} <- check_rcpt(recipient, state) do
-      # A deferred recipient must not stay among the expansions.
-      case Screen.rcpt(recipient, checked) do
-        {:ok, checked} -> {:ok, checked}
-        {:reply, reply, _checked} -> {:reply, reply, state}
+      # A refused recipient must not stay among the expansions.
+      with {:ok, checked} <- Screen.rcpt(recipient, checked),
+           {:ok, checked} <- milters(checked, &Milters.rcpt(&1, recipient)) do
+        {:ok, checked}
+      else
+        {:reply, reply, checked} -> {:reply, reply, %{state | milters: checked.milters}}
+        {:close, reply, checked} -> {:close, reply, %{state | milters: checked.milters}}
       end
     end
   end
@@ -493,13 +600,25 @@ defmodule Sovite.Core.SMTPHandler do
     if checks == [] do
       {:ok, state}
     else
-      case Restrictions.run(checks, stage, restriction_context(state, extra)) do
+      {verdict, effects} = Restrictions.check(checks, stage, restriction_context(state, extra))
+      state = add_effects(state, stage, effects)
+
+      case verdict do
         :ok -> {:ok, state}
         {:reject, reply} -> {:reply, reply, state}
         action -> {:ok, %{state | action: stronger(state.action, action)}}
       end
     end
   end
+
+  # Effects at connect and EHLO hold for the session, the others for
+  # the message.
+  defp add_effects(state, _stage, []), do: state
+
+  defp add_effects(state, stage, effects) when stage in [:connect, :helo],
+    do: %{state | session_effects: state.session_effects ++ effects}
+
+  defp add_effects(state, _stage, effects), do: %{state | effects: state.effects ++ effects}
 
   defp stronger({:discard, _} = discard, _action), do: discard
   defp stronger(_current, action), do: action
@@ -517,10 +636,30 @@ defmodule Sovite.Core.SMTPHandler do
         resolver: state.resolver,
         delimiter: state.routing.delimiter,
         own_names: state.own_names,
-        client_dns: state.client_dns
+        client_dns: state.client_dns,
+        esmtp: state.esmtp,
+        policy: state.policy,
+        policy_request: fn -> policy_request(state) end
       },
       Map.new(extra)
     )
+  end
+
+  defp policy_request(state) do
+    PolicyService.request(%{
+      connection: state.connection,
+      tls: state.tls,
+      client_dns: state.client_dns,
+      helo: state.helo,
+      esmtp: state.esmtp,
+      lmtp: state.lmtp,
+      queue_id: state.queue_id,
+      instance: "#{state.connection.session_id}.#{state.transactions}",
+      recipient_count: if(state.writer, do: length(state.expansions), else: 0),
+      identity: state.identity,
+      mechanism: state.mechanism,
+      size: state.size
+    })
   end
 
   ## AUTH
@@ -623,7 +762,8 @@ defmodule Sovite.Core.SMTPHandler do
   @impl true
   def handle_data(transaction, state) do
     with {:ok, state} <- restrict(state, :data),
-         {:ok, recipients} <- envelope_recipients(state) do
+         {:ok, recipients} <- envelope_recipients(state),
+         {:ok, state} <- milters(state, &Milters.data(&1, milter_info(state))) do
       open_message(transaction, recipients, state)
     end
   end
@@ -651,7 +791,7 @@ defmodule Sovite.Core.SMTPHandler do
   end
 
   defp open_message(transaction, recipients, state) do
-    queue_id = ID.generate()
+    queue_id = state.next_id || ID.generate()
     received_at = DateTime.utc_now()
 
     protocol =
@@ -663,6 +803,8 @@ defmodule Sovite.Core.SMTPHandler do
       )
 
     sender = state.envelope_sender || transaction.sender
+    # A content filter's XFORWARD names the original client.
+    xforward = Map.get(transaction, :xforward, %{})
 
     envelope = %Envelope{
       queue_id: queue_id,
@@ -671,11 +813,12 @@ defmodule Sovite.Core.SMTPHandler do
       recipients: recipients,
       received_at: received_at,
       session_id: state.connection.session_id,
-      remote_ip: state.connection.remote_ip,
-      helo: state.helo,
+      remote_ip: xforward[:addr] || state.connection.remote_ip,
+      helo: if(xforward[:addr], do: xforward[:helo], else: state.helo),
       protocol: protocol,
       body_type: transaction.params.body,
       auth_user: state.identity,
+      content_filter: state.content_filter,
       requiretls: Map.get(transaction.params, :requiretls, false)
     }
 
@@ -696,7 +839,7 @@ defmodule Sovite.Core.SMTPHandler do
       Logger.metadata(queue_id: queue_id)
       # The header section is held back to count hops, and to be fixed or
       # rewritten.
-      {:ok, %{state | writer: writer, queue_id: queue_id, header: ""}}
+      {:ok, %{state | writer: writer, queue_id: queue_id, header: "", received: received}}
     else
       {:error, reason} -> queue_error(state, reason)
     end
@@ -742,24 +885,47 @@ defmodule Sovite.Core.SMTPHandler do
     do: (state.trusted or state.identity != nil) and Rewrite.rewrites_headers?(state.routing)
 
   @impl true
-  def handle_data_chunk(chunk, %{header: nil} = state),
-    do: write(%{state | auth_work: MailAuth.update(state.auth_work, chunk)}, chunk)
+  def handle_data_chunk(chunk, %{header: nil} = state) do
+    with {:ok, state} <-
+           write(%{state | auth_work: MailAuth.update(state.auth_work, chunk)}, chunk),
+         do: milter_content(state, &Milters.body(&1, chunk))
+  end
 
   def handle_data_chunk(chunk, state) do
     buffer = state.header <> IO.iodata_to_binary(chunk)
 
     case Headers.split(buffer) do
       {:ok, header, body} ->
-        with {:ok, header, state} <- checked_header(header, state) do
-          state = %{state | header: nil, auth_work: MailAuth.update(state.auth_work, body)}
-          write(state, [header, "\r\n", body])
+        with {:ok, header, state} <- checked_header(header, state),
+             state = %{state | header: nil, auth_work: MailAuth.update(state.auth_work, body)},
+             {:ok, state} <- write(state, [header, "\r\n", body]),
+             {:ok, state} <- milter_header(state) do
+          milter_content(state, &Milters.body(&1, body))
         end
 
       :more when byte_size(buffer) > @max_header_section ->
-        write(%{state | header: nil}, buffer)
+        with {:ok, state} <- write(%{state | header: nil}, buffer),
+             {:ok, state} <- milter_content(state, &Milters.header(&1, [], milter_info(state))),
+             do: milter_content(state, &Milters.body(&1, buffer))
 
       :more ->
         {:ok, %{state | header: buffer}}
+    end
+  end
+
+  defp milter_header(state) do
+    fields = Headers.parse(state.received) ++ state.header_fields
+    milter_content(state, &Milters.header(&1, fields, milter_info(state)))
+  end
+
+  # A milter that refuses the message ends it: the rest of the data is
+  # discarded.
+  defp milter_content(%{milters: nil} = state, _fun), do: {:ok, state}
+
+  defp milter_content(state, fun) do
+    case milters(state, fun) do
+      {:ok, state} -> {:ok, state}
+      {_reply_or_close, reply, state} -> {:reply, reply, abort(state)}
     end
   end
 
@@ -783,8 +949,18 @@ defmodule Sovite.Core.SMTPHandler do
       {:reply, Reply.new(554, "5.4.6", "Too many hops"), abort(state)}
     else
       fields = fix_header(received, state)
-      work = MailAuth.start(state.mail_auth, received, fields, auth_context(state))
       header = if fields == received, do: header, else: Headers.encode(fields)
+
+      state = %{
+        state
+        | header_fields: fields,
+          header_end: byte_size(state.received) + IO.iodata_length(header)
+      }
+
+      work =
+        unless state.reinjection,
+          do: MailAuth.start(state.mail_auth, received, fields, auth_context(state))
+
       {:ok, header, %{state | auth_work: work}}
     end
   end
@@ -825,7 +1001,9 @@ defmodule Sovite.Core.SMTPHandler do
 
     with {:ok, header, state} <- checked_header(header, state),
          {:ok, state} <- write(%{state | header: nil}, header),
-         do: handle_data_end(transaction, state)
+         {:ok, state} <- milter_header(state) do
+      handle_data_end(transaction, state)
+    end
   end
 
   def handle_data_end(_transaction, state) do
@@ -840,13 +1018,130 @@ defmodule Sovite.Core.SMTPHandler do
         action = if verdict == :accept, do: state.action, else: stronger(state.action, verdict)
         checks = Map.get(state.restrictions, :end_of_data, [])
 
-        action =
-          case Restrictions.run(checks, :end_of_data, restriction_context(state, [])) do
-            :ok -> action
-            restriction -> stronger(action, restriction)
-          end
+        {restriction, effects} =
+          Restrictions.check(checks, :end_of_data, restriction_context(state, []))
 
-        finish(action || state.session_action, state)
+        state = add_effects(state, :end_of_data, effects)
+        action = if restriction == :ok, do: action, else: stronger(action, restriction)
+        {verdict, changes, milters} = Milters.end_of_message(state.milters, milter_info(state))
+        state = %{state | milters: milters}
+
+        case verdict do
+          :ok -> apply_changes(action || state.session_action, changes, state)
+          {:hold, _} = hold -> apply_changes(stronger(action, hold), changes, state)
+          other -> finish(other, state)
+        end
+    end
+  end
+
+  # What policy servers and milters asked for: the message is written
+  # again when its envelope or content changes.
+  defp apply_changes({:reject, _} = action, _changes, state), do: finish(action, state)
+
+  defp apply_changes(action, changes, state) do
+    effects = state.session_effects ++ state.effects
+    {envelope, size} = Spool.info(state.writer)
+    changed = changed_envelope(envelope, effects, changes, state)
+    content = changed_content(changes, size, state)
+    prepend = for {:prepend, header} <- effects, do: [header, "\r\n"]
+    state = %{state | prefix: [prepend | state.prefix]}
+
+    cond do
+      changed == envelope and content == nil ->
+        finish(action, state)
+
+      changed.recipients == [] ->
+        finish({:discard, "no recipients left"}, state)
+
+      true ->
+        replace(action, changed, content, state)
+    end
+  end
+
+  defp replace(action, changed, content, state) do
+    case Spool.replace(state.writer, changed, content || [{:copy, 0, :all}]) do
+      {:ok, writer} ->
+        finish(action, %{state | writer: writer, expansions: changed.recipients})
+
+      {:error, reason} ->
+        queue_error(%{state | writer: nil}, reason)
+    end
+  end
+
+  defp changed_envelope(envelope, effects, changes, state) do
+    recipients =
+      Enum.reduce(effects ++ changes, envelope.recipients, fn
+        {:redirect, address}, _recipients ->
+          expand_one(state, address)
+
+        {:bcc, address}, recipients ->
+          recipients ++ expand_one(state, address)
+
+        {:add_recipient, address, _args}, recipients ->
+          recipients ++ expand_one(state, address)
+
+        {:delete_recipient, address}, recipients ->
+          Enum.reject(recipients, &same_address?(&1, address))
+
+        _other, recipients ->
+          recipients
+      end)
+      |> Enum.uniq_by(&String.downcase/1)
+
+    sender =
+      Enum.reduce(changes, envelope.sender, fn
+        {:change_sender, address, _args}, _sender -> address
+        _other, sender -> sender
+      end)
+
+    filter =
+      Enum.reduce(effects, envelope.content_filter, fn
+        {:filter, spec}, filter -> if valid_filter?(spec), do: spec, else: filter
+        _other, filter -> filter
+      end)
+
+    %{envelope | recipients: recipients, sender: sender, content_filter: filter}
+  end
+
+  defp expand_one(state, address) do
+    case expand(state, address) do
+      {:ok, finals} -> finals
+      {:reject, _reply} -> [address]
+    end
+  end
+
+  defp same_address?(a, b), do: String.downcase(a) == String.downcase(b)
+
+  defp valid_filter?(spec) do
+    if match?({:deliver, _}, Router.filter(spec)) do
+      true
+    else
+      Logger.warning("ignoring invalid content filter #{inspect(spec)} from a policy server")
+      false
+    end
+  end
+
+  @header_changes [:add_header, :insert_header, :change_header, :delete_header]
+
+  # The message put together again with the milters' changes, or nil when
+  # there are none. Without the header fields (a header section too large
+  # to hold back), there is nothing to change.
+  defp changed_content(_changes, _size, %{header_fields: nil}), do: nil
+
+  defp changed_content(changes, size, state) do
+    header_changes = Enum.filter(changes, &(elem(&1, 0) in @header_changes))
+    body = for {:replace_body, body} <- changes, do: body
+
+    if header_changes == [] and body == [] do
+      nil
+    else
+      fields = Headers.parse(state.received) ++ state.header_fields
+      head = fields |> MilterHeaders.apply(header_changes) |> Headers.encode()
+
+      case body do
+        [] -> [{:data, head}, {:copy, state.header_end || size, :all}]
+        body -> [{:data, head}, {:data, ["\r\n", List.last(body)]}]
+      end
     end
   end
 
@@ -908,7 +1203,7 @@ defmodule Sovite.Core.SMTPHandler do
   def handle_data_abort(_reason, state), do: abort(state)
 
   @impl true
-  def handle_rset(state), do: %{abort(state) | expansions: [], action: nil}
+  def handle_rset(state), do: %{abort(state) | expansions: [], action: nil, effects: []}
 
   @impl true
   def handle_vrfy(argument, state) do
@@ -927,15 +1222,26 @@ defmodule Sovite.Core.SMTPHandler do
   @impl true
   def terminate(_reason, state) do
     state = handle_auth_abort(state)
-    abort(state)
+    state = abort(state)
+    Milters.close(state.milters)
   end
 
-  defp abort(%{writer: nil} = state), do: %{state | header: nil, auth_work: nil, prefix: []}
+  # The milters forget the transaction too.
+  defp abort(%{writer: nil} = state),
+    do: %{state | header: nil, auth_work: nil, prefix: [], milters: Milters.abort(state.milters)}
 
   defp abort(state) do
     Spool.abort(state.writer)
     Logger.metadata(queue_id: nil)
-    %{state | writer: nil, header: nil, auth_work: nil, prefix: []}
+
+    %{
+      state
+      | writer: nil,
+        header: nil,
+        auth_work: nil,
+        prefix: [],
+        milters: Milters.abort(state.milters)
+    }
   end
 
   defp queue_error(state, reason) do

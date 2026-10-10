@@ -25,6 +25,8 @@ defmodule Sovite.Core.Config.Schema do
   #   :tls_destination         - a domain or an address literal ("[192.0.2.1]"), lower-cased
   #   :restriction             - a check name, see Sovite.Core.Restrictions
   #   :transport               - a Sovite.Core.Transport map, from "smtp", "lmtp:unix:/path", ...
+  #   :content_filter          - "" (none) or an smtp/lmtp transport with a next hop, kept as text
+  #   :milter_address          - %{text, address}, from "inet:host:port", "inet:port@host", "unix:/path"
   #   :delimiter               - address extension delimiter characters, such as "+" or "+-"
   #   :hide_subdomain          - a domain, or "!domain" for an exception
   #   :maildir_template        - an absolute path with {user}, {domain}, {address} placeholders
@@ -408,6 +410,39 @@ defmodule Sovite.Core.Config.Schema do
   end
 
   defp cast(:transport, value), do: type_error("a transport", value)
+
+  defp cast(:content_filter, value) when is_binary(value) do
+    case String.trim(value) do
+      "" ->
+        {:ok, ""}
+
+      spec ->
+        case Transport.parse(spec) do
+          {:ok, %{transport: transport, nexthop: nexthop}}
+          when transport in [:smtp, :lmtp] and nexthop != nil ->
+            {:ok, spec}
+
+          _ ->
+            {:error,
+             "#{inspect(value)} is not a content filter: use an smtp or lmtp transport with a next hop, such as \"smtp:[127.0.0.1]:10024\""}
+        end
+    end
+  end
+
+  defp cast(:content_filter, value), do: type_error("a transport", value)
+
+  defp cast(:milter_address, value) when is_binary(value) do
+    case Sovite.Milter.parse_address(String.trim(value)) do
+      {:ok, address} ->
+        {:ok, %{text: String.trim(value), address: address}}
+
+      {:error, :invalid_address} ->
+        {:error,
+         "#{inspect(value)} is not a milter address, such as \"inet:127.0.0.1:11332\" or \"unix:/run/milter.sock\""}
+    end
+  end
+
+  defp cast(:milter_address, value), do: type_error("a milter address", value)
 
   defp cast(:delimiter, value) when is_binary(value) do
     if String.length(value) <= 8 and not String.match?(value, ~r/[[:alnum:]@\s"<>.]/u),

@@ -20,7 +20,7 @@ defmodule Sovite.TLS.ACME.HTTPChallenge do
   def start_link(info, opts), do: {:ok, spawn_link(fn -> serve(info, opts) end)}
 
   defp serve(info, opts) do
-    with :ok <- Sovite.Listener.handshake(info),
+    with {:ok, _info} <- Sovite.Listener.handshake(info),
          {:ok, request} <- read(info.socket, "") do
       :gen_tcp.send(info.socket, respond(request, Keyword.fetch!(opts, :table)))
     end

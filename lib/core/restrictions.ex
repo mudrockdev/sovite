@@ -27,6 +27,7 @@ defmodule Sovite.Core.Restrictions do
   | `reject_forged_helo` | from `helo` | `550` if the `EHLO` name is this server's host name or one of its local domains, `localhost`, or an address literal other than the client's address. |
   | `require_known_helo` | from `helo` | `550` unless the `EHLO` name has address or MX records. Address literals pass. |
   | `require_matching_helo` | from `helo` | `550` unless the `EHLO` name resolves to the client address, or is its address literal. Strictest. |
+  | `check_policy_service ADDRESS` | all | Ask a Postfix policy server, see `Sovite.Core.PolicyService`. |
 
   The DNS checks reply `450` (`4.7.25` or `4.7.1`) when DNS fails, so a
   client is never refused for a temporary problem.
@@ -62,7 +63,7 @@ defmodule Sovite.Core.Restrictions do
   """
 
   alias Sovite.Abuse.ReverseDNS
-  alias Sovite.Core.Lookup
+  alias Sovite.Core.{Lookup, PolicyService}
   alias Sovite.DNS.MX
   alias Sovite.{Net, Validators}
   alias Sovite.SMTP.Reply
@@ -101,12 +102,23 @@ defmodule Sovite.Core.Restrictions do
           | {:discard, String.t()}
           | {:hold, String.t()}
 
+  @typedoc "What policy servers added to the message, see `Sovite.Core.PolicyService`."
+  @type effect :: PolicyService.effect()
+
   @doc "The stages, in session order."
   @spec stages() :: [atom()]
   def stages, do: @stages
 
   @doc "Checks a restriction name. Returns it, or an error message."
   @spec parse(String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def parse("check_policy_service" <> address = name) do
+    if String.starts_with?(address, " ") and PolicyService.valid_address?(String.trim(address)),
+      do: {:ok, "check_policy_service " <> String.trim(address)},
+      else:
+        {:error,
+         "#{inspect(name)}: expected check_policy_service inet:host:port, unix:/path, or spawn:/path"}
+  end
+
   def parse(name) do
     if Map.has_key?(@checks, name),
       do: {:ok, name},
@@ -115,6 +127,7 @@ defmodule Sovite.Core.Restrictions do
 
   @doc "Whether check `name` can run at `stage`."
   @spec allowed?(String.t(), atom()) :: boolean()
+  def allowed?("check_policy_service " <> _address, stage), do: stage in @stages
   def allowed?(name, stage), do: stage in Map.fetch!(@checks, name)
 
   @doc """
@@ -140,6 +153,8 @@ defmodule Sovite.Core.Restrictions do
       for `reject_forged_helo`.
     * `:client_dns` - the result of `Sovite.Abuse.ReverseDNS.check/2` for
       the client, if already known. Looked up when needed otherwise.
+    * `:policy`, `:policy_request`, `:esmtp` - for
+      `check_policy_service`, see `Sovite.Core.PolicyService.check/3`.
   """
   @type context :: map()
 
@@ -148,16 +163,27 @@ defmodule Sovite.Core.Restrictions do
   `[:sovite, :restrictions, :warn]` (`%{stage, check, text}`).
   """
   @spec run([String.t()], atom(), context()) :: verdict()
-  def run(checks, stage, context) do
-    Enum.reduce_while(checks, :ok, fn check, verdict ->
-      case evaluate(check, stage, context) do
-        :continue -> {:cont, verdict}
-        :permit -> {:halt, verdict}
-        {:hold, _text} = hold -> {:cont, hold}
-        {:discard, _text} = discard -> {:halt, discard}
-        {:reject, _reply} = reject -> {:halt, reject}
-      end
-    end)
+  def run(checks, stage, context), do: checks |> check(stage, context) |> elem(0)
+
+  @doc """
+  Like `run/3`, and also returns what policy servers added to the
+  message, in order.
+  """
+  @spec check([String.t()], atom(), context()) :: {verdict(), [effect()]}
+  def check(checks, stage, context) do
+    {verdict, effects} =
+      Enum.reduce_while(checks, {:ok, []}, fn check, {verdict, effects} ->
+        case evaluate(check, stage, context) do
+          :continue -> {:cont, {verdict, effects}}
+          :permit -> {:halt, {verdict, effects}}
+          {:effect, effect} -> {:cont, {verdict, [effect | effects]}}
+          {:hold, _text} = hold -> {:cont, {hold, effects}}
+          {:discard, _text} = discard -> {:halt, {discard, effects}}
+          {:reject, _reply} = reject -> {:halt, {reject, effects}}
+        end
+      end)
+
+    {verdict, Enum.reverse(effects)}
   end
 
   defp evaluate("permit", _stage, _context), do: :permit
@@ -278,6 +304,9 @@ defmodule Sovite.Core.Restrictions do
         helo_reject(helo, 450, "Host not found")
     end
   end
+
+  defp evaluate("check_policy_service " <> address, stage, context),
+    do: PolicyService.check(address, stage, context)
 
   defp evaluate(_check, _stage, _context), do: :continue
 

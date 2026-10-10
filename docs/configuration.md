@@ -100,6 +100,10 @@ mode = "submissions"
 | `screen` | boolean | `true` on `smtp`, else `false` | Run the postscreen-like checks of [`[screen]`](#screen) and greylisting on clients outside `smtp.trusted_networks`. |
 | `tls_min_version` | `"1.2"` \| `"1.3"` | `tls.min_version` | Override for this listener. |
 | `tls_ciphers` | array of cipher names | `tls.ciphers` | Override for this listener. |
+| `proxy_protocol` | boolean | `false` | Read a PROXY protocol header (v1 or v2) from each connection, for listeners behind HAProxy or a load balancer, see [Proxies](#proxies-proxy-protocol-xclient-and-xforward). |
+| `milters` | array of names | every [`[[milter]]`](#milter) | The milters this listener runs. Default: all of them, except on `lmtp` and `reinjection` listeners. |
+| `content_filter` | transport | `smtp.content_filter` | Where messages received here go before delivery, see [Content filters](#content-filters). `""` for none. |
+| `reinjection` | boolean | `false` | The listener a content filter sends mail back to: no content filter, milters, screen, or email authentication (they ran when the mail first arrived). |
 
 `STARTTLS` is offered on `smtp` and `submission` listeners whenever a certificate is configured in [`[tls]`](#tls). A `submissions` listener starts TLS right after the connection opens, so it needs a certificate.
 
@@ -179,6 +183,11 @@ Settings for all listeners. Limits apply per listener.
 | `tarpit_after` | integer | `3` | Error replies before the tarpit starts. |
 | `tarpit_delay` | duration | `1s` | From the `tarpit_after`th error reply on, each one is sent this much later, slowing down dictionary attacks and other clients that keep getting errors. |
 | `forbid_unauth_pipelining` | boolean | `true` | Disconnect a client with `554 5.5.0` when it sends more commands without waiting for the reply to one that must end a group (`EHLO`, `DATA`, `NOOP`, ..., RFC 2920 §3.1), or pipelines at all before `PIPELINING` was offered. Spam bots and SMTP smuggling attempts do this; real servers do not. Not on LMTP listeners. |
+| `content_filter` | transport | unset | An after-queue content filter for every listener, such as `"smtp:[127.0.0.1]:10024"`, see [Content filters](#content-filters). |
+| `xclient_networks` | array of networks | `[]` | Proxies that may use `XCLIENT`, see [Proxies](#proxies-proxy-protocol-xclient-and-xforward). |
+| `xforward_networks` | array of networks | `[]` | Content filters that may use `XFORWARD`. |
+| `proxy_networks` | array of networks | unset | On `proxy_protocol` listeners, the proxies: connections from them must start with a PROXY header, others are served directly. Unset: every connection must. |
+| `proxy_timeout` | duration | `10s` | How long to wait for the PROXY header. |
 
 HTTP requests and header lines (cross-protocol attacks) close the session with `421 4.7.0`.
 
@@ -497,6 +506,127 @@ Detects accounts that are probably compromised. Each recipient an authenticated 
 | `min_failures` | integer | `20` | Failures needed before a user is suspended. |
 | `window` | duration | `1h` | The period counted. |
 | `suspend_time` | duration | `1h` | How long a suspension lasts. |
+
+## Ecosystem
+
+Sovite works with the tools a Postfix setup uses: milters such as Rspamd and OpenDKIM, policy servers such as postgrey, after-queue content filters such as amavis, proxies, and programs that call `sendmail`. `sovitectl migrate postfix` turns a Postfix configuration into a Sovite one, see [Migrating from Postfix](#migrating-from-postfix).
+
+### `[[milter]]`
+
+Mail filters that speak Sendmail's milter protocol (version 6), as Postfix's `smtpd_milters`: Rspamd, OpenDKIM, OpenDMARC, ClamAV-milter, and others. Each listener runs the milters in `milters` (by default all of them, except on `lmtp` and `reinjection` listeners), each with its own connection per SMTP session, after Sovite's own checks of each stage.
+
+```toml
+[[milter]]
+name = "rspamd"
+address = "inet:127.0.0.1:11332"
+default_action = "accept"
+
+[[milter]]
+name = "opendkim"
+address = "unix:/run/opendkim/opendkim.sock"
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `name` | string | `address` | The name listeners use in `milters`. |
+| `address` | string | required | `inet:host:port`, `inet:port@host` (Sendmail style), `inet6:port@host`, or `unix:/path` (or `local:/path`). |
+| `default_action` | `tempfail` \| `accept` \| `reject` | `tempfail` | What happens when the milter cannot be reached, does not answer in time, or breaks the protocol: answer every later command of the session with `451 4.7.1` (or, at connect, `421`), with `550 5.7.1`, or go on without the milter. |
+| `connect_timeout` | duration | `30s` | To connect. |
+| `command_timeout` | duration | `30s` | For each reply to the connection, `EHLO`, `MAIL`, and `RCPT` steps. |
+| `content_timeout` | duration | `5m` | For the replies to the header, body, and end of the message. |
+
+A milter can reject the client, a command, a recipient, or the message (`550 5.7.1 Command rejected`, `451 4.7.1 Service unavailable - try again later`, or its own reply), discard or quarantine the message (it goes to the hold queue), and at the end of the message add, insert, change, and delete header fields, add and remove recipients, change the sender, and replace the body. The milters see the message as it was received, including Sovite's `Received:` field, and their changes are applied in order. Sovite's own DKIM signatures and `Authentication-Results:` cover the message before those changes, so sign in one place only: with Sovite's `[dkim]` keys, or with the milter.
+
+Milters get the macros Postfix sends by default, such as `i` (the queue ID), `{client_addr}`, `{auth_authen}`, and `{daemon_name}` (the listener).
+
+### Policy servers: `[policy]`
+
+`check_policy_service ADDRESS` in any [`[restrictions]`](#restrictions-for-ehlo-names-and-reverse-dns) chain asks a Postfix policy server (the SMTPD access policy delegation protocol), such as postgrey or policyd-spf, with the attributes Postfix sends. `ADDRESS` is `inet:host:port`, `unix:/path`, or `spawn:/path/to/program args...` for programs that only talk on their standard input and output, as Postfix's `spawn(8)` runs policyd-spf (Sovite starts one per request, as its own user).
+
+```toml
+[restrictions]
+rcpt = [
+  "permit_trusted",
+  "permit_authenticated",
+  "check_policy_service inet:127.0.0.1:10023",       # postgrey
+  "check_policy_service spawn:/usr/bin/policyd-spf",
+]
+```
+
+The reply counts as an access rule: `OK`, `DUNNO`, `REJECT`, `DEFER`, `DEFER_IF_PERMIT`, `4NN`/`5NN` replies, `HOLD`, `DISCARD`, `WARN`, and `INFO`, as well as `PREPEND` (a header field at the top of the message), `REDIRECT address`, `BCC address`, and `FILTER transport:nexthop` (a [content filter](#content-filters) for this message). `DEFER_IF_REJECT` counts as `DUNNO`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `timeout` | duration | `100s` | For each request. |
+| `default_action` | string | `451 4.3.5 Server configuration problem` | The action when the server cannot be reached, does not answer in time, or sends something that is not an action. `DUNNO` lets mail through instead. |
+
+Sovite checks SPF itself (see [`[spf]`](#spf)), so policyd-spf is only needed to keep its exact behaviour.
+
+### Content filters
+
+An after-queue content filter, such as amavis, gets every message received on a listener with a `content_filter` before it is delivered, as with Postfix's `content_filter`: the queue sends it, with all its recipients and its original sender, to the filter over SMTP or LMTP, and the filter sends it back to a `reinjection` listener. Filters that offer `XFORWARD` are told the original client, `HELO` name, and queue ID; trust them with `xforward_networks`, so the message keeps them.
+
+```toml
+[smtp]
+content_filter = "smtp:[127.0.0.1]:10024"
+trusted_networks = ["127.0.0.1"]   # the filter relays its mail back
+xforward_networks = ["127.0.0.1"]
+
+[[listener]]
+port = 25
+
+[[listener]]                       # where amavis sends mail back
+address = "127.0.0.1"
+port = 10025
+reinjection = true
+```
+
+The filter is a next hop of its own: delivery to it does not use `REQUIRETLS`, and a filter that is down keeps the mail in the queue as any next hop does. Messages a policy server sends to a `FILTER` go to that filter instead.
+
+### Proxies: PROXY protocol, XCLIENT, and XFORWARD
+
+Behind HAProxy or a load balancer, a listener with `proxy_protocol = true` reads a PROXY protocol header (version 1 or 2) at the start of each connection, and treats the client it names as the client: restrictions, the screen, SPF, and logs see the real address. A connection without a valid header in `smtp.proxy_timeout` is closed. With `smtp.proxy_networks`, only connections from those addresses must send one, and others are served directly. Connection limits (`max_connections_per_ip`) count the proxy.
+
+```toml
+[smtp]
+proxy_networks = ["10.0.0.5"]       # the load balancer
+
+[[listener]]
+port = 25
+proxy_protocol = true
+```
+
+```
+# haproxy.cfg
+backend sovite
+    mode tcp
+    server mx1 10.0.0.10:25 send-proxy-v2
+```
+
+Clients in `smtp.xclient_networks` may use Postfix's `XCLIENT` command, as the nginx mail proxy does: it names the client (`ADDR`, `PORT`, `NAME`, `HELO`, `PROTO`, `LOGIN`, ...), and the session starts over as if that client had connected; a `LOGIN` counts as authenticated. `XFORWARD` (`smtp.xforward_networks`) only describes the original client of the next message, for content filters.
+
+### `[sendmail]`
+
+Releases include `bin/sendmail`, `bin/mailq`, and `bin/newaliases` for local programs and cron jobs. Link them where programs look for them:
+
+```sh
+ln -s /opt/sovite/bin/sendmail /usr/sbin/sendmail
+ln -s /opt/sovite/bin/mailq /usr/bin/mailq
+ln -s /opt/sovite/bin/newaliases /usr/bin/newaliases
+```
+
+`sendmail` takes the usual options (`-t`, `-f`, `-F`, `-i`/`-oi`, `-bp`, `-bi`, ...; see `Sovite.Core.Sendmail`) and sends the message over SMTP to `server`, waiting until it is queued, so the exit status tells whether that worked (`75` when Sovite is not running). The listener must let local programs relay: add `127.0.0.1` to `smtp.trusted_networks`. Addresses without a domain get `@origin`. `mailq` lists the queue (as root or the Sovite user, since it reads the queue directory). `newaliases` does nothing: aliases are in the database.
+
+The settings are read from the config file when the user running `sendmail` can read it; otherwise the defaults apply.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `server` | host | `[127.0.0.1]:25` | The listener to send to. |
+| `origin` | domain | `server.hostname` | The domain for addresses without one, such as the user running `sendmail`. |
+
+### Migrating from Postfix
+
+MIGRATION_PLACEHOLDER
 
 ## `[auth]`
 

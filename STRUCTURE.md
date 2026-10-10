@@ -41,7 +41,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | `dns/` | `Sovite.DNS` | Resolver behaviour, default resolver, cache, MX / TXT / TLSA helpers, Null MX |
 | `ldap/` | `Sovite.LDAP` | LDAP connections (StartTLS/LDAPS), bind, search, RFC 4515 filters with injection-safe placeholders, DN escaping |
 | `sasl/` | `Sovite.SASL` | PLAIN, LOGIN, SCRAM-SHA-256, OAUTHBEARER (both server and client side) |
-| `proxy_protocol/` | `Sovite.ProxyProtocol` | HAProxy PROXY v1/v2 parser |
+| `proxy_protocol/` | `Sovite.ProxyProtocol` | HAProxy PROXY protocol v1/v2: header parser (TLVs, CRC32C check), encoder, and a socket reader that never reads past the header |
 | `maildir/` | `Sovite.Maildir` | Crash-safe Maildir delivery (`tmp/` then `new/`) |
 | `pipe/` | `Sovite.Pipe` | Run an external command with a file on standard input: no shell, clean environment, timeout, output limit |
 
@@ -49,7 +49,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `smtp/` | `Sovite.SMTP` | Command/reply codec, enhanced status codes, server session state machine (with greeting delay, tarpit, and pipelining checks), client state machine, LMTP (client over TCP and Unix sockets, and server mode), extensions |
+| `smtp/` | `Sovite.SMTP` | Command/reply codec, enhanced status codes, server session state machine (with greeting delay, tarpit, pipelining checks, and Postfix's `XCLIENT` and `XFORWARD`), client state machine (with `XFORWARD`), xtext, LMTP (client over TCP and Unix sockets, and server mode), extensions |
 | `dsn/` | `Sovite.DSN` | Build and parse delivery status notifications (RFC 3464 / 6522) |
 | `spf/` | `Sovite.SPF` | SPF evaluation (RFC 7208) |
 | `dkim/` | `Sovite.DKIM` | DKIM signing and verification (RFC 6376, 8301, 8463) |
@@ -58,8 +58,8 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | `auth_results/` | `Sovite.AuthResults` | `Authentication-Results:` header build/parse (RFC 8601) |
 | `srs/` | `Sovite.SRS` | Sender Rewriting Scheme (SRS0/SRS1) addresses for forwarded mail |
 | `tls/` | `Sovite.TLS` | Certificate store with SNI, ACME, DANE verification, MTA-STS policies (discovery, fetch, MX matching, a policy server), TLS-RPT reports |
-| `milter/` | `Sovite.Milter` | Milter protocol client |
-| `policy/` | `Sovite.Policy` | Postfix policy delegation protocol (client **and** server, so policy servers can be written in Elixir) |
+| `milter/` | `Sovite.Milter` | Milter protocol client (version 6, for Rspamd, OpenDKIM, OpenDMARC, ClamAV-milter, ...), packet codec, applying a milter's header changes with libmilter index rules |
+| `policy/` | `Sovite.Policy` | Postfix policy delegation protocol: a client (TCP, Unix socket, or a program on standard input and output, as for policyd-spf), access(5) action parsing, and a server, so policy servers can be written in Elixir |
 | `abuse/` | `Sovite.Abuse` | Failed-login penalties, DNSBL/DNSWL/RHSBL scoring, reverse DNS (FCrDNS) checks, greylisting decisions, rate limiting, an expiring cache |
 | `queue/` | `Sovite.Queue` | Durable mail spool with storage behaviour, crash recovery, retry scheduler |
 | `listener/` | `Sovite.Listener` | TCP/TLS listener with connection limits and PROXY protocol support |
@@ -68,7 +68,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), email authentication of received and sent mail (SPF, DKIM, ARC, DMARC, SRS) and DMARC reports, transport security policies (DANE, MTA-STS cache, REQUIRETLS) and TLS-RPT reports, anti-abuse (postscreen-like client screen, greylisting, rate limits, suspension of compromised accounts), bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration |
+| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), email authentication of received and sent mail (SPF, DKIM, ARC, DMARC, SRS) and DMARC reports, transport security policies (DANE, MTA-STS cache, REQUIRETLS) and TLS-RPT reports, anti-abuse (postscreen-like client screen, greylisting, rate limits, suspension of compromised accounts), milters, policy servers, after-queue content filters, bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration |
 
 New components are added as new folders, placed in the lowest layer their dependencies allow.
 
@@ -93,6 +93,10 @@ lib/core/
   screen.ex          # Sovite.Core.Screen: anti-abuse checks of SMTP clients
   greylist.ex        # Sovite.Core.Greylist: greylisting, stored in the database
   outbound.ex        # Sovite.Core.Outbound: suspends users whose mail fails too often
+  milters.ex         # Sovite.Core.Milters: the milters of an SMTP session
+  policy_service.ex  # Sovite.Core.PolicyService: check_policy_service in the restriction chains
+  sendmail.ex        # Sovite.Core.Sendmail: sendmail(1), mailq(1), newaliases(1)
+  postfix/           # reading Postfix's main.cf, master.cf, and tables, for sovitectl migrate postfix
   ...                # routing, rewriting, restrictions, queue manager
 ```
 

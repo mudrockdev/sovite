@@ -123,8 +123,10 @@ defmodule Sovite.Queue.Spool do
 
   @doc "Starts writing a message for `envelope` in `directory`."
   @spec open(Path.t(), Envelope.t()) :: {:ok, writer()} | {:error, File.posix()}
-  def open(directory, %Envelope{queue_id: id} = envelope) do
-    tmp_path = Path.join([directory, "tmp", id])
+  def open(directory, %Envelope{queue_id: id} = envelope),
+    do: open(directory, envelope, Path.join([directory, "tmp", id]))
+
+  defp open(directory, %Envelope{queue_id: id} = envelope, tmp_path) do
     envelope_line = [envelope |> Envelope.to_map() |> JSON.encode!(), ?\n]
 
     with {:ok, fd} <- :file.open(tmp_path, [:write, :exclusive, :raw, :binary]) do
@@ -202,6 +204,98 @@ defmodule Sovite.Queue.Spool do
     else
       {:error, reason} ->
         abort(writer)
+        {:error, reason}
+    end
+  end
+
+  @doc "Returns the envelope and the bytes of message data written so far."
+  @spec info(writer()) :: {Envelope.t(), non_neg_integer()}
+  def info(%__MODULE__{} = writer), do: {writer.envelope, writer.message_size}
+
+  @doc """
+  Writes the message being written again, with `envelope` and a message
+  put together from `parts`: `{:data, iodata}`, or `{:copy, offset,
+  length}` for bytes of the message data written so far (`:all` for the
+  rest from `offset`). For changes that come after the data, such as a
+  mail filter's. The queue ID must stay the same.
+
+  Returns a new writer; the old one is closed, and on error both files
+  are deleted.
+  """
+  @spec replace(writer(), Envelope.t(), [
+          {:data, iodata()} | {:copy, non_neg_integer(), non_neg_integer() | :all}
+        ]) ::
+          {:ok, writer()} | {:error, File.posix()}
+  def replace(
+        %__MODULE__{envelope: %{queue_id: id}} = old,
+        %Envelope{queue_id: id} = envelope,
+        parts
+      ) do
+    directory = old.path |> Path.dirname() |> Path.dirname()
+    data_start = @header_size + old.envelope_size
+
+    with :ok <- :file.datasync(old.fd),
+         {:ok, source} <- :file.open(old.tmp_path, [:read, :raw, :binary]) do
+      try do
+        rewrite(old, directory, envelope, parts, source, data_start)
+      after
+        :file.close(source)
+      end
+    end
+    |> case do
+      {:ok, writer} ->
+        {:ok, writer}
+
+      {:error, reason} ->
+        abort(old)
+        {:error, reason}
+    end
+  end
+
+  defp rewrite(old, directory, envelope, parts, source, data_start) do
+    with {:ok, new} <- open(directory, envelope, old.tmp_path <> ".new"),
+         {:ok, new} <- write_parts(new, parts, old, source, data_start),
+         :ok <- :file.close(old.fd),
+         :ok <- :file.rename(new.tmp_path, old.tmp_path) do
+      {:ok, %{new | tmp_path: old.tmp_path}}
+    end
+  end
+
+  defp write_parts(writer, parts, old, source, data_start) do
+    Enum.reduce_while(parts, {:ok, writer}, fn part, {:ok, writer} ->
+      case write_part(writer, part, old, source, data_start) do
+        {:ok, writer} ->
+          {:cont, {:ok, writer}}
+
+        {:error, reason} ->
+          abort(writer)
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp write_part(writer, {:data, data}, _old, _source, _start), do: append_data(writer, data)
+
+  defp write_part(writer, {:copy, offset, :all}, old, source, start),
+    do: write_part(writer, {:copy, offset, max(old.message_size - offset, 0)}, old, source, start)
+
+  defp write_part(writer, {:copy, _offset, 0}, _old, _source, _start), do: {:ok, writer}
+
+  defp write_part(writer, {:copy, offset, length}, old, source, start) do
+    chunk = min(length, 65_536)
+
+    case :file.pread(source, start + offset, chunk) do
+      {:ok, data} when byte_size(data) == chunk ->
+        with {:ok, writer} <- append_data(writer, data),
+             do: write_part(writer, {:copy, offset + chunk, length - chunk}, old, source, start)
+
+      {:ok, _short} ->
+        {:error, :einval}
+
+      :eof ->
+        {:error, :einval}
+
+      {:error, reason} ->
         {:error, reason}
     end
   end

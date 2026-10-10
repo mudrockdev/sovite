@@ -106,10 +106,13 @@ defmodule Sovite.MixProject do
         DNS: [~r/^Sovite\.DNS/],
         LDAP: [~r/^Sovite\.LDAP/],
         SASL: [~r/^Sovite\.SASL/],
+        "Proxy protocol": [~r/^Sovite\.ProxyProtocol/],
         Queue: [~r/^Sovite\.Queue/],
         Listener: [~r/^Sovite\.Listener/],
         SMTP: [~r/^Sovite\.SMTP/],
         TLS: [~r/^Sovite\.TLS/],
+        Milter: [~r/^Sovite\.Milter/],
+        Policy: [~r/^Sovite\.Policy/],
         Abuse: [~r/^Sovite\.Abuse/],
         "Email authentication": [
           ~r/^Sovite\.SPF/,

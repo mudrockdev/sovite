@@ -60,7 +60,11 @@ defmodule Sovite.Core.Config do
          {:require_auth, :boolean, []},
          {:screen, :boolean, []},
          {:tls_min_version, :tls_version, []},
-         {:tls_ciphers, :ciphers, []}
+         {:tls_ciphers, :ciphers, []},
+         {:proxy_protocol, :boolean, default: false},
+         {:milters, {:list, :string}, []},
+         {:content_filter, :content_filter, []},
+         {:reinjection, :boolean, default: false}
        ]}}, default: [%{}]},
     {:tls,
      {:section,
@@ -107,7 +111,12 @@ defmodule Sovite.Core.Config do
         {:requiretls, :boolean, default: true},
         {:tarpit_after, {:integer, 1, 1000}, default: 3},
         {:tarpit_delay, :duration, default: "1s"},
-        {:forbid_unauth_pipelining, :boolean, default: true}
+        {:forbid_unauth_pipelining, :boolean, default: true},
+        {:content_filter, :content_filter, []},
+        {:xclient_networks, {:list, :cidr}, default: []},
+        {:xforward_networks, {:list, :cidr}, default: []},
+        {:proxy_networks, {:list, :cidr}, []},
+        {:proxy_timeout, :duration, default: "10s"}
       ]}, []},
     {:domains,
      {:section,
@@ -328,6 +337,25 @@ defmodule Sovite.Core.Config do
         {:window, :duration, default: "1h"},
         {:suspend_time, :duration, default: "1h"}
       ]}, []},
+    {:milter,
+     {:list,
+      {:section,
+       [
+         {:name, :string, []},
+         {:address, :milter_address, required: true},
+         {:default_action, {:enum, [:tempfail, :accept, :reject]}, default: :tempfail},
+         {:connect_timeout, :duration, default: "30s"},
+         {:command_timeout, :duration, default: "30s"},
+         {:content_timeout, :duration, default: "5m"}
+       ]}}, default: []},
+    {:policy,
+     {:section,
+      [
+        {:timeout, :duration, default: "100s"},
+        {:default_action, :string, default: "451 4.3.5 Server configuration problem"}
+      ]}, []},
+    {:sendmail,
+     {:section, [{:server, :relayhost, default: "[127.0.0.1]:25"}, {:origin, :domain, []}]}, []},
     {:bounce, {:section, [{:double_bounce_recipient, :mailbox, []}]}, []},
     {:log,
      {:section,
@@ -371,6 +399,9 @@ defmodule Sovite.Core.Config do
     :greylist,
     :rate_limit,
     :outbound,
+    :milter,
+    :policy,
+    :sendmail,
     :bounce,
     :log
   ]
@@ -409,7 +440,11 @@ defmodule Sovite.Core.Config do
               require_auth: boolean(),
               screen: boolean(),
               tls_min_version: :"tlsv1.2" | :"tlsv1.3" | nil,
-              tls_ciphers: [String.t()] | nil
+              tls_ciphers: [String.t()] | nil,
+              proxy_protocol: boolean(),
+              milters: [String.t()],
+              content_filter: String.t() | nil,
+              reinjection: boolean()
             }
           ],
           tls: %{
@@ -434,7 +469,12 @@ defmodule Sovite.Core.Config do
             requiretls: boolean(),
             tarpit_after: pos_integer(),
             tarpit_delay: pos_integer(),
-            forbid_unauth_pipelining: boolean()
+            forbid_unauth_pipelining: boolean(),
+            content_filter: String.t() | nil,
+            xclient_networks: [Sovite.Net.network()],
+            xforward_networks: [Sovite.Net.network()],
+            proxy_networks: [Sovite.Net.network()] | nil,
+            proxy_timeout: pos_integer()
           },
           domains: %{
             local: [String.t()],
@@ -571,6 +611,18 @@ defmodule Sovite.Core.Config do
             window: pos_integer(),
             suspend_time: pos_integer()
           },
+          milter: [
+            %{
+              name: String.t(),
+              address: term(),
+              default_action: :tempfail | :accept | :reject,
+              connect_timeout: pos_integer(),
+              command_timeout: pos_integer(),
+              content_timeout: pos_integer()
+            }
+          ],
+          policy: %{timeout: pos_integer(), default_action: String.t()},
+          sendmail: %{server: Sovite.Core.Transport.host(), origin: String.t() | nil},
           bounce: %{double_bounce_recipient: String.t() | nil},
           log: Sovite.Core.Logging.config()
         }
@@ -646,14 +698,43 @@ defmodule Sovite.Core.Config do
     lmtp: %{port: 24, auth: false, require_tls: false, require_auth: false, screen: false}
   }
 
-  defp listener_defaults(values),
-    do: update_in(values.listener, &Enum.map(&1, fn listener -> with_mode_defaults(listener) end))
+  defp listener_defaults(values) do
+    values = update_in(values.milter, &Enum.map(&1, fn milter -> milter_name(milter) end))
+    update_in(values.listener, &Enum.map(&1, fn listener -> with_defaults(listener, values) end))
+  end
 
-  defp with_mode_defaults(listener) do
-    Map.merge(listener, Map.fetch!(@mode_defaults, listener.mode), fn
-      _key, nil, default -> default
-      _key, value, _default -> value
-    end)
+  defp milter_name(%{name: nil} = milter), do: %{milter | name: milter.address.text}
+  defp milter_name(milter), do: milter
+
+  # A listener content filters send mail back to gets neither filters
+  # nor milters again, and no screening.
+  defp with_defaults(listener, values) do
+    defaults =
+      if listener.reinjection,
+        do: %{@mode_defaults[listener.mode] | screen: false},
+        else: @mode_defaults[listener.mode]
+
+    listener =
+      Map.merge(listener, defaults, fn
+        _key, nil, default -> default
+        _key, value, _default -> value
+      end)
+
+    reinjection = listener.reinjection
+    all_milters = if listener.mode == :lmtp, do: [], else: Enum.map(values.milter, & &1.name)
+
+    content_filter =
+      cond do
+        reinjection -> nil
+        listener.content_filter == nil -> values.smtp.content_filter
+        true -> listener.content_filter
+      end
+
+    %{
+      listener
+      | milters: if(reinjection, do: [], else: listener.milters || all_milters),
+        content_filter: if(content_filter == "", do: nil, else: content_filter)
+    }
   end
 
   @doc "Returns whether any listener offers AUTH."
@@ -720,10 +801,16 @@ defmodule Sovite.Core.Config do
         Enum.uniq(values.delivery.ip_versions) != values.delivery.ip_versions &&
           %Error{path: ["delivery", "ip_versions"], reason: "must not repeat a version"},
         (values.delivery.relayhost_username != nil and values.delivery.relayhost == nil) &&
-          %Error{path: ["delivery", "relayhost_username"], reason: "needs delivery.relayhost"}
+          %Error{path: ["delivery", "relayhost_username"], reason: "needs delivery.relayhost"},
+        match?({:error, _}, Sovite.Policy.parse_action(values.policy.default_action)) &&
+          %Error{
+            path: ["policy", "default_action"],
+            reason: "is not a policy action, such as \"DUNNO\" or \"451 4.3.5 Try again later\""
+          }
       ]
       |> Kernel.++(database_errors(values.database))
       |> Kernel.++(listener_errors(values))
+      |> Kernel.++(milter_errors(values.milter))
       |> Kernel.++(auth_errors(values))
       |> Kernel.++(acme_errors(values.tls.acme))
       |> Kernel.++(RoutingRules.errors(values))
@@ -753,12 +840,40 @@ defmodule Sovite.Core.Config do
 
   defp listener_errors(values) do
     tls = tls_enabled?(values)
+    milters = Enum.map(values.milter, & &1.name)
 
     values.listener
     |> Enum.with_index()
     |> Enum.flat_map(fn {listener, index} ->
-      for {field, reason} <- listener_problems(listener, tls, values.auth.plaintext),
+      problems =
+        listener_problems(listener, tls, values.auth.plaintext) ++
+          milter_problems(listener, milters)
+
+      for {field, reason} <- problems,
           do: %Error{path: ["listener", "[#{index}]", field], reason: reason}
+    end)
+  end
+
+  defp milter_problems(listener, milters) do
+    for name <- listener.milters,
+        name not in milters,
+        do: {"milters", "no [[milter]] is named #{inspect(name)}"}
+  end
+
+  defp milter_errors(milters) do
+    milters
+    |> Enum.with_index()
+    |> Enum.group_by(fn {milter, _index} -> milter.name end)
+    |> Enum.flat_map(fn
+      {_name, [_]} ->
+        []
+
+      {name, [_ | duplicates]} ->
+        for {_milter, index} <- duplicates,
+            do: %Error{
+              path: ["milter", "[#{index}]", "name"],
+              reason: "#{inspect(name)} names another milter already"
+            }
     end)
   end
 

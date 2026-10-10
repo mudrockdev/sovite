@@ -205,6 +205,54 @@ defmodule Sovite.Queue.SpoolTest do
   def handle_event(event, measurements, metadata, pid),
     do: send(pid, {:telemetry, event, measurements, metadata})
 
+  describe "replace/3" do
+    test "writes the message again with a new envelope and parts", %{tmp_dir: dir} do
+      envelope = envelope()
+      {:ok, writer} = Spool.open(dir, envelope)
+      {:ok, writer} = Spool.write(writer, @message)
+      assert Spool.info(writer) == {envelope, byte_size(@message)}
+
+      changed = %{
+        envelope
+        | recipients: ["d@example.com"],
+          content_filter: "smtp:[127.0.0.1]:10024"
+      }
+
+      body_at = byte_size("From: a@example.net\r\nSubject: hi\r\n")
+      big = String.duplicate("x", 200_000)
+
+      assert {:ok, writer} =
+               Spool.replace(writer, changed, [
+                 {:data, "X-New: 1\r\n"},
+                 {:copy, 0, body_at},
+                 {:copy, body_at, :all},
+                 {:data, big}
+               ])
+
+      {:ok, writer} = Spool.write(writer, "tail\r\n")
+      {:ok, path, size} = Spool.commit(writer, "X-Prefix: 1\r\n")
+      assert File.ls!(Path.join(dir, "tmp")) == []
+
+      {:ok, loaded} = Spool.load(path)
+      assert loaded.envelope == changed
+      message = "X-New: 1\r\n" <> @message <> big <> "tail\r\n"
+      assert size == byte_size("X-Prefix: 1\r\n" <> message)
+
+      assert path
+             |> Spool.stream_message(loaded.message_offset, loaded.message_size, loaded.prefix)
+             |> Enum.join() ==
+               "X-Prefix: 1\r\n" <> message
+    end
+
+    test "fails on a copy past the end, and deletes both files", %{tmp_dir: dir} do
+      envelope = envelope()
+      {:ok, writer} = Spool.open(dir, envelope)
+      {:ok, writer} = Spool.write(writer, @message)
+      assert Spool.replace(writer, envelope, [{:copy, 10, 1000}]) == {:error, :einval}
+      assert File.ls!(Path.join(dir, "tmp")) == []
+    end
+  end
+
   describe "read/1" do
     setup %{tmp_dir: dir} do
       path = spool!(dir)

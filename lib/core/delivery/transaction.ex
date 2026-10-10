@@ -15,7 +15,8 @@ defmodule Sovite.Core.Delivery.Transaction do
     opts = [
       size: job.message_size,
       body_type: job.body_type,
-      requiretls: Map.get(job, :requiretls, false)
+      requiretls: Map.get(job, :requiretls, false),
+      xforward: Map.get(job, :xforward)
     ]
 
     case Client.deliver(client, job.sender, job.recipients, body, opts) do
@@ -106,6 +107,7 @@ defmodule Sovite.Core.Delivery.Transaction do
   def stage_text(:rset), do: "while sending RSET"
   def stage_text(:starttls), do: "while sending STARTTLS"
   def stage_text(:auth), do: "while authenticating"
+  def stage_text(:xforward), do: "while sending XFORWARD"
   def stage_text(stage), do: "at #{stage}"
 
   def format_reason(:timeout), do: "timeout"

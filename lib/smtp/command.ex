@@ -19,6 +19,7 @@ defmodule Sovite.SMTP.Command do
   `Sovite.Validators.split_mailbox/1`.
   """
 
+  alias Sovite.SMTP.XText
   alias Sovite.Validators
 
   @type params :: [{String.t(), String.t() | nil}]
@@ -37,6 +38,14 @@ defmodule Sovite.SMTP.Command do
           | {:help, String.t()}
           | :starttls
           | {:auth, mechanism :: String.t(), initial_response :: String.t() | nil}
+          | {:xclient, attributes()}
+          | {:xforward, attributes()}
+
+  @typedoc """
+  `XCLIENT` and `XFORWARD` attributes: upper-cased names and decoded
+  values, `nil` for `[UNAVAILABLE]` and `[TEMPUNAVAIL]`.
+  """
+  @type attributes :: [{String.t(), String.t() | nil}]
 
   @typedoc """
   Why a line did not parse:
@@ -73,10 +82,12 @@ defmodule Sovite.SMTP.Command do
     "VRFY" => :vrfy,
     "HELP" => :help,
     "STARTTLS" => :starttls,
-    "AUTH" => :auth
+    "AUTH" => :auth,
+    "XCLIENT" => :xclient,
+    "XFORWARD" => :xforward
   }
 
-  @not_implemented ~w(EXPN TURN ETRN ATRN BDAT SEND SOML SAML XCLIENT XFORWARD)
+  @not_implemented ~w(EXPN TURN ETRN ATRN BDAT SEND SOML SAML)
   @http ~w(GET POST HEAD PUT DELETE OPTIONS CONNECT PATCH TRACE)
 
   @doc "Parses one command line. Returns the verb, if known, with errors."
@@ -139,7 +150,34 @@ defmodule Sovite.SMTP.Command do
     end
   end
 
+  # XCLIENT / XFORWARD name=value ..., values in xtext.
+  defp parse_verb(verb, argument) when verb in [:xclient, :xforward] do
+    argument
+    |> String.split(" ", trim: true)
+    |> Enum.reduce_while({:ok, []}, fn attribute, {:ok, acc} ->
+      case attribute(attribute) do
+        {:ok, pair} -> {:cont, {:ok, [pair | acc]}}
+        :error -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, [_ | _] = attributes} -> {:ok, {verb, Enum.reverse(attributes)}}
+      _ -> {:error, verb, :syntax}
+    end
+  end
+
   ## Paths and parameters
+
+  defp attribute(attribute) do
+    with [name, value] <- :binary.split(attribute, "="),
+         true <- String.match?(name, ~r/\A[A-Za-z]{1,20}\z/),
+         {:ok, value} <- XText.decode(value) do
+      value = if value in ["[UNAVAILABLE]", "[TEMPUNAVAIL]"], do: nil, else: value
+      {:ok, {String.upcase(name, :ascii), value}}
+    else
+      _ -> :error
+    end
+  end
 
   defp auth(mechanism, response) do
     if String.match?(mechanism, ~r/\A[A-Za-z0-9_-]{1,20}\z/) and response != "",

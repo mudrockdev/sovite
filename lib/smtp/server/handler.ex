@@ -28,6 +28,9 @@ defmodule Sovite.SMTP.Server.Handler do
   `{:close, reply, state}` to refuse the client (typically with `554`),
   or `{:pause, milliseconds, state}` to wait that long before the
   greeting (see "Greeting delay" in `Sovite.SMTP.Server.Session`).
+
+  Called again, after `terminate/2`, when a proxy names another client
+  with `XCLIENT`; a pause is then skipped.
   """
   @callback init(Session.connection(), opts :: term()) ::
               {:ok, state()} | {:pause, non_neg_integer(), state()} | {:close, Reply.t(), state()}

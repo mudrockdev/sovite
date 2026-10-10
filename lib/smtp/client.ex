@@ -55,7 +55,7 @@ defmodule Sovite.SMTP.Client do
   """
 
   alias Sovite.SASL
-  alias Sovite.SMTP.{DataEncoder, Reply}
+  alias Sovite.SMTP.{DataEncoder, Reply, XText}
   alias Sovite.Validators
 
   @defaults [
@@ -115,6 +115,7 @@ defmodule Sovite.SMTP.Client do
           | :data
           | :data_end
           | :rset
+          | :xforward
           | :quit
 
   @typedoc """
@@ -350,6 +351,11 @@ defmodule Sovite.SMTP.Client do
     * `:body_type` - `:"7bit"`, `:"8bitmime"`, or `nil` (not declared).
     * `:requiretls` - send `REQUIRETLS`, so the server must relay the
       message only over verified TLS too (RFC 8689). Defaults to `false`.
+    * `:xforward` - the original client of the message, in the shape of
+      `t:Sovite.SMTP.Server.Session.xforward/0`, sent with Postfix's
+      `XFORWARD` before `MAIL` when the server offers it (only the
+      attributes it lists; `nil` values as `[UNAVAILABLE]`). For content
+      filters that send the mail back. Its replies are not checked.
   """
   @spec deliver(t(), String.t(), [String.t(), ...], Enumerable.t(), keyword()) ::
           {:ok, t(), [result()]} | {:error, t(), refusal()} | {:error, error()}
@@ -358,20 +364,20 @@ defmodule Sovite.SMTP.Client do
     body_type = Keyword.get(opts, :body_type)
     requiretls = Keyword.get(opts, :requiretls, false)
 
-    case check(client, sender, recipients, size, body_type, requiretls) do
-      :ok ->
-        mail = [
-          "MAIL FROM:<",
-          sender,
-          ">",
-          mail_params(client, size, body_type),
-          if(requiretls, do: " REQUIRETLS", else: [])
-        ]
+    with :ok <- check(client, sender, recipients, size, body_type, requiretls),
+         {:ok, client} <- xforward(client, Keyword.get(opts, :xforward)) do
+      mail = [
+        "MAIL FROM:<",
+        sender,
+        ">",
+        mail_params(client, size, body_type),
+        if(requiretls, do: " REQUIRETLS", else: [])
+      ]
 
-        run_transaction(client, mail, recipients, body)
-
-      {:error, refusal} ->
-        {:error, client, refusal}
+      run_transaction(client, mail, recipients, body)
+    else
+      {:error, {:xforward, _reason}} = error -> error
+      {:error, refusal} -> {:error, client, refusal}
     end
   end
 
@@ -505,6 +511,68 @@ defmodule Sovite.SMTP.Client do
         else: []
 
     [size, body]
+  end
+
+  @xforward_names [
+    name: "NAME",
+    addr: "ADDR",
+    port: "PORT",
+    proto: "PROTO",
+    helo: "HELO",
+    ident: "IDENT",
+    source: "SOURCE"
+  ]
+
+  # Postfix limits each XFORWARD command to 512 bytes.
+  @xforward_line 512
+
+  defp xforward(client, attributes) when is_map(attributes) and map_size(attributes) > 0 do
+    offered =
+      case Map.fetch(client.extensions, "XFORWARD") do
+        {:ok, names} -> names |> String.upcase(:ascii) |> String.split(" ", trim: true)
+        :error -> []
+      end
+
+    pairs =
+      for {key, name} <- @xforward_names,
+          Map.has_key?(attributes, key),
+          name in offered,
+          do: name <> "=" <> xforward_value(key, Map.fetch!(attributes, key))
+
+    pairs
+    |> xforward_lines()
+    |> Enum.reduce_while({:ok, client}, fn line, {:ok, client} ->
+      case command(client, :xforward, line) do
+        {:ok, _reply, client} -> {:cont, {:ok, client}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp xforward(client, _attributes), do: {:ok, client}
+
+  defp xforward_value(_key, nil), do: "[UNAVAILABLE]"
+  defp xforward_value(:addr, {_, _, _, _} = ip), do: ip |> :inet.ntoa() |> to_string()
+  defp xforward_value(:addr, ip) when tuple_size(ip) == 8, do: "IPV6:#{:inet.ntoa(ip)}"
+  defp xforward_value(:port, port) when is_integer(port), do: Integer.to_string(port)
+  defp xforward_value(_key, value), do: XText.encode(to_string(value))
+
+  defp xforward_lines([]), do: []
+
+  defp xforward_lines(pairs) do
+    pairs
+    |> Enum.chunk_while(
+      [],
+      fn pair, acc ->
+        line = Enum.join(Enum.reverse([pair | acc]), " ")
+
+        if acc != [] and byte_size("XFORWARD " <> line) > @xforward_line,
+          do: {:cont, acc, [pair]},
+          else: {:cont, [pair | acc]}
+      end,
+      fn acc -> {:cont, acc, []} end
+    )
+    |> Enum.map(&("XFORWARD " <> Enum.join(Enum.reverse(&1), " ")))
   end
 
   defp run_transaction(client, mail, recipients, body) do

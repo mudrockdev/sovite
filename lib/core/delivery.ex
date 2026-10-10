@@ -115,7 +115,8 @@ defmodule Sovite.Core.Delivery do
           message_offset: non_neg_integer(),
           message_size: non_neg_integer(),
           prefix: binary(),
-          requiretls: boolean()
+          requiretls: boolean(),
+          xforward: Sovite.SMTP.Server.Session.xforward() | nil
         }
 
   @type result :: {String.t(), Record.status(), Record.details()}

@@ -373,4 +373,104 @@ defmodule Sovite.SMTP.ClientTest do
       end
     end
   end
+
+  describe "deliver/5 with XFORWARD" do
+    # Answers like a server that offers XFORWARD NAME ADDR HELO, and
+    # sends the test every command line.
+    defp xforward_server(test) do
+      raw_server(fn socket ->
+        :gen_tcp.send(socket, "220 filter.test ESMTP\r\n")
+        :ok = :inet.setopts(socket, packet: :line)
+        xforward_loop(socket, test)
+      end)
+    end
+
+    defp xforward_loop(socket, test) do
+      {:ok, line} = :gen_tcp.recv(socket, 0, 5_000)
+      line = String.trim_trailing(line, "\r\n")
+      send(test, {:line, line})
+
+      reply =
+        case line do
+          "EHLO " <> _ -> "250-filter.test\r\n250-XFORWARD NAME ADDR HELO\r\n250 8BITMIME\r\n"
+          "XFORWARD " <> _ -> "250 2.0.0 Ok\r\n"
+          "MAIL " <> _ -> "250 2.1.0 Ok\r\n"
+          "RCPT " <> _ -> "250 2.1.5 Ok\r\n"
+          "DATA" -> "354 Go\r\n"
+          "." -> "250 2.0.0 Ok: queued\r\n"
+          _ -> nil
+        end
+
+      if reply, do: :gen_tcp.send(socket, reply)
+      xforward_loop(socket, test)
+    end
+
+    test "sends the attributes the server offers before MAIL" do
+      port = xforward_server(self())
+      {:ok, client} = Client.connect({127, 0, 0, 1}, port, helo: "mx.example.org")
+
+      xforward = %{
+        name: "client.example",
+        addr: {0x2001, 0xDB8, 0, 0, 0, 0, 0, 1},
+        port: 4711,
+        helo: nil,
+        source: "REMOTE"
+      }
+
+      assert {:ok, client, [{"b@example.net", :data_end, %Reply{code: 250}}]} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body],
+                 xforward: xforward
+               )
+
+      assert_receive {:line, "EHLO mx.example.org"}
+
+      assert_receive {:line,
+                      "XFORWARD NAME=client.example ADDR=IPV6:2001:db8::1 HELO=[UNAVAILABLE]"}
+
+      assert_receive {:line, "MAIL FROM:<a@example.org>"}
+
+      # IPv4, xtext, and nothing to send for a server without XFORWARD
+      # attributes in common.
+      assert {:ok, client, _} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body],
+                 xforward: %{addr: {192, 0, 2, 1}, helo: "a b"}
+               )
+
+      assert_receive {:line, "XFORWARD ADDR=192.0.2.1 HELO=a+20b"}
+
+      assert {:ok, _client, _} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body],
+                 xforward: %{ident: "x"}
+               )
+
+      assert_receive {:line, "MAIL FROM:<a@example.org>"}
+      refute_received {:line, "XFORWARD" <> _}
+    end
+
+    test "splits long attribute lists" do
+      port = xforward_server(self())
+      {:ok, client} = Client.connect({127, 0, 0, 1}, port, helo: "mx.example.org")
+      long = String.duplicate("a", 250) <> ".example"
+
+      assert {:ok, _client, _} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body],
+                 xforward: %{name: long, helo: long, addr: {192, 0, 2, 1}}
+               )
+
+      assert_receive {:line, "XFORWARD NAME=" <> _ = first}
+      assert_receive {:line, "XFORWARD HELO=" <> _ = second}
+      assert byte_size(first) <= 512 and first =~ " ADDR=192.0.2.1"
+      refute second =~ "ADDR"
+    end
+
+    test "a server without XFORWARD gets none" do
+      mta = start_mta()
+      client = connect!(mta)
+
+      assert {:ok, _client, [{_, :data_end, %Reply{code: 250}}]} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body],
+                 xforward: %{name: "client.example"}
+               )
+    end
+  end
 end

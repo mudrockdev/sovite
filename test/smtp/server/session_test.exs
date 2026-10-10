@@ -895,4 +895,193 @@ defmodule Sovite.SMTP.Server.SessionTest do
       assert codes(out) == [552, 552]
     end
   end
+
+  describe "XCLIENT and XFORWARD" do
+    defp proxied(handler_opts \\ [], opts \\ []) do
+      opts = Keyword.merge([xclient_networks: [{{192, 0, 2, 0}, 24}]], opts)
+      session = started(handler_opts, opts)
+      {:continue, out, session} = input(session, "EHLO proxy.test\r\n")
+
+      assert out =~
+               "250 XCLIENT NAME REVERSE_NAME ADDR PORT PROTO HELO LOGIN DESTADDR DESTPORT\r\n"
+
+      assert_received {:init, _}
+      session
+    end
+
+    test "are only offered to and accepted from the configured networks" do
+      session = started()
+      {:continue, out, session} = input(session, "EHLO c.test\r\n")
+      refute out =~ "XCLIENT"
+      refute out =~ "XFORWARD"
+
+      {:continue, out, _} =
+        input(session, "XCLIENT ADDR=198.51.100.1\r\nXFORWARD NAME=a.test\r\n")
+
+      assert replies(out) ==
+               ["550 5.7.0 Error: insufficient authorization"]
+               |> List.duplicate(2)
+               |> List.flatten()
+    end
+
+    test "XCLIENT starts over with the client the proxy names" do
+      session = proxied()
+
+      {:continue, out, session} =
+        input(
+          session,
+          "XCLIENT ADDR=IPV6:2001:db8::1 PORT=4711 NAME=client.example DESTADDR=203.0.113.5 " <>
+            "DESTPORT=25 LOGIN=alice HELO=client.example PROTO=ESMTP\r\n"
+        )
+
+      assert out == "220 mx.test ESMTP\r\n"
+      assert_received {:terminate, :xclient}
+
+      assert_received {:init,
+                       %{
+                         remote_ip: {0x2001, 0xDB8, 0, 0, 0, 0, 0, 1},
+                         remote_port: 4711,
+                         client_name: "client.example",
+                         local_ip: {203, 0, 113, 5},
+                         local_port: 25,
+                         login: "alice",
+                         session_id: "S1"
+                       }}
+
+      assert_received {:helo, {:ehlo, "client.example"}}
+      assert Session.identity(session) == "alice"
+
+      # HELO was given: MAIL may follow at once, and the proxy may send
+      # XCLIENT again.
+      {:continue, out, session} = input(session, "MAIL FROM:<a@x.test>\r\n")
+      assert codes(out) == [250]
+      {:continue, out, session} = input(session, "XCLIENT ADDR=192.0.2.9\r\n")
+      assert replies(out) == ["503 5.5.1 Error: MAIL transaction in progress"]
+      {:continue, _out, session} = input(session, "RSET\r\n")
+      {:continue, out, _} = input(session, "XCLIENT ADDR=192.0.2.9 LOGIN=[UNAVAILABLE]\r\n")
+      assert out == "220 mx.test ESMTP\r\n"
+      assert_received {:init, %{remote_ip: {192, 0, 2, 9}, login: nil}}
+    end
+
+    test "XCLIENT without HELO needs a new EHLO, and a refused HELO is forgotten" do
+      session =
+        proxied(
+          helo: fn {_kind, name}, state ->
+            if name == "bad.example",
+              do: {:reply, Reply.new(550, "5.7.1", "No"), state},
+              else: {:ok, state}
+          end
+        )
+
+      {:continue, "220 mx.test ESMTP\r\n", session} = input(session, "XCLIENT ADDR=192.0.2.8\r\n")
+      {:continue, out, session} = input(session, "MAIL FROM:<a@x.test>\r\n")
+      assert replies(out) == ["503 5.5.1 Send HELO/EHLO first"]
+
+      {:continue, _out, session} = input(session, "XCLIENT HELO=bad.example PROTO=SMTP\r\n")
+      assert_received {:helo, {:helo, "bad.example"}}
+      {:continue, out, _} = input(session, "MAIL FROM:<a@x.test>\r\n")
+      assert replies(out) == ["503 5.5.1 Send HELO/EHLO first"]
+    end
+
+    test "XCLIENT refuses bad attributes" do
+      session = proxied()
+
+      for {line, name} <- [
+            {"XCLIENT FOO=1", "FOO"},
+            {"XCLIENT ADDR=999.1.1.1", "ADDR"},
+            {"XCLIENT PORT=70000", "PORT"},
+            {"XCLIENT NAME=-bad-", "NAME"},
+            {"XCLIENT HELO=a..b", "HELO"},
+            {"XCLIENT PROTO=UUCP", "PROTO"}
+          ] do
+        {:continue, out, _} = input(session, line <> "\r\n")
+        assert replies(out) == ["501 5.5.4 Bad XCLIENT attribute: #{name}"]
+      end
+
+      {:continue, out, _} = input(session, "XCLIENT ADDR=[TEMPUNAVAIL] PORT=[UNAVAILABLE]\r\n")
+      assert out == "220 mx.test ESMTP\r\n"
+      assert_received {:init, %{remote_ip: {192, 0, 2, 7}} = connection}
+      refute Map.has_key?(connection, :remote_port)
+    end
+
+    test "a handler that refuses the new client closes the session" do
+      init = fn connection, state ->
+        if connection.remote_ip == {198, 51, 100, 1},
+          do: {:close, Reply.new(554, "5.7.1", "Go away"), state},
+          else: {:ok, state}
+      end
+
+      session = proxied(init: init)
+      assert {:close, out, _} = input(session, "XCLIENT ADDR=198.51.100.1\r\n")
+      assert out == "554 5.7.1 Go away\r\n"
+    end
+
+    test "a greeting delay is skipped after XCLIENT" do
+      init = fn connection, state ->
+        if connection.remote_ip == {198, 51, 100, 1},
+          do: {:pause, 60_000, state},
+          else: {:ok, state}
+      end
+
+      session = proxied(init: init)
+
+      assert {:continue, "220 mx.test ESMTP\r\n", _} =
+               input(session, "XCLIENT ADDR=198.51.100.1\r\n")
+    end
+
+    test "XFORWARD attributes go with the next transaction only" do
+      session = started([], xforward_networks: [{{192, 0, 2, 0}, 24}])
+      {:continue, out, session} = input(session, "EHLO filter.test\r\n")
+      assert out =~ "250 XFORWARD NAME ADDR PORT PROTO HELO IDENT SOURCE\r\n"
+
+      {:continue, out, session} =
+        input(
+          session,
+          "XFORWARD NAME=client.example ADDR=IPV6:2001:db8::2 PORT=1234\r\n" <>
+            "XFORWARD PROTO=ESMTP HELO=client.example IDENT=abc SOURCE=remote\r\n" <>
+            "MAIL FROM:<a@x.test>\r\nRCPT TO:<b@y.test>\r\nDATA\r\n"
+        )
+
+      assert codes(out) == [250, 250, 250, 250, 354]
+      {:continue, _out, session} = input(session, "x\r\n.\r\n")
+
+      assert_received {:data_end,
+                       %{
+                         xforward: %{
+                           name: "client.example",
+                           addr: {0x2001, 0xDB8, 0, 0, 0, 0, 0, 2},
+                           port: 1234,
+                           proto: "ESMTP",
+                           helo: "client.example",
+                           ident: "abc",
+                           source: "REMOTE"
+                         }
+                       }}
+
+      {:continue, _out, session} =
+        input(session, "MAIL FROM:<a@x.test>\r\nRCPT TO:<b@y.test>\r\nDATA\r\n")
+
+      {:continue, _out, session} = input(session, "x\r\n.\r\n")
+      assert_received {:data_end, %{xforward: xforward}} when xforward == %{}
+
+      {:continue, out, session} =
+        input(session, "MAIL FROM:<a@x.test>\r\nXFORWARD NAME=a.test\r\n")
+
+      assert replies(out) == ["250 2.1.0 Ok", "503 5.5.1 Error: MAIL transaction in progress"]
+      {:continue, _out, session} = input(session, "RSET\r\n")
+
+      for {line, name} <- [
+            {"XFORWARD ADDR=x", "ADDR"},
+            {"XFORWARD PORT=-1", "PORT"},
+            {"XFORWARD SOURCE=MARS", "SOURCE"},
+            {"XFORWARD LOGIN=alice", "LOGIN"}
+          ] do
+        {:continue, out, _} = input(session, line <> "\r\n")
+        assert replies(out) == ["501 5.5.4 Bad XFORWARD attribute: #{name}"]
+      end
+
+      {:continue, out, _} = input(session, "XFORWARD ADDR=[UNAVAILABLE]\r\n")
+      assert codes(out) == [250]
+    end
+  end
 end

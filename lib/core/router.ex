@@ -244,6 +244,25 @@ defmodule Sovite.Core.Router do
   end
 
   @doc """
+  Routes a message to its content filter (`Sovite.Queue.Envelope`): an
+  `smtp` or `lmtp` transport with a next hop. SMTP to a filter connects
+  from no particular address and does not log in.
+  """
+  @spec filter(String.t()) :: route()
+  def filter(spec) do
+    case Transport.parse(spec) do
+      {:ok, %{transport: :smtp, nexthop: %{} = host}} ->
+        {:deliver, %{transport: :smtp, nexthop: {:host, host}, source: %{}, auth: nil}}
+
+      {:ok, %{transport: :lmtp, nexthop: nexthop} = transport} when nexthop != nil ->
+        resolve(nil, "", "", transport)
+
+      _ ->
+        {:defer, "4.3.5", "invalid content filter #{inspect(spec)}"}
+    end
+  end
+
+  @doc """
   Returns a destination or next hop as text, for logs: `"example.com"`,
   `"[192.0.2.1]"`, or the host as configured (`"[smtp.example.com]:587"`).
   LMTP destinations are the socket path or `host:port`, the others

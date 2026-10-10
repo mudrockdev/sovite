@@ -189,12 +189,12 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 9 — Ecosystem Compatibility
 
-- [ ] **Milter protocol** (Sendmail milter v6) client: works with Rspamd, OpenDKIM, OpenDMARC, ClamAV-milter
-- [ ] **Postfix policy delegation protocol**: works with policyd-spf, postgrey, and other existing policy servers
-- [ ] **`sendmail(1)`-compatible binary** (`sendmail`, `mailq`, `newaliases`) for local apps and cron
-- [ ] PROXY protocol v1/v2 (behind HAProxy / load balancers)
-- [ ] XCLIENT / XFORWARD (optional, for proxies and content filters)
-- [ ] Content filter re-injection (after-queue filtering via SMTP/LMTP)
+- [x] **Milter protocol** (Sendmail milter v6) client: works with Rspamd, OpenDKIM, OpenDMARC, ClamAV-milter
+- [x] **Postfix policy delegation protocol**: works with policyd-spf, postgrey, and other existing policy servers
+- [x] **`sendmail(1)`-compatible binary** (`sendmail`, `mailq`, `newaliases`) for local apps and cron
+- [x] PROXY protocol v1/v2 (behind HAProxy / load balancers)
+- [x] XCLIENT / XFORWARD (optional, for proxies and content filters)
+- [x] Content filter re-injection (after-queue filtering via SMTP/LMTP)
 - [ ] Postfix config migration tool: read `main.cf` / `master.cf` and produce a Sovite config plus a report of unsupported settings
 
 **Done when:** a stock Postfix + Rspamd + Dovecot setup can be migrated to Sovite + Rspamd + Dovecot with the migration tool.

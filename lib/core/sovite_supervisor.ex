@@ -290,7 +290,10 @@ defmodule Sovite.Core.Supervisor do
         screen: listener.screen,
         screen_cache: @screen_cache,
         rate_limit: @rate_limit,
-        outbound: runtime.outbound
+        outbound: runtime.outbound,
+        content_filter: listener.content_filter,
+        reinjection: listener.reinjection,
+        milters: listener.milters
       )
 
     {Sovite.SMTP.Server,
@@ -299,6 +302,9 @@ defmodule Sovite.Core.Supervisor do
      port: port,
      max_connections: smtp.max_connections,
      max_connections_per_ip: smtp.max_connections_per_ip,
+     proxy_protocol: listener.proxy_protocol,
+     proxy_networks: smtp.proxy_networks,
+     proxy_timeout: smtp.proxy_timeout,
      hostname: config.server.hostname,
      handler: {SMTPHandler, handler},
      max_message_size: smtp.max_message_size,
@@ -318,7 +324,9 @@ defmodule Sovite.Core.Supervisor do
      requiretls: smtp.requiretls and mode != :lmtp,
      tarpit_after: smtp.tarpit_after,
      tarpit_delay: smtp.tarpit_delay,
-     forbid_unauth_pipelining: smtp.forbid_unauth_pipelining and mode != :lmtp}
+     forbid_unauth_pipelining: smtp.forbid_unauth_pipelining and mode != :lmtp,
+     xclient_networks: smtp.xclient_networks,
+     xforward_networks: smtp.xforward_networks}
   end
 
   defp tls_options(nil, _listener), do: nil

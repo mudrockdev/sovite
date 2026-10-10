@@ -15,6 +15,13 @@ defmodule Sovite.Core.QueueManager do
   at most `delivery.max_recipients` recipients each. Jobs run in
   `Sovite.Core.Delivery` workers.
 
+  A message with a content filter (`smtp.content_filter`, see
+  `Sovite.Queue.Envelope`) goes to the filter instead, for all its
+  recipients at once, with its original sender and without
+  `REQUIRETLS`. When the filter offers `XFORWARD`, it is told the
+  original client, `HELO` name, and queue ID. Its job is then done: the
+  filter sends the message back as a new one.
+
   Each job's results are appended to the queue file and `fsync`ed before
   anything else happens, so a crash never loses a delivery result: at
   worst, the recipients of the jobs in flight are delivered again, which
@@ -472,10 +479,16 @@ defmodule Sovite.Core.QueueManager do
   defp plan(state, id, message) do
     envelope = message.entry.envelope
 
+    route =
+      case envelope.content_filter do
+        nil -> &Router.route(state.opts.routing, envelope.sender, &1)
+        filter -> fn _rcpt -> Router.filter(filter) end
+      end
+
     {remote, immediate} =
       message.entry
       |> Entry.pending()
-      |> Enum.map(&{&1, Router.route(state.opts.routing, envelope.sender, &1)})
+      |> Enum.map(&{&1, route.(&1)})
       |> Enum.split_with(&match?({_rcpt, {:deliver, _}}, &1))
 
     message = record_results(message, Enum.map(immediate, &immediate_result/1))
@@ -500,7 +513,8 @@ defmodule Sovite.Core.QueueManager do
           message_offset: message.message_offset,
           message_size: message.message_size,
           prefix: message.prefix,
-          requiretls: envelope.requiretls
+          requiretls: envelope.requiretls and envelope.content_filter == nil,
+          xforward: if(envelope.content_filter, do: xforward(envelope))
         }
       end
 
@@ -518,8 +532,26 @@ defmodule Sovite.Core.QueueManager do
     end
   end
 
+  # What the content filter is told about the message's origin.
+  defp xforward(envelope) do
+    %{
+      addr: envelope.remote_ip,
+      helo: envelope.helo,
+      proto: proto(envelope.protocol),
+      ident: envelope.queue_id,
+      source: if(envelope.auth_user || envelope.remote_ip == nil, do: "LOCAL", else: "REMOTE")
+    }
+  end
+
+  defp proto("E" <> _), do: "ESMTP"
+  defp proto("SMTP" <> _), do: "SMTP"
+  defp proto(_protocol), do: nil
+
   # Mail forwarded to another domain goes out with its SRS sender, if it
-  # has one, so SPF passes at the destination.
+  # has one, so SPF passes at the destination. Not to a content filter.
+  defp job_sender(_state, %{content_filter: filter} = envelope, _rcpt, _route) when filter != nil,
+    do: envelope.sender
+
   defp job_sender(state, %{srs_sender: srs} = envelope, rcpt, {:deliver, %{transport: :smtp}})
        when srs != nil do
     with {:ok, {_local, domain}} <- Sovite.Validators.split_mailbox(rcpt),

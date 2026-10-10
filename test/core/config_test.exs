@@ -83,7 +83,11 @@ defmodule Sovite.Core.ConfigTest do
              require_auth: false,
              screen: true,
              tls_min_version: nil,
-             tls_ciphers: nil
+             tls_ciphers: nil,
+             proxy_protocol: false,
+             milters: [],
+             content_filter: nil,
+             reinjection: false
            }
 
     assert config.smtp.trusted_networks == []
@@ -631,6 +635,127 @@ defmodule Sovite.Core.ConfigTest do
       assert Enum.map(errors, &Exception.message/1) == [
                "mta_sts.serve: needs a TLS certificate ([[tls.certificate]] or [tls.acme])",
                "mta_sts.max_age: must be at most 365.25 days"
+             ]
+    end
+  end
+
+  describe "Phase 9 settings" do
+    test "defaults: no milters, filters, proxies, or policy servers" do
+      {:ok, config} = Config.parse(~s([server]\nhostname = "mx.example.org"))
+      assert config.milter == []
+      assert %{content_filter: nil, xclient_networks: [], proxy_networks: nil} = config.smtp
+      assert config.smtp.proxy_timeout == 10_000
+
+      assert config.policy == %{
+               timeout: 100_000,
+               default_action: "451 4.3.5 Server configuration problem"
+             }
+
+      assert config.sendmail == %{
+               server: %{host: "[127.0.0.1]", port: 25, mx: false},
+               origin: nil
+             }
+    end
+
+    test "milters apply to every listener but LMTP and re-injection ones" do
+      {:ok, config} =
+        Config.parse("""
+        [smtp]
+        content_filter = "smtp:[127.0.0.1]:10024"
+        [[milter]]
+        name = "rspamd"
+        address = "inet:127.0.0.1:11332"
+        default_action = "accept"
+        [[milter]]
+        address = "inet:8891@localhost"
+        [[milter]]
+        address = "unix:/run/opendmarc/milter.sock"
+        content_timeout = "1m"
+        [[listener]]
+        port = 25
+        proxy_protocol = true
+        [[listener]]
+        port = 2525
+        milters = ["rspamd"]
+        content_filter = ""
+        [[listener]]
+        mode = "lmtp"
+        [[listener]]
+        address = "127.0.0.1"
+        port = 10025
+        reinjection = true
+        content_filter = "smtp:[127.0.0.1]:10026"
+        """)
+
+      assert [
+               %{name: "rspamd", address: %{address: {:inet, {127, 0, 0, 1}, 11_332}}} = rspamd,
+               %{name: "inet:8891@localhost", address: %{address: {:inet, "localhost", 8891}}},
+               %{
+                 name: "unix:/run/opendmarc/milter.sock",
+                 address: %{address: {:unix, "/run/opendmarc/milter.sock"}}
+               } = dmarc
+             ] = config.milter
+
+      assert rspamd.default_action == :accept and rspamd.command_timeout == 30_000
+      assert dmarc.default_action == :tempfail and dmarc.content_timeout == 60_000
+      names = ["rspamd", "inet:8891@localhost", "unix:/run/opendmarc/milter.sock"]
+
+      assert [
+               %{milters: ^names, content_filter: "smtp:[127.0.0.1]:10024", proxy_protocol: true},
+               %{milters: ["rspamd"], content_filter: nil},
+               %{milters: [], content_filter: "smtp:[127.0.0.1]:10024"},
+               %{milters: [], content_filter: nil, screen: false, reinjection: true}
+             ] = config.listener
+    end
+
+    test "rejects bad milters, filters, and policy settings" do
+      {:error, errors} =
+        Config.parse("""
+        [smtp]
+        content_filter = "local"
+        xclient_networks = ["nope"]
+        [sendmail]
+        server = "::"
+        [[milter]]
+        address = "tcp:1.2.3.4"
+        [[milter]]
+        name = "a"
+        address = "inet:host"
+        [[milter]]
+        name = "a"
+        address = "inet:1@[::1]"
+        [[listener]]
+        milters = ["b"]
+        content_filter = "smtp"
+        """)
+
+      assert [
+               "listener[0].content_filter: \"smtp\" is not a content filter" <> _,
+               "milter[0].address: \"tcp:1.2.3.4\" is not a milter address" <> _,
+               "milter[1].address: \"inet:host\" is not a milter address" <> _,
+               "sendmail.server: " <> _,
+               "smtp.content_filter: \"local\" is not a content filter" <> _,
+               "smtp.xclient_networks[0]: " <> _
+             ] = errors |> Enum.map(&Exception.message/1) |> Enum.sort()
+
+      {:error, errors} =
+        Config.parse("""
+        [[milter]]
+        name = "a"
+        address = "inet:1@[::1]"
+        [[milter]]
+        name = "a"
+        address = "unix:/x"
+        [[listener]]
+        milters = ["b"]
+        [policy]
+        default_action = "MAYBE"
+        """)
+
+      assert Enum.map(errors, &Exception.message/1) == [
+               "policy.default_action: is not a policy action, such as \"DUNNO\" or \"451 4.3.5 Try again later\"",
+               "listener[0].milters: no [[milter]] is named \"b\"",
+               "milter[1].name: \"a\" names another milter already"
              ]
     end
   end

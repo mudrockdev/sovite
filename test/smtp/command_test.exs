@@ -5,6 +5,7 @@ defmodule Sovite.SMTP.CommandTest do
   import Sovite.SMTP.Command, only: [parse: 1]
 
   doctest Sovite.SMTP.Command
+  doctest Sovite.SMTP.XText
 
   test "parses simple commands case-insensitively" do
     assert parse("EHLO client.example") == {:ok, {:ehlo, "client.example"}}
@@ -80,6 +81,19 @@ defmodule Sovite.SMTP.CommandTest do
     assert parse("BDAT 100 LAST") == {:error, nil, :not_implemented}
     assert parse("GET / HTTP/1.1") == {:error, nil, :non_smtp}
     assert parse("POST /form HTTP/1.1") == {:error, nil, :non_smtp}
+  end
+
+  test "parses XCLIENT and XFORWARD attributes" do
+    assert parse("XCLIENT ADDR=192.0.2.1 name=mail.example.com") ==
+             {:ok, {:xclient, [{"ADDR", "192.0.2.1"}, {"NAME", "mail.example.com"}]}}
+
+    assert parse("XFORWARD HELO=[UNAVAILABLE] IDENT=a+20b PROTO=[TEMPUNAVAIL]") ==
+             {:ok, {:xforward, [{"HELO", nil}, {"IDENT", "a b"}, {"PROTO", nil}]}}
+
+    assert parse("XCLIENT") == {:error, :xclient, :syntax}
+    assert parse("XCLIENT ADDR") == {:error, :xclient, :syntax}
+    assert parse("XFORWARD IDENT=a+2") == {:error, :xforward, :syntax}
+    assert parse("XFORWARD 1A=b") == {:error, :xforward, :syntax}
   end
 
   test "parses STARTTLS and AUTH" do

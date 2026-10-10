@@ -1,0 +1,11 @@
+#!/bin/sh
+# sendmail(1) for local programs: runs Sovite.Core.Sendmail without starting
+# the MTA. Link it where programs look for it, such as /usr/sbin/sendmail.
+set -e
+SELF=$(readlink -f "$0")
+BIN_DIR=$(dirname "$SELF")
+# Distribution is not used, so users that cannot read the release cookie
+# can still send mail.
+RELEASE_COOKIE="${RELEASE_COOKIE:-unused}"
+export RELEASE_COOKIE
+exec "$BIN_DIR/sovite" eval "Sovite.Core.Sendmail.main(System.argv())" "$@"

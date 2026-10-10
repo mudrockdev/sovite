@@ -11,6 +11,7 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :listener, :connection, :start]` | `system_time` | `listener`, `remote_ip`, `remote_port` |
   | `[:sovite, :listener, :connection, :stop]` | `duration` | `listener`, `remote_ip`, `remote_port` |
   | `[:sovite, :listener, :connection, :rejected]` | | `listener`, `remote_ip`, `reason` |
+  | `[:sovite, :listener, :proxy, :error]` | | `listener`, `remote_ip`, `reason` |
   | `[:sovite, :smtp, :server, :session, :start]` | `system_time` | `session_id`, `remote_ip` |
   | `[:sovite, :smtp, :server, :session, :stop]` | `duration` | `session_id`, `remote_ip` |
   | `[:sovite, :smtp, :server, :command, :stop]` | `duration` | `session_id`, `remote_ip`, `command`, `argument`, `reply_code`, `reply` |
@@ -24,6 +25,12 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :screen, :rejected]` | `score` | `session_id`, `remote_ip`, `stage`, `reasons` |
   | `[:sovite, :greylist, :deferred]` | `retry_after` | `client_network`, `sender`, `recipient` |
   | `[:sovite, :outbound, :suspended]` | `sent`, `failed` | `user`, `suspend_time` |
+  | `[:sovite, :restrictions, :warn]` | | `stage`, `check`, `text` |
+  | `[:sovite, :milter, :connect, :stop]` | `duration` | `milter`, `address`, `result` |
+  | `[:sovite, :milter, :reply]` | `duration` | `milter`, `stage`, `reply` |
+  | `[:sovite, :milter, :error]` | | `milter`, `stage`, `reason` |
+  | `[:sovite, :policy, :client, :request, :stop]` | `duration` | `address`, `action` |
+  | `[:sovite, :policy, :client, :error]` | `duration` | `address`, `reason` |
   | `[:sovite, :tls, :certificate, :loaded]` | | `cert_file`, `names`, `not_after` |
   | `[:sovite, :tls, :certificate, :error]` | | `cert_file`, `reason` |
   | `[:sovite, :tls, :acme, :issued]` | | `domains`, `not_after` |
@@ -56,10 +63,12 @@ defmodule Sovite.Core.Telemetry do
   authentication results of received mail, sent DMARC reports,
   successful logins, certificate loads and ACME issuance, failed TLS
   handshakes, SMTP commands that got a 4xx or 5xx reply, clients the
-  screen refused, exceeded rate limits, and failed DNS list lookups are
-  logged at `:info`. Corrupt messages, discarded notifications, failed
-  logins, bans, suspended users, certificate errors, and failed ACME
-  orders are logged at `:warning`.
+  screen refused, exceeded rate limits, failed DNS list lookups, and
+  connections without a valid PROXY protocol header are logged at
+  `:info`. Corrupt messages, discarded notifications, failed logins,
+  bans, suspended users, certificate errors, failed ACME orders,
+  `WARN` results of restrictions, and failed policy server requests are
+  logged at `:warning`.
   All other events are logged at `:debug`.
 
   Failed logins are logged as `auth.failure: mechanism=PLAIN,
@@ -77,6 +86,7 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :listener, :connection, :start],
     [:sovite, :listener, :connection, :stop],
     [:sovite, :listener, :connection, :rejected],
+    [:sovite, :listener, :proxy, :error],
     [:sovite, :smtp, :server, :session, :start],
     [:sovite, :smtp, :server, :session, :stop],
     [:sovite, :smtp, :server, :command, :stop],
@@ -90,6 +100,12 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :screen, :rejected],
     [:sovite, :greylist, :deferred],
     [:sovite, :outbound, :suspended],
+    [:sovite, :restrictions, :warn],
+    [:sovite, :milter, :connect, :stop],
+    [:sovite, :milter, :reply],
+    [:sovite, :milter, :error],
+    [:sovite, :policy, :client, :request, :stop],
+    [:sovite, :policy, :client, :error],
     [:sovite, :tls, :certificate, :loaded],
     [:sovite, :tls, :certificate, :error],
     [:sovite, :tls, :acme, :issued],
@@ -130,7 +146,8 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :tls, :acme, :issued],
     [:sovite, :abuse, :rate_limit, :exceeded],
     [:sovite, :abuse, :dnsbl, :error],
-    [:sovite, :screen, :rejected]
+    [:sovite, :screen, :rejected],
+    [:sovite, :listener, :proxy, :error]
   ]
 
   @warning_events [
@@ -139,6 +156,8 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :auth, :failure],
     [:sovite, :abuse, :penalty, :banned],
     [:sovite, :outbound, :suspended],
+    [:sovite, :restrictions, :warn],
+    [:sovite, :policy, :client, :error],
     [:sovite, :tls, :certificate, :error],
     [:sovite, :tls, :acme, :failed],
     [:sovite, :mta_sts, :failed],

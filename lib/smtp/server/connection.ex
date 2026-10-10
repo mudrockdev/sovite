@@ -73,7 +73,9 @@ defmodule Sovite.SMTP.Server.Connection do
 
   @impl GenServer
   def handle_continue(:handshake, %{info: info} = state) do
-    with :ok <- Listener.handshake(info),
+    # With the PROXY protocol, the info now names the real client.
+    with {:ok, info} <- Listener.handshake(info),
+         state = %{state | info: info},
          {:ok, ssl_opts} <- tls_options(state),
          {:ok, state, tls} <- implicit_tls(state, ssl_opts) do
       start_session(state, ssl_opts, tls)

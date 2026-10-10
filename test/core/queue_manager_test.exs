@@ -580,6 +580,59 @@ defmodule Sovite.Core.QueueManagerTest do
     end
   end
 
+  describe "content filter" do
+    test "sends every recipient to the filter at once, with XFORWARD", context do
+      context =
+        start_mta(context,
+          extensions: [
+            "PIPELINING",
+            "8BITMIME",
+            "XFORWARD NAME ADDR PORT PROTO HELO IDENT SOURCE"
+          ]
+        )
+
+      port = FakeMTA.port(context.mta)
+      context = start_manager(context)
+
+      id =
+        enqueue(context, "alice@sender.example", ["bob@example.net", "carol@other.example"],
+          content_filter: "smtp:[127.0.0.1]:#{port}",
+          srs_sender: "SRS0=x=y=sender.example=alice@mx.example.org",
+          remote_ip: {192, 0, 2, 7},
+          helo: "client.example",
+          protocol: "ESMTPS",
+          requiretls: true
+        )
+
+      message = assert_message(context.mta)
+      assert message.mail_from == "alice@sender.example"
+      assert message.rcpt_to == ["bob@example.net", "carol@other.example"]
+      assert message.data == @body
+
+      assert message.xforward == [
+               "ADDR=192.0.2.7 PROTO=ESMTP HELO=client.example IDENT=#{id} SOURCE=REMOTE"
+             ]
+
+      assert_removed(id, :delivered)
+    end
+
+    test "an LMTP filter and an unusable one", context do
+      socket = Path.join(System.tmp_dir!(), "sovite-filter-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm(socket) end)
+      lmtp = start_supervised!({FakeMTA, owner: self(), lmtp: true, unix: socket}, id: :lmtp)
+      context = context |> start_mta() |> start_manager()
+
+      id = enqueue(context, "", ["bob@example.net"], content_filter: "lmtp:unix:#{socket}")
+      assert_receive {:fake_mta, ^lmtp, {:message, %{rcpt_to: ["bob@example.net"]}}}, @timeout
+      assert_removed(id, :delivered)
+
+      id = enqueue(context, "a@sender.example", ["bob@example.net"], content_filter: "local")
+
+      assert_receive {:telemetry, [:sovite, :queue, :message, :deferred], _, %{queue_id: ^id}},
+                     @timeout
+    end
+  end
+
   describe "relay host" do
     test "looks up the MX hosts of a relay host without brackets", context do
       context = start_mta(context)
