@@ -4,7 +4,7 @@ defmodule Sovite.SMTP.Server do
   `Sovite.SMTP.Server.Session`.
 
   Supports `PIPELINING`, `SIZE`, `8BITMIME`, `ENHANCEDSTATUSCODES`,
-  `STARTTLS`, and `AUTH`. What happens to messages is decided by a
+  `STARTTLS`, `AUTH`, and `REQUIRETLS`. What happens to messages is decided by a
   `Sovite.SMTP.Server.Handler`:
 
       children = [

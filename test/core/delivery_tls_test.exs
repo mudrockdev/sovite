@@ -166,7 +166,15 @@ defmodule Sovite.Core.DeliveryTLSTest do
   end
 
   describe "dane" do
-    defp tlsa(records), do: fn port -> %{{"_#{port}._tcp.mx.example.net", :tlsa} => records} end
+    # DANE needs MX and address records that DNSSEC authenticated.
+    @secure %{
+      {"example.net", :mx} => {:secure, [{10, "mx.example.net"}]},
+      {"mx.example.net", :a} => {:secure, [{127, 0, 0, 1}]},
+      {"mx.example.net", :aaaa} => {:secure, []}
+    }
+
+    defp tlsa(records, base \\ @secure),
+      do: fn port -> Map.put(base, {"_#{port}._tcp.mx.example.net", :tlsa}, records) end
 
     test "requires a matching certificate when TLSA records are authenticated", context do
       matching = [{3, 1, 1, spki_sha256(context.good.cert)}]
@@ -184,8 +192,15 @@ defmodule Sovite.Core.DeliveryTLSTest do
     test "falls back to opportunistic TLS without authenticated records", context do
       other = [{3, 1, 1, :crypto.hash(:sha256, "other key")}]
 
+      # Authenticated TLSA records do not count for a host whose MX or
+      # address records are not.
+      insecure_mx = Map.put(@secure, {"example.net", :mx}, [{10, "mx.example.net"}])
+      insecure_a = Map.put(@secure, {"mx.example.net", :a}, [{127, 0, 0, 1}])
+
       for dns <- [
             tlsa(other),
+            tlsa({:secure, other}, insecure_mx),
+            tlsa({:secure, other}, insecure_a),
             tlsa({:secure, [{1, 1, 1, :crypto.hash(:sha256, "pkix")}]}),
             fn _ -> %{} end
           ] do

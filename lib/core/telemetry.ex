@@ -34,6 +34,12 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :smtp, :message, :authenticated]` | | `session_id`, `queue_id`, `spf`, `dkim`, `arc`, `dmarc`, `disposition` |
   | `[:sovite, :dmarc, :report, :sent]` | `rows`, `messages` | `domain`, `report_id`, `queue_id`, `to` |
   | `[:sovite, :dmarc, :report, :skipped]` | `messages` | `domain`, `reason` |
+  | `[:sovite, :mta_sts, :fetched]` | | `domain`, `policy_id`, `mode` |
+  | `[:sovite, :mta_sts, :failed]` | | `domain`, `reason` |
+  | `[:sovite, :tls, :mta_sts, :served]` | | `domain`, `status` |
+  | `[:sovite, :tls_rpt, :report, :sent]` | `sessions` | `domain`, `report_id`, `queue_id`, `to`, `urls` |
+  | `[:sovite, :tls_rpt, :report, :skipped]` | `sessions` | `domain`, `reason` |
+  | `[:sovite, :tls_rpt, :report, :post_failed]` | | `domain`, `url`, `reason` |
 
   Delivery `:stop` events come once per recipient; `status` is
   `:delivered`, `:deferred`, or `:failed`. `:notification` events are
@@ -85,7 +91,13 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :smtp, :client, :delivery, :exception],
     [:sovite, :smtp, :message, :authenticated],
     [:sovite, :dmarc, :report, :sent],
-    [:sovite, :dmarc, :report, :skipped]
+    [:sovite, :dmarc, :report, :skipped],
+    [:sovite, :mta_sts, :fetched],
+    [:sovite, :mta_sts, :failed],
+    [:sovite, :tls, :mta_sts, :served],
+    [:sovite, :tls_rpt, :report, :sent],
+    [:sovite, :tls_rpt, :report, :skipped],
+    [:sovite, :tls_rpt, :report, :post_failed]
   ]
 
   @info_events [
@@ -97,6 +109,8 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :smtp, :client, :delivery, :exception],
     [:sovite, :smtp, :message, :authenticated],
     [:sovite, :dmarc, :report, :sent],
+    [:sovite, :mta_sts, :fetched],
+    [:sovite, :tls_rpt, :report, :sent],
     [:sovite, :auth, :success],
     [:sovite, :tls, :certificate, :loaded],
     [:sovite, :tls, :acme, :issued]
@@ -108,7 +122,9 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :auth, :failure],
     [:sovite, :abuse, :penalty, :banned],
     [:sovite, :tls, :certificate, :error],
-    [:sovite, :tls, :acme, :failed]
+    [:sovite, :tls, :acme, :failed],
+    [:sovite, :mta_sts, :failed],
+    [:sovite, :tls_rpt, :report, :post_failed]
   ]
 
   @doc "Returns every event in the catalog."

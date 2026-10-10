@@ -18,6 +18,7 @@ defmodule Sovite.DNS.Resolver do
   | `:txt`   | `String.t()`, with the record's character strings joined |
   | `:ptr`   | `String.t()` |
   | `:cname` | `String.t()` |
+  | `:ns`    | `String.t()` |
   | `:tlsa`  | `{usage, selector, matching_type, data :: binary()}` (RFC 6698) |
 
   Domain names are returned without a trailing dot.
@@ -37,7 +38,7 @@ defmodule Sovite.DNS.Resolver do
   treats resolvers without it as never authenticated.
   """
 
-  @type record_type :: :a | :aaaa | :mx | :txt | :ptr | :cname | :tlsa
+  @type record_type :: :a | :aaaa | :mx | :txt | :ptr | :cname | :ns | :tlsa
   @type record_data ::
           :inet.ip_address()
           | {non_neg_integer(), String.t()}

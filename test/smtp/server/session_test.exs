@@ -518,6 +518,33 @@ defmodule Sovite.SMTP.Server.SessionTest do
     end
   end
 
+  describe "REQUIRETLS" do
+    test "is offered and accepted only over TLS" do
+      {:continue, out, _} =
+        input(started([], requiretls: true), "EHLO c.test\r\nMAIL FROM:<a@x.test> REQUIRETLS\r\n")
+
+      refute out =~ "REQUIRETLS"
+      assert replies(out) |> List.last() == "555 5.5.4 Unsupported parameter"
+
+      connection = %{remote_ip: {192, 0, 2, 7}, session_id: "S1", tls: %{protocol: "TLSv1.3"}}
+      opts = [hostname: "mx.test", handler: {Handler, test: self()}, requiretls: true]
+      {:continue, _, session} = Session.new(connection, opts)
+
+      {:continue, out, session} =
+        input(session, "EHLO c.test\r\nMAIL FROM:<a@x.test> requiretls\r\n")
+
+      assert out =~ "250 REQUIRETLS\r\n"
+      assert replies(out) |> List.last() =~ "250 "
+      assert_received {:mail, {"a@x.test", %{requiretls: true}}}
+
+      {:continue, out, _} = input(session, "RSET\r\nMAIL FROM:<a@x.test> REQUIRETLS=yes\r\n")
+      assert replies(out) |> List.last() == "501 5.5.4 Invalid REQUIRETLS parameter"
+
+      {:continue, _, _} = input(session, "RSET\r\nMAIL FROM:<a@x.test>\r\n")
+      assert_received {:mail, {"a@x.test", %{requiretls: false}}}
+    end
+  end
+
   describe "AUTH" do
     defp auth_session(handler_opts \\ [], opts \\ []) do
       opts = Keyword.merge([auth: true, plaintext_auth: true], opts)

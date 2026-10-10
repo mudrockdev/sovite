@@ -6,6 +6,8 @@ defmodule Sovite.Core.CLITest do
   alias Sovite.Core.CLI
   alias Sovite.DKIM.SigningKey
   alias Sovite.SASL.Password
+  alias Sovite.Test.{Certs, FakeNameserver}
+  alias Sovite.TLS.MTASTS
 
   @moduletag :tmp_dir
 
@@ -64,6 +66,8 @@ defmodule Sovite.Core.CLITest do
     end
 
     test "dns records prints what a domain needs", %{tmp_dir: dir} do
+      cert = Certs.issue(Certs.ca(), names: ["mx.example.com"])
+      {cert_file, key_file} = Certs.write!(dir, "mx", cert)
       key = Path.join(dir, "key.pem")
       File.write!(key, SigningKey.generate(:rsa, 2048))
       config = Path.join(dir, "sovite.toml")
@@ -73,6 +77,11 @@ defmodule Sovite.Core.CLITest do
       hostname = "mx.example.com"
       [delivery]
       source_address = ["192.0.2.25", "2001:db8::25"]
+      [[tls.certificate]]
+      cert_file = "#{cert_file}"
+      key_file = "#{key_file}"
+      [mta_sts]
+      mode = "enforce"
       [[dkim.key]]
       domain = "example.com"
       selector = "old"
@@ -98,8 +107,15 @@ defmodule Sovite.Core.CLITest do
       assert output =~
                ~s(_dmarc.example.com. IN TXT "v=DMARC1; p=none; rua=mailto:postmaster@example.com")
 
-      assert output =~ ~s(_mta-sts.example.com. IN TXT "v=STSv1; id=)
-      assert output =~ ";   mx: mx.example.com"
+      policy = MTASTS.policy_text(:enforce, ["mx.example.com"], 604_800)
+      id = MTASTS.policy_id(policy)
+      assert output =~ ~s(_mta-sts.example.com. IN TXT "v=STSv1; id=#{id}")
+      assert output =~ ";   mode: enforce\n;   mx: mx.example.com\n"
+
+      {:Certificate, tbs, _, _} = :public_key.pkix_decode_cert(cert.cert, :plain)
+      spki = :public_key.der_encode(:SubjectPublicKeyInfo, elem(tbs, 7))
+      tlsa = :sha256 |> :crypto.hash(spki) |> Base.encode16(case: :lower)
+      assert output =~ "_25._tcp.mx.example.com. IN TLSA 3 1 1 #{tlsa}\n"
 
       assert output =~
                ~s(_smtp._tls.example.com. IN TXT "v=TLSRPTv1; rua=mailto:postmaster@example.com")
@@ -114,6 +130,35 @@ defmodule Sovite.Core.CLITest do
 
       assert stderr =~ "invalid TOML"
       assert capture_io(:stderr, fn -> assert CLI.run(["dns", "frob"]) == 64 end) =~ "Usage"
+    end
+
+    test "dns check asks the configured resolver", %{tmp_dir: dir} do
+      {:ok, ns} =
+        FakeNameserver.start_link(%{
+          {".", :ns} => {:secure, [~c"a.root-servers.net"]}
+        })
+
+      {{127, 0, 0, 1}, port} = FakeNameserver.address(ns)
+      config = Path.join(dir, "sovite.toml")
+      write = &File.write!(config, "[dns]\nnameservers = [\"127.0.0.1\"]\nport = #{port}\n" <> &1)
+
+      write.("")
+
+      assert capture_io(fn -> assert CLI.run(["--config", config, "dns", "check"]) == 0 end) =~
+               "validates DNSSEC"
+
+      write.(~s(dnssec = "off"\n))
+
+      assert capture_io(fn -> assert CLI.run(["--config", config, "dns", "check"]) == 1 end) =~
+               "DANE will not be used"
+
+      {:ok, empty} = FakeNameserver.start_link(%{})
+      {_, port} = FakeNameserver.address(empty)
+      File.write!(config, "[dns]\nnameservers = [\"127.0.0.1\"]\nport = #{port}\n")
+
+      assert capture_io(:stderr, fn ->
+               assert CLI.run(["--config", config, "dns", "check"]) == 1
+             end) =~ "cannot query the DNS resolver: nxdomain"
     end
   end
 

@@ -174,6 +174,7 @@ Settings for all listeners. Limits apply per listener.
 | `vrfy` | boolean | `false` | Answer `VRFY` from `domains.local_recipients`. When off, `VRFY` gets `252`. |
 | `trusted_networks` | array of networks | `[]` | Clients that may relay mail to any domain, such as your own servers. Addresses or CIDR networks: `["127.0.0.1", "192.0.2.0/24", "2001:db8::/32"]`. |
 | `max_hops` | integer | `50` | A message with more `Received:` fields than this is refused with `554 5.4.6 Too many hops`: it is most likely in a mail loop (RFC 5321 §6.3). |
+| `requiretls` | boolean | `true` | Offer `REQUIRETLS` (RFC 8689) on encrypted connections, except LMTP. A message sent with it is only relayed over TLS verified with DANE or MTA-STS, see [REQUIRETLS](#requiretls). |
 
 ## `[domains]`
 
@@ -273,7 +274,7 @@ Outbound delivery over SMTP, for the `smtp` transport.
 | `max_addresses` | integer | `5` | Server addresses tried per delivery attempt, across all MX hosts. |
 | `ip_versions` | array of `ipv6` \| `ipv4` | `["ipv6", "ipv4"]` | IP versions to deliver over, in order of preference. When an MX host has both, the first version is tried first and the other is the fallback. Use `["ipv4"]` on hosts without IPv6 connectivity. |
 | `connect_timeout` | duration | `30s` | How long to wait for a TCP connection. The SMTP protocol timeouts are those of RFC 5321 §4.5.3.2 (5 minutes for most replies, 10 minutes after the message data). |
-| `tls` | `none` \| `may` \| `encrypt` \| `verify` \| `dane` | `may` | TLS for outbound connections, see [Outbound TLS](#outbound-tls). |
+| `tls` | `none` \| `may` \| `encrypt` \| `verify` \| `dane` | `dane` | TLS for outbound connections, see [Outbound TLS](#outbound-tls). |
 | `tls_policy` | table | `{}` | Per-destination levels, overriding `tls`: `{ "example.com" = "verify", "[192.0.2.1]" = "encrypt" }`. Keys are recipient domains, the relay host's name, or address literals. |
 | `tls_ca_file` | absolute path | system CAs | PEM file of CAs to trust for `verify`. |
 | `relayhost_username` | string | unset | Log in to the relay host with SASL (`SCRAM-SHA-256`, `PLAIN`, or `LOGIN`, whichever it offers first). Credentials are only sent over TLS. |
@@ -301,9 +302,84 @@ Recipients at the same destination share a transaction, and other recipients of 
 | `may` | Opportunistic TLS (RFC 7435): `STARTTLS` when the server offers it, without checking its certificate. If the handshake fails, the address is tried again without TLS, so mail always gets through. |
 | `encrypt` | TLS is required, but the certificate is not checked. Protects against passive eavesdropping only. |
 | `verify` | TLS is required, and the certificate must be valid for the MX host (or relay host) name, from a trusted CA. MX names come from DNS, so without DNSSEC an attacker who can forge DNS answers can still redirect mail. |
-| `dane` | DANE (RFC 7672): when an MX host has DNSSEC-validated TLSA records, TLS is required and the certificate must match them (DANE-EE or DANE-TA records); otherwise as `may`. A host whose TLSA lookup fails is skipped. **Needs a validating DNS resolver you trust**, normally one on the same host such as Unbound on `127.0.0.1` set in `/etc/resolv.conf`: Sovite relies on the resolver's AD flag. |
+| `dane` | DANE (RFC 7672): when DNSSEC validated an MX host's MX and address records and it has TLSA records, TLS is required and the certificate must match them (DANE-EE or DANE-TA records); otherwise as `may`. A host whose TLSA lookup fails is skipped. DANE only works with a validating DNS resolver you trust, see [`[dns]`](#dns); without one, this is the same as `may`. |
+
+With `may` and `dane`, mail to a domain's MX hosts also follows the domain's **MTA-STS** policy (RFC 8461), see [`[mta_sts]`](#mta_sts). DANE wins: for an MX host with usable TLSA records, the MTA-STS policy is not used.
 
 When TLS is required and cannot be used, that address is skipped (`4.7.4` not offered, `4.7.5` handshake or certificate failure) and the message is retried later. A relay host on port 465 is reached with implicit TLS. Delivery log lines show the TLS version and cipher (`tls=TLSv1.3 with cipher ...`).
+
+A message with a `TLS-Required: No` header field (RFC 8689 §5) asks to be delivered even when TLS fails: DANE and MTA-STS policies are ignored for it, and it is sent with `may`. Levels set in `tls` and `tls_policy` other than `dane` still apply.
+
+### REQUIRETLS
+
+A client that sends `MAIL FROM:<...> REQUIRETLS` (RFC 8689) asks that its message is only ever sent over TLS with a verified certificate. Sovite then delivers it only:
+
+- to an MX host covered by DANE, or by the domain's MTA-STS policy (in `testing` mode too, which is enforced for these messages), or to the relay host with a certificate valid for its name;
+- over TLS, to a server that offers `REQUIRETLS` itself, so it passes the requirement on.
+
+Otherwise the message bounces with `5.7.30`. The bounce is sent with `REQUIRETLS` too, and as always contains only the message's header fields.
+
+## `[dns]`
+
+The DNS resolver for all lookups. Unset keys use the system's settings (`/etc/resolv.conf`).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `nameservers` | array of IP addresses | system's | Nameservers to ask, such as `["127.0.0.1"]` for a local Unbound. |
+| `port` | integer | `53` | Their port. |
+| `timeout` | duration | `5s` | Time per query. |
+| `dnssec` | `auto` \| `on` \| `off` | `auto` | Whether to believe the resolver's DNSSEC validation (the AD flag), which DANE needs. `auto` believes it only from nameservers on this host (`127.0.0.1`, `::1`): anyone on the path to a remote resolver can forge the flag. `on` always believes it; use it only for a resolver on a network you trust. `off` never does, so DANE is never used. |
+
+DANE needs a **validating resolver on this host**. With Unbound, for example:
+
+```
+# /etc/unbound/unbound.conf
+server:
+    interface: 127.0.0.1
+    auto-trust-anchor-file: "/var/lib/unbound/root.key"
+```
+
+and `nameservers = ["127.0.0.1"]` (or `nameserver 127.0.0.1` in `/etc/resolv.conf`). At startup, Sovite checks that the resolver validates and logs a warning if not. `sovitectl dns check` runs the same check.
+
+## `[mta_sts]`
+
+MTA-STS (RFC 8461) lets a domain say that mail to it must use TLS with a valid certificate: it publishes a TXT record at `_mta-sts.<domain>` and a policy at `https://mta-sts.<domain>/.well-known/mta-sts.txt` listing its MX hosts.
+
+**Sending.** Before delivering to a domain, Sovite looks up its record, fetches the policy when the record's `id` changed, and keeps it in the database for the policy's `max_age`. If the record disappears or the fetch fails, a cached policy is still used until it expires, so an attacker who blocks DNS or HTTPS cannot turn it off. Policies apply with the `may` and `dane` levels (the default), to MX deliveries, not to relay hosts:
+
+| Mode | What happens |
+|---|---|
+| `enforce` | Only the MX hosts the policy lists are used, with TLS and a certificate valid for the host name from a trusted CA (`tls_ca_file`, or the system's). Otherwise the address is skipped, and mail is retried later. |
+| `testing` | Delivered as usual; problems are only reported with TLS-RPT. |
+| `none` | No policy. |
+
+**Receiving.** To publish a policy for your own domains, Sovite can serve it (`serve = true`), or any web server can. `sovitectl dns records example.com` prints the policy and the TXT record; the record's `id` is derived from the policy, so it changes exactly when the policy does. To serve it with Sovite, point `mta-sts.example.com` at this server, and include that name in the TLS certificate (in `tls.acme.domains`, or the certificate files).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Apply the MTA-STS policies of recipient domains. |
+| `fetch_timeout` | duration | `60s` | Time to fetch a policy. |
+| `serve` | boolean | `false` | Serve this server's policy over HTTPS, for every `mta-sts.<domain>` that is asked for. Needs a TLS certificate. |
+| `address`, `port` | IP address, integer | `0.0.0.0`, `443` | Where to serve it. |
+| `mode` | `enforce` \| `testing` \| `none` | `testing` | The mode of the policy served. Start with `testing`, read the TLS-RPT reports, then move to `enforce`. |
+| `mx` | array of host names | `[server.hostname]` | The MX hosts of the policy served. `*.example.com` matches one label. |
+| `max_age` | duration | `7d` | How long senders keep the policy served (at most a year). |
+
+## `[tls_rpt]`
+
+TLS-RPT (RFC 8460) reports tell a domain whether servers sending mail to it could use TLS. Domains ask for them with a TXT record at `_smtp._tls.<domain>`.
+
+With `reports = true`, Sovite records the outcome of each session to a domain's MX hosts: which policy applied (DANE, MTA-STS, or none), and whether TLS worked or why not. Every `report_interval` it sends one report per domain that asks for them, gzipped JSON, by mail to its `mailto:` addresses (DKIM signed when `report_from`'s domain has a [`[[dkim.key]]`](#dkim)) and to its `https:` addresses. Outcomes are kept in the database until then.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `reports` | boolean | `false` | Record outcomes and send reports. |
+| `report_interval` | duration | `1d` | How often reports are sent. |
+| `report_org` | string | `server.hostname` | The organization named in reports. |
+| `report_from` | email address | `postmaster@<server.hostname>` | The sender of reports. |
+| `contact_info` | string | `report_from` | How to reach you, in the reports. |
+
+For your own domains, `sovitectl dns records` prints a TLS-RPT record that sends the reports of others to `postmaster@<domain>`.
 
 ## `[auth]`
 
@@ -438,7 +514,7 @@ Authentication-Results: mx.example.org;
 
 Mail from users (trusted or authenticated clients) is DKIM signed instead, with every key of [`[[dkim.key]]`](#dkim) for the `From:` domain, or for its closest parent domain that has keys.
 
-To publish the DNS records a domain needs, run `sovitectl dns records example.com`. It prints the MX, SPF, DKIM, DMARC, MTA-STS, and TLS-RPT records for this server's settings. `sovitectl dkim generate example.com s2026 /etc/sovite/dkim/example.com.pem` makes a new key (`rsa`, `rsa:4096`, or `ed25519` as a last argument) and prints its record.
+To publish the DNS records a domain needs, run `sovitectl dns records example.com`. It prints the MX, SPF, DKIM, DMARC, MTA-STS, and TLS-RPT records for this server's settings, and TLSA records for DANE when a certificate is configured. `sovitectl dkim generate example.com s2026 /etc/sovite/dkim/example.com.pem` makes a new key (`rsa`, `rsa:4096`, or `ed25519` as a last argument) and prints its record.
 
 ### `[spf]`
 
@@ -499,7 +575,7 @@ To **rotate** a key: add the new key with `sign = false`, publish its record, an
 | `reports` | boolean | `false` | Send aggregate reports (RFC 7489 §7.2) to the `rua=` addresses of the domains whose mail this server receives. Results are kept in the database until they are reported. Destinations outside the reported domain are only used if they publish that they accept its reports. |
 | `report_interval` | duration | `1d` | How often reports are sent. |
 | `report_org` | string | `server.hostname` | The organization named in reports. |
-| `report_from` | email address | `postmaster@<server.hostname>` | The sender of reports. |
+| `report_from` | email address | `postmaster@<server.hostname>` | The sender of reports. They are DKIM signed when its domain has a [`[[dkim.key]]`](#dkim). |
 
 ### `[srs]`
 

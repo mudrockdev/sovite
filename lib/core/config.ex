@@ -10,7 +10,7 @@ defmodule Sovite.Core.Config do
   `get/0`.
   """
 
-  alias Sovite.Core.Config.{AuthRules, Error, RoutingRules, Schema}
+  alias Sovite.Core.Config.{AuthRules, Error, RoutingRules, Schema, TransportRules}
   alias Sovite.Core.{Repo, Restrictions}
 
   @default_path "/etc/sovite/sovite.toml"
@@ -96,7 +96,8 @@ defmodule Sovite.Core.Config do
         {:bare_line_endings, {:enum, [:reject, :normalize]}, default: :reject},
         {:vrfy, :boolean, default: false},
         {:trusted_networks, {:list, :cidr}, default: []},
-        {:max_hops, {:integer, 1, 1000}, default: 50}
+        {:max_hops, {:integer, 1, 1000}, default: 50},
+        {:requiretls, :boolean, default: true}
       ]}, []},
     {:domains,
      {:section,
@@ -134,7 +135,7 @@ defmodule Sovite.Core.Config do
         {:max_addresses, {:integer, 1, 100}, default: 5},
         {:ip_versions, {:list, {:enum, [:ipv6, :ipv4]}}, default: ["ipv6", "ipv4"]},
         {:connect_timeout, :duration, default: "30s"},
-        {:tls, {:enum, @tls_levels}, default: :may},
+        {:tls, {:enum, @tls_levels}, default: :dane},
         {:tls_policy, {:map, :tls_destination, {:enum, @tls_levels}}, default: %{}},
         {:tls_ca_file, :absolute_path, []},
         {:relayhost_username, :string, []},
@@ -245,6 +246,35 @@ defmodule Sovite.Core.Config do
         {:secrets, {:list, :string}, default: []},
         {:max_age, {:integer, 1, 1000}, default: 21}
       ]}, []},
+    {:dns,
+     {:section,
+      [
+        {:nameservers, {:list, :ip_address}, default: []},
+        {:port, {:integer, 1, 65_535}, default: 53},
+        {:timeout, :duration, default: "5s"},
+        {:dnssec, {:enum, [:auto, :on, :off]}, default: :auto}
+      ]}, []},
+    {:mta_sts,
+     {:section,
+      [
+        {:enabled, :boolean, default: true},
+        {:fetch_timeout, :duration, default: "60s"},
+        {:serve, :boolean, default: false},
+        {:address, :ip_address, default: "0.0.0.0"},
+        {:port, {:integer, 0, 65_535}, default: 443},
+        {:mode, {:enum, [:enforce, :testing, :none]}, default: :testing},
+        {:mx, {:list, :mx_pattern}, default: []},
+        {:max_age, :duration, default: "7d"}
+      ]}, []},
+    {:tls_rpt,
+     {:section,
+      [
+        {:reports, :boolean, default: false},
+        {:report_interval, :duration, default: "1d"},
+        {:report_org, :string, []},
+        {:report_from, :mailbox, []},
+        {:contact_info, :string, []}
+      ]}, []},
     {:bounce, {:section, [{:double_bounce_recipient, :mailbox, []}]}, []},
     {:log,
      {:section,
@@ -281,6 +311,9 @@ defmodule Sovite.Core.Config do
     :arc,
     :dmarc,
     :srs,
+    :dns,
+    :mta_sts,
+    :tls_rpt,
     :bounce,
     :log
   ]
@@ -333,7 +366,8 @@ defmodule Sovite.Core.Config do
             bare_line_endings: :reject | :normalize,
             vrfy: boolean(),
             trusted_networks: [Sovite.Net.network()],
-            max_hops: pos_integer()
+            max_hops: pos_integer(),
+            requiretls: boolean()
           },
           domains: %{
             local: [String.t()],
@@ -415,6 +449,29 @@ defmodule Sovite.Core.Config do
             secrets: [String.t()],
             max_age: pos_integer()
           },
+          dns: %{
+            nameservers: [:inet.ip_address()],
+            port: :inet.port_number(),
+            timeout: pos_integer(),
+            dnssec: :auto | :on | :off
+          },
+          mta_sts: %{
+            enabled: boolean(),
+            fetch_timeout: pos_integer(),
+            serve: boolean(),
+            address: :inet.ip_address(),
+            port: :inet.port_number(),
+            mode: :enforce | :testing | :none,
+            mx: [String.t()],
+            max_age: pos_integer()
+          },
+          tls_rpt: %{
+            reports: boolean(),
+            report_interval: pos_integer(),
+            report_org: String.t(),
+            report_from: String.t(),
+            contact_info: String.t()
+          },
           bounce: %{double_bounce_recipient: String.t() | nil},
           log: Sovite.Core.Logging.config()
         }
@@ -460,7 +517,12 @@ defmodule Sovite.Core.Config do
   @spec validate(map()) :: {:ok, t()} | {:error, [Error.t()]}
   def validate(map) do
     with {:ok, values} <- Schema.validate(map, @schema),
-         values = values |> listener_defaults() |> local_domains() |> AuthRules.defaults(),
+         values =
+           values
+           |> listener_defaults()
+           |> local_domains()
+           |> AuthRules.defaults()
+           |> TransportRules.defaults(),
          {values, key_errors} = AuthRules.load_keys(values),
          :ok <- check(values, key_errors) do
       {:ok, struct!(__MODULE__, values)}
@@ -497,6 +559,27 @@ defmodule Sovite.Core.Config do
   @doc "Returns whether any listener offers AUTH."
   @spec auth_enabled?(t() | map()) :: boolean()
   def auth_enabled?(config), do: Enum.any?(config.listener, & &1.auth)
+
+  @doc """
+  The DNS resolver for `config`: `Sovite.DNS.InetRes` with the `[dns]`
+  nameservers, or the system's.
+  """
+  @spec resolver(t() | map()) :: Sovite.DNS.resolver()
+  def resolver(%{dns: dns}) do
+    trust_ad =
+      case dns.dnssec do
+        :auto -> :auto
+        :on -> true
+        :off -> false
+      end
+
+    nameservers =
+      if dns.nameservers == [],
+        do: [],
+        else: [nameservers: Enum.map(dns.nameservers, &{&1, dns.port})]
+
+    {Sovite.DNS.InetRes, nameservers ++ [timeout: dns.timeout, trust_ad: trust_ad]}
+  end
 
   @doc "Returns whether TLS certificates are configured (files or ACME)."
   @spec tls_enabled?(t() | map()) :: boolean()
@@ -546,6 +629,7 @@ defmodule Sovite.Core.Config do
       |> Kernel.++(RoutingRules.errors(values))
       |> Kernel.++(key_errors)
       |> Kernel.++(AuthRules.errors(values))
+      |> Kernel.++(TransportRules.errors(values))
       |> Enum.filter(& &1)
 
     if errors == [], do: :ok, else: {:error, errors}

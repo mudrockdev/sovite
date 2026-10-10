@@ -11,7 +11,12 @@ defmodule Sovite.Core.Delivery.Transaction do
 
   def transaction(job, client, remote) do
     body = Spool.stream_message(job.path, job.message_offset, job.message_size, job.prefix)
-    opts = [size: job.message_size, body_type: job.body_type]
+
+    opts = [
+      size: job.message_size,
+      body_type: job.body_type,
+      requiretls: Map.get(job, :requiretls, false)
+    ]
 
     case Client.deliver(client, job.sender, job.recipients, body, opts) do
       {:ok, client, replies} ->
@@ -65,6 +70,9 @@ defmodule Sovite.Core.Delivery.Transaction do
 
   defp refusal_error(:eight_bit_not_supported, remote),
     do: {"5.6.3", "8-bit message, but #{remote} does not support 8BITMIME"}
+
+  defp refusal_error(:requiretls_not_supported, remote),
+    do: {"5.7.30", "REQUIRETLS support required, but host #{remote} does not offer it"}
 
   defp refusal_error({:invalid_address, address}, _remote),
     do: {"5.1.3", "invalid address #{inspect(address)}"}

@@ -159,7 +159,7 @@ defmodule Sovite.Core.ConfigTest do
              max_addresses: 5,
              ip_versions: [:ipv6, :ipv4],
              connect_timeout: 30_000,
-             tls: :may,
+             tls: :dane,
              tls_policy: %{},
              tls_ca_file: nil,
              relayhost_username: nil,
@@ -556,6 +556,80 @@ defmodule Sovite.Core.ConfigTest do
     test "relayhost credentials need a relay host" do
       assert errors(~s([delivery]\nrelayhost_username = "u")) == [
                "delivery.relayhost_username: needs delivery.relayhost"
+             ]
+    end
+  end
+
+  describe "Phase 7 settings" do
+    test "defaults: DANE and MTA-STS for outbound mail, nothing served or reported" do
+      {:ok, config} = Config.parse(~s([server]\nhostname = "mx.example.com"))
+      assert config.delivery.tls == :dane
+      assert config.smtp.requiretls
+      assert config.dns == %{nameservers: [], port: 53, timeout: 5_000, dnssec: :auto}
+
+      assert %{enabled: true, serve: false, mode: :testing, mx: ["mx.example.com"], port: 443} =
+               config.mta_sts
+
+      assert config.mta_sts.max_age == 7 * 86_400_000
+
+      assert config.tls_rpt == %{
+               reports: false,
+               report_interval: 86_400_000,
+               report_org: "mx.example.com",
+               report_from: "postmaster@mx.example.com",
+               contact_info: "postmaster@mx.example.com"
+             }
+
+      assert Config.resolver(config) == {Sovite.DNS.InetRes, timeout: 5_000, trust_ad: :auto}
+    end
+
+    test "reads the resolver, policy, and report settings" do
+      {:ok, config} =
+        Config.parse("""
+        [dns]
+        nameservers = ["127.0.0.1", "::1"]
+        port = 5353
+        dnssec = "on"
+        [mta_sts]
+        mx = ["MX1.example.com", "*.backup.example.com"]
+        mode = "enforce"
+        max_age = "30d"
+        [tls_rpt]
+        reports = true
+        report_from = "tlsrpt@example.com"
+        """)
+
+      assert Config.resolver(config) ==
+               {Sovite.DNS.InetRes,
+                nameservers: [{{127, 0, 0, 1}, 5353}, {{0, 0, 0, 0, 0, 0, 0, 1}, 5353}],
+                timeout: 5_000,
+                trust_ad: true}
+
+      assert config.mta_sts.mx == ["mx1.example.com", "*.backup.example.com"]
+      assert config.tls_rpt.contact_info == "tlsrpt@example.com"
+
+      {:ok, config} = Config.parse(~s([dns]\ndnssec = "off"))
+      assert {_, [timeout: 5_000, trust_ad: false]} = Config.resolver(config)
+    end
+
+    test "rejects bad policy settings" do
+      {:error, errors} =
+        Config.parse("""
+        [mta_sts]
+        serve = true
+        mx = ["*.*.example.com"]
+        max_age = "400d"
+        """)
+
+      assert Enum.map(errors, &Exception.message/1) == [
+               ~s(mta_sts.mx[0]: "*.*.example.com" is not a host name or *.domain)
+             ]
+
+      {:error, errors} = Config.parse("[mta_sts]\nserve = true\nmax_age = \"400d\"")
+
+      assert Enum.map(errors, &Exception.message/1) == [
+               "mta_sts.serve: needs a TLS certificate ([[tls.certificate]] or [tls.acme])",
+               "mta_sts.max_age: must be at most 365.25 days"
              ]
     end
   end

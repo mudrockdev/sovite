@@ -154,6 +154,41 @@ defmodule Sovite.DNS.MXTest do
     end
   end
 
+  describe "resolve_secure/3" do
+    test "says which hosts DNSSEC authenticated completely" do
+      resolver =
+        FakeDNS.resolver(%{
+          {"signed.example", :mx} => {:secure, [{10, "mx1.signed.example"}, {20, "mx2.other"}]},
+          {"mx1.signed.example", :a} => {:secure, [@v4]},
+          {"mx1.signed.example", :aaaa} => {:secure, []},
+          {"mx2.other", :a} => [@v4],
+          {"unsigned.example", :mx} => [{10, "mx1.signed.example"}],
+          {"implicit.example", :mx} => {:secure, []},
+          {"implicit.example", :a} => {:secure, [@v4]}
+        })
+
+      assert MX.resolve_secure(resolver, "signed.example") ==
+               {:ok, [{"mx1.signed.example", [@v4], true}, {"mx2.other", [@v4], false}]}
+
+      # Secure addresses are not enough when the MX records are not.
+      assert MX.resolve_secure(resolver, "unsigned.example") ==
+               {:ok, [{"mx1.signed.example", [@v4], false}]}
+
+      assert MX.resolve_secure(resolver, "implicit.example", families: [:a]) ==
+               {:ok, [{"implicit.example", [@v4], true}]}
+
+      assert MX.resolve_secure(resolver, "signed.example", dnssec: false) ==
+               {:ok, [{"mx1.signed.example", [@v4], false}, {"mx2.other", [@v4], false}]}
+
+      assert MX.secure_addresses(resolver, "mx1.signed.example") == {:ok, [@v4], true}
+      assert MX.secure_addresses(resolver, "mx2.other", [:a]) == {:ok, [@v4], false}
+      assert MX.secure_addresses(resolver, "[192.0.2.25]") == {:ok, [@v4], false}
+
+      assert MX.resolve(resolver, "signed.example") ==
+               {:ok, [{"mx1.signed.example", [@v4]}, {"mx2.other", [@v4]}]}
+    end
+  end
+
   describe "addresses/3" do
     test "returns address literals without a lookup" do
       resolver = FakeDNS.resolver(%{})

@@ -7,9 +7,11 @@ defmodule Sovite.Core.CLI.DNS do
 
   alias Sovite.Core.Config
   alias Sovite.DKIM.SigningKey
+  alias Sovite.TLS.{Certificate, MTASTS}
 
   @usage """
-    dns records DOMAIN               Print the SPF, DKIM, DMARC, MTA-STS, and TLS-RPT records DOMAIN needs
+    dns records DOMAIN               Print the SPF, DKIM, DMARC, MTA-STS, TLS-RPT, and TLSA records DOMAIN needs
+    dns check                        Check that the DNS resolver validates DNSSEC, as DANE needs
     dkim generate DOMAIN SELECTOR FILE [TYPE]
                                      Write a new DKIM private key to FILE and print its DNS record.
                                      TYPE: rsa (2048 bits, default), rsa:BITS, or ed25519
@@ -28,6 +30,13 @@ defmodule Sovite.Core.CLI.DNS do
     end
   end
 
+  def run(["dns", "check"], path) do
+    case Config.load(path) do
+      {:ok, config} -> check(Config.resolver(config))
+      {:error, errors} -> print_errors(path, errors)
+    end
+  end
+
   def run(["dkim", "generate", domain, selector, file | type], _path) do
     with {:ok, type, bits} <- key_type(type),
          true <- Sovite.Validators.domain?(domain) || fail("invalid domain #{domain}"),
@@ -40,6 +49,27 @@ defmodule Sovite.Core.CLI.DNS do
   end
 
   def run(_argv, _path), do: :usage
+
+  defp check(resolver) do
+    case Sovite.DNS.validating?(resolver) do
+      {:ok, true} ->
+        IO.puts("The DNS resolver validates DNSSEC: DANE can be used.")
+        0
+
+      {:ok, false} ->
+        IO.puts(
+          "The DNS resolver does not validate DNSSEC, or is not on this host, so its\n" <>
+            "answers are not trusted: DANE will not be used. Run a validating resolver\n" <>
+            "such as Unbound on 127.0.0.1, and set [dns] nameservers if it is not the\n" <>
+            "system's."
+        )
+
+        1
+
+      {:error, reason} ->
+        fail("cannot query the DNS resolver: #{reason}")
+    end
+  end
 
   defp print_errors(path, errors) do
     print_config_errors(path, errors)
@@ -132,24 +162,56 @@ defmodule Sovite.Core.CLI.DNS do
     print_record("_dmarc." <> domain, "v=DMARC1; p=none; rua=mailto:postmaster@#{domain}")
     IO.puts("")
 
-    IO.puts("; MTA-STS (RFC 8461): change id= whenever the policy changes, and serve the")
-    IO.puts("; policy below at https://mta-sts.#{domain}/.well-known/mta-sts.txt")
-
-    print_record(
-      "_mta-sts." <> domain,
-      "v=STSv1; id=#{Calendar.strftime(DateTime.utc_now(), "%Y%m%d%H%M%S")}"
-    )
-
-    IO.puts("""
-    ;   version: STSv1
-    ;   mode: testing
-    ;   mx: #{hostname}
-    ;   max_age: 604800
-    """)
-
+    mta_sts(config, domain)
     IO.puts("; TLS-RPT (RFC 8460): where other servers report TLS problems")
     print_record("_smtp._tls." <> domain, "v=TLSRPTv1; rua=mailto:postmaster@#{domain}")
+    tlsa(config)
     0
+  end
+
+  # The id is derived from the policy, so it changes exactly when the
+  # policy does.
+  defp mta_sts(config, domain) do
+    mta_sts = config.mta_sts
+    policy = MTASTS.policy_text(mta_sts.mode, mta_sts.mx, div(mta_sts.max_age, 1000))
+
+    IO.puts("; MTA-STS (RFC 8461): the policy below, at #{MTASTS.policy_url(domain)}")
+
+    if mta_sts.serve,
+      do:
+        IO.puts(
+          "; Sovite serves it (mta_sts.serve): point mta-sts.#{domain} here, and add it to the certificate"
+        ),
+      else: IO.puts("; Serve it with a web server, or turn on mta_sts.serve")
+
+    print_record("_mta-sts." <> domain, "v=STSv1; id=#{MTASTS.policy_id(policy)}")
+    for line <- String.split(policy, "\r\n", trim: true), do: IO.puts(";   " <> line)
+    IO.puts("")
+  end
+
+  # DANE-EE records for this server's own certificates (RFC 7672 §3.1.1).
+  defp tlsa(config) do
+    hostname = config.server.hostname
+
+    records =
+      for %{cert_file: cert, key_file: key} <- config.tls.certificate,
+          {:ok, certificate} <- [Certificate.load(cert, key)],
+          Certificate.matches?(certificate, hostname),
+          do: spki_sha256(hd(certificate.chain))
+
+    if records != [] do
+      IO.puts("")
+      IO.puts("; DANE (RFC 7672), in the zone of #{hostname}, only if it is signed with DNSSEC.")
+      IO.puts("; Publish the record of a new key before using it.")
+
+      for hash <- Enum.uniq(records),
+          do: IO.puts("_25._tcp.#{hostname}. IN TLSA 3 1 1 #{Base.encode16(hash, case: :lower)}")
+    end
+  end
+
+  defp spki_sha256(der) do
+    {:Certificate, tbs, _alg, _sig} = :public_key.pkix_decode_cert(der, :plain)
+    :crypto.hash(:sha256, :public_key.der_encode(:SubjectPublicKeyInfo, elem(tbs, 7)))
   end
 
   defp spf(config) do

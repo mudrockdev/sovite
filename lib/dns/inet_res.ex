@@ -10,7 +10,8 @@ defmodule Sovite.DNS.InetRes do
   AD bit set, RFC 6840 §5.7) and reports the AD bit of the answer. That
   bit is only meaningful from a validating resolver you trust, normally
   one on the same host (such as Unbound on `127.0.0.1`): anyone on the
-  path to a remote resolver can set it.
+  path to a remote resolver can set it. So by default it is believed
+  only when every nameserver is a loopback address (RFC 4035 §4.9.3).
 
   ## Options
 
@@ -18,6 +19,9 @@ defmodule Sovite.DNS.InetRes do
       nameservers.
     * `:timeout` - per-query timeout in milliseconds. Defaults to `5000`.
     * `:retry` - number of retries per nameserver. Defaults to `2`.
+    * `:trust_ad` - whether `lookup_secure/3` believes the AD bit:
+      `true`, `false`, or `:auto` (the default), which believes it only
+      from loopback nameservers.
   """
 
   @behaviour Sovite.DNS.Resolver
@@ -59,6 +63,7 @@ defmodule Sovite.DNS.InetRes do
 
       timeout = Keyword.get(opts, :timeout, 5_000)
       retry = Keyword.get(opts, :retry, 2)
+      trusted = trust_ad?(Keyword.get(opts, :trust_ad, :auto), nameservers)
       query = secure_query(name, type)
 
       nameservers
@@ -66,6 +71,7 @@ defmodule Sovite.DNS.InetRes do
       |> List.flatten()
       |> Enum.reduce_while({:error, :timeout}, &try_nameserver(&1, &2, query, type, timeout))
       |> case do
+        {:ok, records, authenticated} -> {:ok, records, authenticated and trusted}
         {:error, reason} when is_atom(reason) -> {:error, normalize_error(reason)}
         result -> result
       end
@@ -73,6 +79,15 @@ defmodule Sovite.DNS.InetRes do
       {:error, :invalid_name}
     end
   end
+
+  defp trust_ad?(:auto, nameservers),
+    do: nameservers != [] and Enum.all?(nameservers, fn {ip, _port} -> loopback?(ip) end)
+
+  defp trust_ad?(trust, _nameservers), do: trust == true
+
+  defp loopback?({127, _, _, _}), do: true
+  defp loopback?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  defp loopback?(_ip), do: false
 
   defp try_nameserver(nameserver, _acc, query, type, timeout) do
     case exchange(nameserver, query, timeout) do
@@ -200,7 +215,7 @@ defmodule Sovite.DNS.InetRes do
   defp convert(type, ip) when type in [:a, :aaaa], do: ip
   defp convert(:mx, {preference, exchange}), do: {preference, name_to_string(exchange)}
   defp convert(:txt, strings), do: IO.iodata_to_binary(strings)
-  defp convert(type, name) when type in [:ptr, :cname], do: name_to_string(name)
+  defp convert(type, name) when type in [:ptr, :cname, :ns], do: name_to_string(name)
 
   defp convert(:tlsa, <<usage, selector, matching, data::binary>>),
     do: {usage, selector, matching, data}

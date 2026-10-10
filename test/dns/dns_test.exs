@@ -81,10 +81,14 @@ defmodule Sovite.DNSTest do
           {"_25._tcp.mx.unsigned.example", 52} => [tlsa],
           {"_25._tcp.mx.junk.example", 52} => [<<3>>],
           {"signed.example", :mx} => {:secure, [{10, ~c"mx.signed.example"}]},
-          {"broken.example", 52} => :servfail
+          {"broken.example", 52} => :servfail,
+          {".", :ns} => {:secure, [~c"a.root-servers.net"]}
         })
 
-      %{resolver: {InetRes, nameservers: [FakeNameserver.address(ns)], timeout: 1_000, retry: 1}}
+      %{
+        ns: ns,
+        resolver: {InetRes, nameservers: [FakeNameserver.address(ns)], timeout: 1_000, retry: 1}
+      }
     end
 
     test "reports the AD bit", %{resolver: resolver} do
@@ -100,6 +104,31 @@ defmodule Sovite.DNSTest do
                {:ok, [{10, "mx.signed.example"}], true}
 
       assert DNS.lookup(resolver, "_25._tcp.mx.signed.example", :tlsa) == {:ok, [record]}
+    end
+
+    test "believes the AD bit only from loopback nameservers, unless told", %{ns: ns} do
+      {ip, port} = FakeNameserver.address(ns)
+      opts = [nameservers: [{ip, port}], timeout: 1_000, retry: 1]
+      name = "_25._tcp.mx.signed.example"
+
+      assert {:ok, [_], false} = InetRes.lookup_secure(name, :tlsa, [trust_ad: false] ++ opts)
+      assert {:ok, [_], true} = InetRes.lookup_secure(name, :tlsa, [trust_ad: true] ++ opts)
+
+      # A remote nameserver is not believed by default. This one never
+      # answers, so the fake nameserver behind it is asked next.
+      remote = Keyword.put(opts, :nameservers, [{{192, 0, 2, 53}, 53}, {ip, port}])
+      remote = Keyword.put(remote, :timeout, 50)
+      assert {:ok, [_], false} = InetRes.lookup_secure(name, :tlsa, remote)
+    end
+
+    test "checks whether the resolver validates", %{resolver: resolver} do
+      assert DNS.validating?(resolver) == {:ok, true}
+      assert DNS.lookup(resolver, ".", :ns) == {:ok, ["a.root-servers.net"]}
+
+      assert DNS.validating?(FakeDNS.resolver(%{{".", :ns} => ["a.root-servers.net"]})) ==
+               {:ok, false}
+
+      assert DNS.validating?(FakeDNS.resolver(%{})) == {:error, :nxdomain}
     end
 
     test "drops malformed TLSA data and maps errors", %{resolver: resolver} do

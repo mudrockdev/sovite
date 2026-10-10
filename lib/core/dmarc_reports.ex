@@ -22,6 +22,9 @@ defmodule Sovite.Core.DMARCReports do
     * `:queue_manager` - told about each queued report, if given.
     * `:resolver` - for the destination checks. Defaults to
       `Sovite.DNS.default_resolver/0`.
+    * `:mail_auth` - `Sovite.Core.MailAuth` options, to DKIM sign the
+      report mail with the keys of the `:from` domain. Not signed
+      without.
 
   ## Telemetry
 
@@ -35,7 +38,7 @@ defmodule Sovite.Core.DMARCReports do
 
   require Logger
 
-  alias Sovite.Core.QueueManager
+  alias Sovite.Core.{MailAuth, QueueManager}
   alias Sovite.Core.Repo.Tables.DMARCReportEntries
   alias Sovite.DMARC
   alias Sovite.DMARC.Report
@@ -56,6 +59,7 @@ defmodule Sovite.Core.DMARCReports do
       |> Map.new()
       |> Map.put_new_lazy(:resolver, &Sovite.DNS.default_resolver/0)
       |> Map.put_new(:queue_manager, nil)
+      |> Map.put_new(:mail_auth, nil)
 
     schedule(state)
     {:ok, state}
@@ -223,9 +227,12 @@ defmodule Sovite.Core.DMARCReports do
 
     message = message(opts, domain, report_id, to, name, gzip)
 
+    prefix =
+      if opts[:mail_auth], do: MailAuth.sign_message(opts.mail_auth, opts.from, message), else: []
+
     with {:ok, writer} <- Spool.open(opts.directory, envelope),
          {:ok, writer} <- Spool.write(writer, message),
-         {:ok, _path, _size} <- Spool.commit(writer) do
+         {:ok, _path, _size} <- Spool.commit(writer, prefix) do
       if opts.queue_manager, do: QueueManager.notify(opts.queue_manager, envelope.queue_id)
 
       :telemetry.execute([:sovite, :dmarc, :report, :sent], %{rows: 1, messages: messages}, %{

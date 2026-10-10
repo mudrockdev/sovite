@@ -41,6 +41,18 @@ defmodule Sovite.Core.RepoTablesTest do
     assert Domains.set_enabled(repo, "nope.example", true) == {:error, :not_found}
   end
 
+  # The cache reloads on a timer: wait until `fun` gives two classes.
+  defp eventually(fun, timeout) do
+    case fun.() do
+      classes when map_size(classes) == 2 or timeout <= 0 ->
+        classes
+
+      _ ->
+        Process.sleep(20)
+        eventually(fun, timeout - 20)
+    end
+  end
+
   test "the domain cache follows the database", %{repo: repo} do
     {:ok, _} = Domains.add(repo, "a.example", "local")
     start_supervised!({DomainCache, repo: repo, interval: 20})
@@ -48,8 +60,9 @@ defmodule Sovite.Core.RepoTablesTest do
     assert DomainCache.classes(id) == %{"a.example" => :local}
 
     {:ok, _} = Domains.add(repo, "b.example", "aliased")
-    Process.sleep(100)
-    assert DomainCache.classes(id) == %{"a.example" => :local, "b.example" => :aliased}
+
+    assert eventually(fn -> DomainCache.classes(id) end, 2_000) ==
+             %{"a.example" => :local, "b.example" => :aliased}
 
     stop_supervised!(DomainCache)
     assert DomainCache.classes(id) == %{}

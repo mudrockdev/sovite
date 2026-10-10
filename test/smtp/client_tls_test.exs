@@ -79,6 +79,28 @@ defmodule Sovite.SMTP.ClientTLSTest do
     assert {:error, {:tls, {:tls, _}}} = connect(mta, tls: verify(context, "other.test"))
   end
 
+  test "sends REQUIRETLS only over TLS to a server that offers it", context do
+    extensions = ["PIPELINING", "REQUIRETLS"]
+    mta = start_mta(tls: context.server_tls, extensions: extensions)
+    {:ok, client} = connect(mta)
+
+    assert {:error, client, :requiretls_not_supported} =
+             Client.deliver(client, "a@x.test", ["b@y.test"], ["x\r\n"], requiretls: true)
+
+    {:ok, client} = Client.starttls(client, verify(context))
+
+    assert {:ok, _, _} =
+             Client.deliver(client, "a@x.test", ["b@y.test"], ["x\r\n"], requiretls: true)
+
+    assert_receive {:fake_mta, _, {:message, %{mail_args: "FROM:<a@x.test> REQUIRETLS"}}}
+
+    mta = start_mta(tls: context.server_tls, implicit_tls: true)
+    {:ok, client} = connect(mta, tls: verify(context))
+
+    assert {:error, _, :requiretls_not_supported} =
+             Client.deliver(client, "a@x.test", ["b@y.test"], ["x\r\n"], requiretls: true)
+  end
+
   test "authenticates with the best common mechanism", context do
     mta = start_mta(tls: context.server_tls, auth: %{"alice" => "secret"})
     {:ok, client} = connect(mta)

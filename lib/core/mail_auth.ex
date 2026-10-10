@@ -205,6 +205,22 @@ defmodule Sovite.Core.MailAuth do
     %{dkim: nil, arc: nil, seal: nil, sign: keys}
   end
 
+  @doc """
+  DKIM signs a message Sovite writes itself, such as a report, with the
+  keys of the domain of `from` (or of its closest parent with keys).
+  Returns the `DKIM-Signature:` fields to put at the top, for the prefix
+  of `Sovite.Queue.Spool.commit/2`.
+  """
+  @spec sign_message(opts(), String.t(), iodata()) :: [String.t()]
+  def sign_message(opts, from, message) do
+    with [_local, domain] <- String.split(from, "@"),
+         [_ | _] = keys <- keys_for(opts.signing_keys, String.downcase(domain, :ascii)) do
+      DKIM.sign(IO.iodata_to_binary(message), keys, opts.sign_opts)
+    else
+      _ -> []
+    end
+  end
+
   # The keys of the domain, or of its closest parent with keys.
   defp keys_for(keys, _domain) when map_size(keys) == 0, do: []
 

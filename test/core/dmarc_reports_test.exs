@@ -62,6 +62,17 @@ defmodule Sovite.Core.DMARCReportsTest do
     {:ok, _} = DMARCReportEntries.add(repo, attrs)
   end
 
+  defp wait_for_report(queue, timeout) do
+    case Spool.list(queue, :incoming) do
+      {:ok, [id]} ->
+        id
+
+      _ when timeout > 0 ->
+        Process.sleep(20)
+        wait_for_report(queue, timeout - 20)
+    end
+  end
+
   defp later, do: DateTime.add(DateTime.utc_now(), 60)
 
   test "sends to authorized destinations only, within their size limits", context do
@@ -102,8 +113,9 @@ defmodule Sovite.Core.DMARCReportsTest do
     opts = Map.to_list(Map.put(context.opts, :interval, 10))
     start_supervised!({DMARCReports, opts})
 
-    assert_receive {:telemetry, [:sovite, :dmarc, :report, :sent], _, %{queue_id: id}}, 2_000
-    assert {:ok, [^id]} = Spool.list(context.queue, :incoming)
+    # Events are global: wait for this test's report, then its event.
+    id = wait_for_report(context.queue, 3_000)
+    assert_receive {:telemetry, [:sovite, :dmarc, :report, :sent], _, %{queue_id: ^id}}, 1_000
   end
 
   test "builds the report mail" do

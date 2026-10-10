@@ -158,13 +158,13 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 7 — Transport Security Policies
 
-- [ ] DNSSEC-validating resolver integration (or require a local validating resolver)
-- [ ] DANE outbound: TLSA lookup and verification (DANE-EE, DANE-TA)
-- [ ] MTA-STS outbound: policy fetch, caching, enforcement, testing mode
-- [ ] MTA-STS inbound: serve policy (or document how to host it)
-- [ ] TLS-RPT: collect TLS delivery results and send daily reports
-- [ ] REQUIRETLS extension
-- [ ] Precedence rules when DANE and MTA-STS both apply (DANE wins)
+- [x] DNSSEC-validating resolver integration (or require a local validating resolver)
+- [x] DANE outbound: TLSA lookup and verification (DANE-EE, DANE-TA)
+- [x] MTA-STS outbound: policy fetch, caching, enforcement, testing mode
+- [x] MTA-STS inbound: serve policy (or document how to host it)
+- [x] TLS-RPT: collect TLS delivery results and send daily reports
+- [x] REQUIRETLS extension
+- [x] Precedence rules when DANE and MTA-STS both apply (DANE wins)
 
 **Standards:** RFC 4033–4035, RFC 6698, RFC 7671, RFC 7672, RFC 8461, RFC 8460, RFC 8689
 

@@ -57,7 +57,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | `arc/` | `Sovite.ARC` | ARC verification and sealing (RFC 8617) |
 | `auth_results/` | `Sovite.AuthResults` | `Authentication-Results:` header build/parse (RFC 8601) |
 | `srs/` | `Sovite.SRS` | Sender Rewriting Scheme (SRS0/SRS1) addresses for forwarded mail |
-| `tls/` | `Sovite.TLS` | Certificate store with SNI, DANE verification, MTA-STS policy fetch/cache, TLS-RPT reports |
+| `tls/` | `Sovite.TLS` | Certificate store with SNI, ACME, DANE verification, MTA-STS policies (discovery, fetch, MX matching, a policy server), TLS-RPT reports |
 | `milter/` | `Sovite.Milter` | Milter protocol client |
 | `policy/` | `Sovite.Policy` | Postfix policy delegation protocol (client **and** server, so policy servers can be written in Elixir) |
 | `abuse/` | `Sovite.Abuse` | DNSBL/RHSBL scoring, greylisting, rate limiting, pre-greet detection |
@@ -68,7 +68,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), email authentication of received and sent mail (SPF, DKIM, ARC, DMARC, SRS) and DMARC reports, bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration |
+| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), email authentication of received and sent mail (SPF, DKIM, ARC, DMARC, SRS) and DMARC reports, transport security policies (DANE, MTA-STS cache, REQUIRETLS) and TLS-RPT reports, bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration |
 
 New components are added as new folders, placed in the lowest layer their dependencies allow.
 
@@ -85,9 +85,11 @@ lib/core/
   config/            # config schema and cross-key checks
   cli/               # sovitectl commands
   delivery.ex        # Sovite.Core.Delivery: runs one job, SMTP here
-  delivery/          # LMTP, local (Maildir and pipe), and the shared transaction/result code
+  delivery/          # LMTP, local (Maildir and pipe), TLS policies, and the shared transaction/result code
   mail_auth.ex       # Sovite.Core.MailAuth: SPF/DKIM/ARC/DMARC checks, signing, sealing
   dmarc_reports.ex   # Sovite.Core.DMARCReports: aggregate report sender
+  mta_sts.ex         # Sovite.Core.MTASTS: MTA-STS policies of recipient domains, cached
+  tls_reports.ex     # Sovite.Core.TLSReports: TLS-RPT report sender
   ...                # routing, rewriting, restrictions, queue manager
 ```
 

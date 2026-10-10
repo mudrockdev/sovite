@@ -4,7 +4,7 @@ defmodule Sovite.Core.SMTPHandlerTest do
 
   alias Sovite.Core.{Config, SMTPHandler}
   alias Sovite.Queue.Spool
-  alias Sovite.Test.{FakeDNS, SMTPClient}
+  alias Sovite.Test.{Certs, FakeDNS, SMTPClient}
 
   @moduletag :tmp_dir
 
@@ -217,6 +217,45 @@ defmodule Sovite.Core.SMTPHandlerTest do
 
     {:ok, {250, ["2.0.0 Ok: queued as " <> id]}} = deliver(mta, "x\r\n")
     assert {%{sender: "", body_type: :"8bitmime"}, _} = queued(mta, id)
+  end
+
+  test "records REQUIRETLS, offered over TLS", context do
+    queue = Path.join(context.tmp_dir, "queue")
+
+    {:ok, config} =
+      Config.parse(~s([server]\nhostname = "mx.example.com"\n[queue]\ndirectory = "#{queue}"))
+
+    :ok = Spool.init(queue)
+    ca = Certs.ca()
+    cert = Certs.issue(ca, names: ["mx.example.com"])
+
+    server =
+      start_supervised!(
+        {Sovite.SMTP.Server,
+         ip: {127, 0, 0, 1},
+         port: 0,
+         hostname: "mx.example.com",
+         handler: {SMTPHandler, SMTPHandler.opts(config, nil, resolver: FakeDNS.resolver(%{}))},
+         tls: Sovite.TLS.server_options(certs_keys: [Certs.certs_keys(cert)]),
+         requiretls: true}
+      )
+
+    {:ok, {_ip, port}} = Sovite.Listener.sockname(server)
+    {:ok, client} = SMTPClient.connect(port)
+    {:ok, {220, _}} = SMTPClient.read_reply(client)
+    {:ok, {250, lines}} = SMTPClient.command(client, "EHLO client.test")
+    refute "REQUIRETLS" in lines
+
+    tls = Sovite.TLS.client_options(verify: :peer, hostname: "mx.example.com", cacerts: [ca.cert])
+    {:ok, client} = SMTPClient.starttls(client, tls)
+    {:ok, {250, lines}} = SMTPClient.command(client, "EHLO client.test")
+    assert "REQUIRETLS" in lines
+
+    {:ok, {250, _}} = SMTPClient.command(client, "MAIL FROM:<sender@remote.test> REQUIRETLS")
+    {:ok, {250, _}} = SMTPClient.command(client, "RCPT TO:<user@mx.example.com>")
+    {:ok, {354, _}} = SMTPClient.command(client, "DATA")
+    {:ok, {250, ["2.0.0 Ok: queued as " <> id]}} = SMTPClient.send_data(client, "x\r\n")
+    assert {%{requiretls: true}, _} = queued(%{queue: queue}, id)
   end
 
   test "keeps nothing when the message is too large", context do

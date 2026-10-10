@@ -54,13 +54,30 @@ defmodule Sovite.Core.Delivery do
     * `:encrypt` - TLS is required; the certificate is not checked.
     * `:verify` - TLS is required, and the certificate must be valid for
       the MX (or relay) host name, from a trusted CA.
-    * `:dane` - DANE (RFC 7672): when the host has DNSSEC-authenticated
-      TLSA records, TLS is required and the certificate must match them;
-      otherwise as `:may`. A failed TLSA lookup skips the host.
+    * `:dane` (the default) - DANE (RFC 7672): when DNSSEC authenticated
+      the host's MX and address records and it has TLSA records, TLS is
+      required and the certificate must match them; otherwise as `:may`.
+      A failed TLSA lookup skips the host.
+
+  With `:may` and `:dane`, mail to a domain's MX hosts also follows the
+  domain's MTA-STS policy (RFC 8461, see `Sovite.Core.MTASTS`), for
+  hosts where DANE does not apply: DANE wins (RFC 8461 §2). In
+  `enforce` mode, only MX hosts the policy lists are used, with TLS and
+  a certificate valid for the host name from a trusted CA. In `testing`
+  mode, delivery is opportunistic and problems are only reported.
 
   When TLS is required and fails, the address is skipped with `4.7.4`
   (not offered) or `4.7.5` (handshake or certificate failure). Relay
   hosts on port 465 get implicit TLS.
+
+  A message received with `REQUIRETLS` (RFC 8689) is only sent over TLS
+  verified with DANE or an MTA-STS policy (testing mode counts as
+  enforce), or for relay hosts with a trusted certificate, and only to
+  servers that offer `REQUIRETLS`; otherwise it fails with `5.7.30`. A
+  message with `TLS-Required: No` ignores the DANE and MTA-STS policies.
+
+  With `tls_rpt.reports`, each session to an MX host is recorded for
+  TLS-RPT (RFC 8460): the policy that applied and whether TLS worked.
 
   When the destination has credentials (see `Sovite.Core.Router`), the
   client authenticates to the next hop, but only over TLS. With a source
@@ -79,14 +96,13 @@ defmodule Sovite.Core.Delivery do
       transaction: 3
     ]
 
-  alias Sovite.Core.Delivery.{LMTP, Local}
+  alias Sovite.Core.Delivery.{LMTP, Local, TLSPolicy}
   alias Sovite.Core.Router
   alias Sovite.DNS.MX
   alias Sovite.Message.{Headers, Received, Trace}
   alias Sovite.Queue.{Record, Spool}
   alias Sovite.SMTP.{Client, Reply}
   alias Sovite.TLS
-  alias Sovite.TLS.DANE
 
   @typedoc "Work for one delivery: built by the queue manager."
   @type job :: %{
@@ -98,7 +114,8 @@ defmodule Sovite.Core.Delivery do
           path: Path.t(),
           message_offset: non_neg_integer(),
           message_size: non_neg_integer(),
-          prefix: binary()
+          prefix: binary(),
+          requiretls: boolean()
         }
 
   @type result :: {String.t(), Record.status(), Record.details()}
@@ -122,6 +139,10 @@ defmodule Sovite.Core.Delivery do
     * `:tls` - `%{default, policy, cacerts}`: the default level, a map of
       destination (domain, relay host, or address literal) to level, and
       the CAs for `:verify` (`nil` for the system's).
+    * `:mta_sts` - the `Sovite.Core.MTASTS` server, or `nil` to ignore
+      MTA-STS policies.
+    * `:tls_reports` - the `Sovite.Core.Repo` reference to record TLS-RPT
+      outcomes in, or `nil`.
   """
   @type opts :: %{
           hostname: String.t(),
@@ -138,7 +159,9 @@ defmodule Sovite.Core.Delivery do
           maildir: %{optional(:local | :mailbox) => String.t() | nil},
           pipes: %{String.t() => map()},
           delimiter: String.t(),
-          tmp_dir: Path.t()
+          tmp_dir: Path.t(),
+          mta_sts: GenServer.server() | nil,
+          tls_reports: Sovite.Core.Repo.t() | nil
         }
 
   @type tls_level :: :none | :may | :encrypt | :verify | :dane
@@ -228,6 +251,12 @@ defmodule Sovite.Core.Delivery do
     end
   end
 
+  # A REQUIRETLS message needs a connection verified for it.
+  defp smtp(%{requiretls: true} = job, {client, _host}, opts) do
+    Client.quit(client)
+    smtp(job, nil, opts)
+  end
+
   defp smtp(job, {client, host}, opts) do
     case transaction(job, client, host) do
       # The cached connection went away; start over with a fresh one.
@@ -237,36 +266,71 @@ defmodule Sovite.Core.Delivery do
   end
 
   defp smtp(job, nil, opts) do
-    case addresses(job.destination, opts) do
+    ctx = TLSPolicy.context(job, opts)
+
+    case addresses(job.destination, ctx.dnssec, opts) do
       {:ok, addresses} ->
-        try_addresses(job, Enum.take(addresses, opts.max_addresses), nil, opts)
+        job
+        |> try_addresses(Enum.take(addresses, opts.max_addresses), nil, ctx, opts)
+        |> keep_connection(ctx)
 
       {:error, status, text} ->
         {all(job, status, text), nil, nil}
     end
   end
 
-  defp try_addresses(job, [], last_error, _opts) do
+  # A connection made while ignoring the TLS policies must not carry
+  # other messages.
+  defp keep_connection({results, remote, {client, _host}}, %{tls_optional: true}) do
+    Client.quit(client)
+    {results, remote, nil}
+  end
+
+  defp keep_connection(result, _job), do: result
+
+  defp try_addresses(job, [], last_error, _ctx, _opts) do
     {status, text} = last_error || {"4.4.1", "No mail host could be reached"}
     {all(job, status, text), nil, nil}
   end
 
-  defp try_addresses(job, [{host, ip, port} | rest], _last_error, opts) do
+  defp try_addresses(job, [{host, ip, port, secure} | rest], _last_error, ctx, opts) do
     remote = remote_name(host, ip)
     opts = %{opts | client: source_option(opts.client, job.destination, ip)}
 
     result =
-      with {:ok, plan} <- tls_plan(job.destination.nexthop, host, port, opts),
-           {:ok, client} <- open(ip, port, remote, plan, opts),
-           {:ok, client} <- relay_auth(client, job.destination.auth, remote) do
-        connected(job, client, remote, opts)
+      case TLSPolicy.plan(ctx, host, port, secure, opts) do
+        {:ok, plan, report} ->
+          opened = open(ip, port, remote, plan, opts)
+          TLSPolicy.record(ctx, report, plan, {host, ip}, opened, opts)
+
+          with {:ok, client} <- opened,
+               {:ok, client} <- relay_auth(client, job.destination.auth, remote),
+               {:ok, client} <- requiretls(job, client, remote) do
+            connected(job, client, remote, opts)
+          end
+
+        {:retry, error, report} ->
+          TLSPolicy.record(ctx, report, nil, {host, ip}, {:retry, error}, opts)
+          {:retry, error}
       end
 
     case result do
-      {:retry, error} -> try_addresses(job, rest, error, opts)
+      {:retry, error} -> try_addresses(job, rest, error, ctx, opts)
       result -> result
     end
   end
+
+  # RFC 8689 §4.2.1: the next server must support REQUIRETLS too.
+  defp requiretls(%{requiretls: true}, client, remote) do
+    if Map.has_key?(Client.extensions(client), "REQUIRETLS") do
+      {:ok, client}
+    else
+      Client.quit(client)
+      {:retry, {"5.7.30", "REQUIRETLS support required, but host #{remote} does not offer it"}}
+    end
+  end
+
+  defp requiretls(_job, client, _remote), do: {:ok, client}
 
   # Connect from the destination's source address for this family, if any.
   defp source_option(client, %{source: source}, ip) do
@@ -276,69 +340,6 @@ defmodule Sovite.Core.Delivery do
     case Map.fetch(source || %{}, family) do
       {:ok, local} -> Keyword.put(client, :local_address, local)
       :error -> client
-    end
-  end
-
-  ## TLS
-
-  defp tls_plan(destination, host, port, opts) do
-    literal = String.starts_with?(host, "[")
-    plan(tls_level(destination, opts.tls), host, literal, port, opts)
-  end
-
-  defp plan(:none, _host, _literal, _port, _opts), do: {:ok, :none}
-
-  defp plan(:may, host, literal, _port, _opts),
-    do: {:ok, {:may, TLS.client_options(hostname: sni(host, literal))}}
-
-  defp plan(:encrypt, host, literal, _port, _opts),
-    do: {:ok, {:required, "encrypt", TLS.client_options(hostname: sni(host, literal))}}
-
-  defp plan(:verify, host, true, _port, _opts),
-    do: {:retry, {"4.7.5", "cannot verify a certificate for address literal #{host}"}}
-
-  defp plan(:verify, host, false, _port, opts) do
-    cacerts = opts.tls.cacerts || :public_key.cacerts_get()
-
-    {:ok,
-     {:required, "verify", TLS.client_options(verify: :peer, hostname: host, cacerts: cacerts)}}
-  end
-
-  # DANE needs a host name to look up TLSA records for.
-  defp plan(:dane, _host, true, _port, _opts), do: {:ok, {:may, TLS.client_options([])}}
-  defp plan(:dane, host, false, port, opts), do: dane_plan(host, port, opts)
-
-  defp sni(_host, true), do: nil
-  defp sni(host, false), do: host
-
-  defp tls_level(destination, tls) do
-    key =
-      case destination do
-        {:mx, domain} -> domain
-        {:host, %{host: host}} -> host
-        {:literal, ip} -> Received.address_literal(ip)
-      end
-
-    Map.get(tls.policy, key, tls.default)
-  end
-
-  defp dane_plan(host, port, opts) do
-    case Sovite.DNS.lookup_secure(opts.resolver, "_#{port}._tcp.#{host}", :tlsa) do
-      {:ok, records, true} ->
-        case DANE.usable(records) do
-          [] -> {:ok, {:may, TLS.client_options(hostname: host)}}
-          usable -> {:ok, {:required, "dane", DANE.client_options(usable, host)}}
-        end
-
-      {:ok, _records, false} ->
-        {:ok, {:may, TLS.client_options(hostname: host)}}
-
-      {:error, :nxdomain} ->
-        {:ok, {:may, TLS.client_options(hostname: host)}}
-
-      # RFC 7672 §2.2: a host whose TLSA lookup fails must not be used.
-      {:error, reason} ->
-        {:retry, {"4.7.5", "TLSA lookup for #{host} failed: #{reason}"}}
     end
   end
 
@@ -453,27 +454,45 @@ defmodule Sovite.Core.Delivery do
 
   ## Addresses
 
-  defp addresses(%{nexthop: nexthop}, opts), do: addresses(nexthop, opts)
-  defp addresses({:mx, domain}, opts), do: mx_addresses(domain, opts.port, opts)
+  # {host, ip, port, secure}: secure when DNSSEC authenticated the host's
+  # MX and address records, so DANE may apply.
+  defp addresses(%{nexthop: nexthop}, dnssec, opts), do: addresses(nexthop, dnssec, opts)
+  defp addresses({:mx, domain}, dnssec, opts), do: mx_addresses(domain, opts.port, dnssec, opts)
 
-  defp addresses({:host, %{mx: true, host: host, port: port}}, opts),
-    do: relay_errors(mx_addresses(host, port, opts), host)
+  defp addresses({:host, %{mx: true, host: host, port: port}}, dnssec, opts),
+    do: relay_errors(mx_addresses(host, port, dnssec, opts), host)
 
-  defp addresses({:host, %{mx: false, host: host, port: port}}, opts) do
-    case MX.addresses(opts.resolver, host, opts.families) do
-      {:ok, [_ | _] = ips} -> {:ok, Enum.map(ips, &{host, &1, port})}
-      {:ok, []} -> {:error, "4.4.4", "relay host #{host} has no address"}
+  defp addresses({:host, %{mx: false, host: host, port: port}}, dnssec, opts) do
+    result =
+      if dnssec,
+        do: MX.secure_addresses(opts.resolver, host, opts.families),
+        else:
+          with(
+            {:ok, ips} <- MX.addresses(opts.resolver, host, opts.families),
+            do: {:ok, ips, false}
+          )
+
+    case result do
+      {:ok, [_ | _] = ips, secure} -> {:ok, Enum.map(ips, &{host, &1, port, secure})}
+      {:ok, [], _} -> {:error, "4.4.4", "relay host #{host} has no address"}
       {:error, reason} -> {:error, "4.4.3", "cannot resolve relay host #{host}: #{reason}"}
     end
   end
 
-  defp addresses({:literal, ip}, opts),
-    do: {:ok, [{Received.address_literal(ip), ip, opts.port}]}
+  defp addresses({:literal, ip}, _dnssec, opts),
+    do: {:ok, [{Received.address_literal(ip), ip, opts.port, false}]}
 
-  defp mx_addresses(domain, port, opts) do
-    case MX.resolve(opts.resolver, domain, exclude: [opts.hostname], families: opts.families) do
+  defp mx_addresses(domain, port, dnssec, opts) do
+    resolved =
+      MX.resolve_secure(opts.resolver, domain,
+        exclude: [opts.hostname],
+        families: opts.families,
+        dnssec: dnssec
+      )
+
+    case resolved do
       {:ok, hosts} ->
-        {:ok, for({host, ips} <- hosts, ip <- ips, do: {host, ip, port})}
+        {:ok, for({host, ips, secure} <- hosts, ip <- ips, do: {host, ip, port, secure})}
 
       {:error, :null_mx} ->
         {:error, "5.1.10", "domain #{domain} does not accept mail (null MX)"}

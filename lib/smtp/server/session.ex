@@ -69,6 +69,11 @@ defmodule Sovite.SMTP.Server.Session do
     * `:max_auth_failures` - failed `AUTH` attempts before the session is
       closed. Defaults to 3.
     * `:lmtp` - speak LMTP instead of SMTP. Defaults to `false`.
+    * `:requiretls` - offer `REQUIRETLS` (RFC 8689) on encrypted
+      connections. A `MAIL FROM` with the `REQUIRETLS` parameter sets
+      `requiretls: true` in the mail parameters: the handler must then
+      only relay the message over TLS that is verified with DANE or
+      MTA-STS. Defaults to `false`.
 
   The connection map may carry `:tls` (a `Sovite.TLS.info()`) when it is
   encrypted from the start (implicit TLS, RFC 8314).
@@ -97,8 +102,12 @@ defmodule Sovite.SMTP.Server.Session do
           optional(:tls) => Sovite.TLS.info() | nil
         }
 
-  @typedoc "`MAIL FROM` parameters. `body` is `nil` when not given."
-  @type mail_params :: %{size: non_neg_integer() | nil, body: :"7bit" | :"8bitmime" | nil}
+  @typedoc "`MAIL FROM` parameters. `size` and `body` are `nil` when not given."
+  @type mail_params :: %{
+          size: non_neg_integer() | nil,
+          body: :"7bit" | :"8bitmime" | nil,
+          requiretls: boolean()
+        }
 
   @typedoc "The current mail transaction. Recipients are in the order given."
   @type transaction :: %{
@@ -127,7 +136,8 @@ defmodule Sovite.SMTP.Server.Session do
     auth_required: false,
     plaintext_auth: false,
     max_auth_failures: 3,
-    lmtp: false
+    lmtp: false,
+    requiretls: false
   ]
 
   defstruct [
@@ -702,6 +712,7 @@ defmodule Sovite.SMTP.Server.Session do
 
   defp helo_reply(session, _ehlo_or_lhlo) do
     starttls = if session.opts.starttls and tls(session) == nil, do: ["STARTTLS"], else: []
+    requiretls = if requiretls_offered?(session), do: ["REQUIRETLS"], else: []
 
     auth =
       with true <- auth_offered?(session) and session.identity == nil,
@@ -719,9 +730,12 @@ defmodule Sovite.SMTP.Server.Session do
         "SIZE #{session.opts.max_message_size}",
         "8BITMIME",
         "ENHANCEDSTATUSCODES"
-      ] ++ starttls ++ auth
+      ] ++ starttls ++ requiretls ++ auth
     )
   end
+
+  # RFC 8689 §4: only offered once the connection is encrypted.
+  defp requiretls_offered?(session), do: session.opts.requiretls and tls(session) != nil
 
   defp check_mail(_params, %{helo: nil, opts: %{lmtp: true}}),
     do: {:error, Reply.new(503, "5.5.1", "Send LHLO first")}
@@ -735,7 +749,7 @@ defmodule Sovite.SMTP.Server.Session do
   defp check_mail(_params, %{transaction: transaction}) when transaction != nil,
     do: {:error, Reply.new(503, "5.5.1", "Nested MAIL command")}
 
-  defp check_mail([], _session), do: {:ok, %{size: nil, body: nil}}
+  defp check_mail([], _session), do: {:ok, %{size: nil, body: nil, requiretls: false}}
 
   defp check_mail(_params, %{esmtp: false}), do: {:error, unsupported_parameter()}
 
@@ -747,7 +761,7 @@ defmodule Sovite.SMTP.Server.Session do
       else:
         Enum.reduce_while(
           params,
-          {:ok, %{size: nil, body: nil}},
+          {:ok, %{size: nil, body: nil, requiretls: false}},
           &add_mail_param(&1, &2, session)
         )
   end
@@ -786,7 +800,13 @@ defmodule Sovite.SMTP.Server.Session do
   defp mail_param({"AUTH", value}, %{opts: %{auth: true}}) when is_binary(value),
     do: {:ok, :auth, nil}
 
-  defp mail_param({key, _value}, _session) when key in ["SIZE", "BODY"],
+  defp mail_param({"REQUIRETLS", nil}, session) do
+    if requiretls_offered?(session),
+      do: {:ok, :requiretls, true},
+      else: {:error, unsupported_parameter()}
+  end
+
+  defp mail_param({key, _value}, _session) when key in ["SIZE", "BODY", "REQUIRETLS"],
     do: {:error, Reply.new(501, "5.5.4", "Invalid #{key} parameter")}
 
   defp mail_param(_param, _session), do: {:error, unsupported_parameter()}

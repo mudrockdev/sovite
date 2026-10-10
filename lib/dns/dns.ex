@@ -38,4 +38,15 @@ defmodule Sovite.DNS do
       with {:ok, records} <- module.lookup(name, type, opts), do: {:ok, records, false}
     end
   end
+
+  @doc """
+  Returns whether `resolver` validates DNSSEC, by asking for the root
+  zone's NS records, which are signed: a validating resolver that is
+  trusted authenticates them. DANE (RFC 7672) needs one.
+  """
+  @spec validating?(resolver()) :: {:ok, boolean()} | {:error, Resolver.error()}
+  def validating?(resolver) do
+    with {:ok, _records, authenticated} <- lookup_secure(resolver, ".", :ns),
+         do: {:ok, authenticated}
+  end
 end

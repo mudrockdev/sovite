@@ -65,6 +65,13 @@ defmodule Sovite.Core.SMTPHandler do
   for the original sender at `RCPT`, and invalid or expired ones are
   refused with `550 5.1.1`.
 
+  ## REQUIRETLS
+
+  With `smtp.requiretls` (the default), `REQUIRETLS` (RFC 8689) is
+  offered over TLS. A message sent with it is queued with
+  `requiretls`, so `Sovite.Core.Delivery` relays it only over verified
+  TLS.
+
   ## Loops
 
   A message with more than `smtp.max_hops` `Received:` fields is refused
@@ -129,7 +136,7 @@ defmodule Sovite.Core.SMTPHandler do
   @spec opts(Config.t(), GenServer.server() | nil, keyword()) :: map()
   def opts(config, queue_manager \\ nil, runtime \\ []) do
     repo = runtime[:repo]
-    resolver = Keyword.get_lazy(runtime, :resolver, &Sovite.DNS.default_resolver/0)
+    resolver = Keyword.get_lazy(runtime, :resolver, fn -> Config.resolver(config) end)
 
     %{
       queue_manager: queue_manager,
@@ -632,7 +639,8 @@ defmodule Sovite.Core.SMTPHandler do
       remote_ip: state.connection.remote_ip,
       helo: state.helo,
       protocol: protocol,
-      body_type: transaction.params.body
+      body_type: transaction.params.body,
+      requiretls: Map.get(transaction.params, :requiretls, false)
     }
 
     received =

@@ -14,6 +14,7 @@ defmodule Sovite.Core.Config.Schema do
   #   :duration                - milliseconds, from seconds or "500ms", "30s", "5m", "1h", "1d"
   #   :domain | :mailbox       - validated and lower-cased
   #   :ip_address              - an :inet tuple
+  #   :mx_pattern              - a host name or "*." and a host name, lower-cased (MTA-STS)
   #   :cidr                    - {ip, prefix_length}, from "192.0.2.0/24" or a single address
   #   :relayhost               - %{host, port, mx}, from "host", "host:port", "[host]", "[host]:port"
   #   :tls_version             - :"tlsv1.2" | :"tlsv1.3", from "1.2" or "1.3"
@@ -183,6 +184,22 @@ defmodule Sovite.Core.Config.Schema do
   end
 
   defp cast(:hostname, value), do: type_error("a hostname string", value)
+
+  defp cast(:mx_pattern, value) when is_binary(value) do
+    pattern = String.downcase(value, :ascii)
+
+    host =
+      case pattern do
+        "*." <> host -> host
+        host -> host
+      end
+
+    if Sovite.Validators.hostname?(host),
+      do: {:ok, pattern},
+      else: {:error, "#{inspect(value)} is not a host name or *.domain"}
+  end
+
+  defp cast(:mx_pattern, value), do: type_error("an MX host pattern", value)
 
   defp cast(:absolute_path, value) when is_binary(value) do
     if Path.type(value) == :absolute,

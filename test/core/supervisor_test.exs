@@ -40,6 +40,9 @@ defmodule Sovite.Core.SupervisorTest do
     directory = "#{Path.join(dir, "queue")}"
     [database]
     path = "#{Path.join(dir, "sovite.db")}"
+    # No real DNS queries for the DNSSEC check.
+    [dns]
+    dnssec = "off"
     #{rest}
     """
   end
@@ -381,6 +384,79 @@ defmodule Sovite.Core.SupervisorTest do
   end
 
   def forward_event(_event, _measurements, metadata, pid), do: send(pid, {:deferred, metadata})
+
+  test "serves the MTA-STS policy with mta_sts.serve", %{tmp_dir: dir} do
+    ca = Certs.ca()
+    cert = Certs.issue(ca, names: ["mx.example.org", "mta-sts.example.org"])
+    {cert_file, key_file} = Certs.write!(dir, "mx", cert)
+
+    {:ok, config} =
+      Config.parse(
+        toml(dir, """
+        [[tls.certificate]]
+        cert_file = "#{cert_file}"
+        key_file = "#{key_file}"
+        [mta_sts]
+        serve = true
+        address = "127.0.0.1"
+        port = 0
+        mode = "enforce"
+        """)
+      )
+
+    supervisor =
+      start_supervised!(
+        {Sovite.Core.Supervisor,
+         config: config, name: nil, queue_manager: [resolver: FakeDNS.resolver(%{})]}
+      )
+
+    children = Supervisor.which_children(supervisor)
+    assert Enum.any?(children, &match?({Sovite.Core.MTASTS, _, _, _}, &1))
+
+    {_id, listener, _, _} =
+      Enum.find(children, &match?({{Sovite.Listener, "mta-sts/" <> _}, _, _, _}, &1))
+
+    {:ok, {_ip, port}} = Sovite.Listener.sockname(listener)
+
+    assert {:ok, %{mode: :enforce, mx: ["mx.example.org"], max_age: 604_800}} =
+             Sovite.TLS.MTASTS.fetch("example.org",
+               connect_to: {{127, 0, 0, 1}, port},
+               cacerts: [ca.cert]
+             )
+  end
+
+  test "warns when DANE is used and the resolver may not validate DNSSEC", %{tmp_dir: dir} do
+    {:ok, config} = Config.parse(toml(dir, ""))
+    config = put_in(config.dns.dnssec, :auto)
+
+    log =
+      capture_log(fn ->
+        start_supervised!(
+          {Sovite.Core.Supervisor,
+           config: config, name: nil, queue_manager: [resolver: FakeDNS.resolver(%{})]}
+        )
+
+        Process.sleep(100)
+      end)
+
+    assert log =~ "cannot check whether the DNS resolver validates DNSSEC: nxdomain"
+    :ok = stop_supervised(Sovite.Core.Supervisor)
+
+    resolver = FakeDNS.resolver(%{{".", :ns} => ["a.root-servers.net"]})
+
+    log =
+      capture_log(fn ->
+        start_supervised!(
+          {Sovite.Core.Supervisor,
+           config: config, name: nil, queue_manager: [resolver: resolver]},
+          id: :second
+        )
+
+        Process.sleep(100)
+      end)
+
+    assert log =~ "the DNS resolver does not validate DNSSEC"
+  end
 
   test "refuses to start without a usable queue directory", %{tmp_dir: dir} do
     File.write!(Path.join(dir, "queue"), "a file, not a directory")

@@ -13,6 +13,9 @@ defmodule Sovite.Core.Bounce do
       `bounce.double_bounce_recipient` when set, otherwise only logged.
       A failed double-bounce report is only logged, so notifications
       can never loop.
+    * Notifications about a `REQUIRETLS` message are sent with
+      `REQUIRETLS` too (RFC 8689 §4.3). Like every notification, they
+      only include the message's header section.
   """
 
   alias Sovite.DSN
@@ -106,7 +109,8 @@ defmodule Sovite.Core.Bounce do
         received_at: DateTime.utc_now(),
         protocol: "local",
         body_type: body_type,
-        notification: notification
+        notification: notification,
+        requiretls: envelope.requiretls
       }
 
       with {:ok, writer} <- Spool.open(opts.directory, notification_envelope),

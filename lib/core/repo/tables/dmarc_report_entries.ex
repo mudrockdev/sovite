@@ -23,6 +23,8 @@ defmodule Sovite.Core.Repo.Tables.DMARCReportEntries do
   @doc "The policy domains with evaluations stored before `until`."
   @spec domains(Repo.t(), DateTime.t()) :: [String.t()]
   def domains(repo, until) do
+    until = seconds(until)
+
     query =
       from(e in DMARCReportEntry,
         where: e.inserted_at < ^until,
@@ -37,6 +39,8 @@ defmodule Sovite.Core.Repo.Tables.DMARCReportEntries do
   @doc "The evaluations for `domain` stored before `until`, oldest first."
   @spec list(Repo.t(), String.t(), DateTime.t()) :: [DMARCReportEntry.t()]
   def list(repo, domain, until) do
+    until = seconds(until)
+
     query =
       from(e in DMARCReportEntry,
         where: e.policy_domain == ^domain and e.inserted_at < ^until,
@@ -49,9 +53,15 @@ defmodule Sovite.Core.Repo.Tables.DMARCReportEntries do
   @doc "Deletes the evaluations for `domain` stored before `until`, once reported."
   @spec delete(Repo.t(), String.t(), DateTime.t()) :: non_neg_integer()
   def delete(repo, domain, until) do
+    until = seconds(until)
+
     query =
       from(e in DMARCReportEntry, where: e.policy_domain == ^domain and e.inserted_at < ^until)
 
     Repo.run(repo, fn module -> elem(module.delete_all(query), 0) end)
   end
+
+  # The column has whole seconds, and SQLite compares the times as text,
+  # where "12:00:00Z" sorts after "12:00:00.5Z".
+  defp seconds(time), do: DateTime.truncate(time, :second)
 end

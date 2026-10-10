@@ -43,7 +43,7 @@ defmodule Sovite.Core.QueueManager do
 
   require Logger
 
-  alias Sovite.Core.{Bounce, Delivery, Recipients, Router, Routing}
+  alias Sovite.Core.{Bounce, Config, Delivery, Recipients, Router, Routing}
   alias Sovite.Queue.{Backoff, Entry, Spool}
   alias Sovite.SMTP.Client
 
@@ -83,6 +83,8 @@ defmodule Sovite.Core.QueueManager do
   @spec opts(Sovite.Core.Config.t(), Sovite.Core.Repo.t() | nil) :: keyword()
   def opts(config, repo \\ nil) do
     [
+      resolver: Config.resolver(config),
+      tls_reports: if(config.tls_rpt.reports, do: repo),
       routing: Routing.new(config, repo),
       directory: config.queue.directory,
       hostname: config.server.hostname,
@@ -161,6 +163,8 @@ defmodule Sovite.Core.QueueManager do
       maildir: Map.get(opts, :maildir) || %{},
       pipes: Map.get(opts, :pipes, %{}),
       delimiter: Map.get(opts, :delimiter, ""),
+      mta_sts: Map.get(opts, :mta_sts),
+      tls_reports: Map.get(opts, :tls_reports),
       # The spool's private tmp/, emptied by Spool.init/1.
       tmp_dir: Path.join(opts.directory, "tmp")
     }
@@ -491,7 +495,8 @@ defmodule Sovite.Core.QueueManager do
           path: message.path,
           message_offset: message.message_offset,
           message_size: message.message_size,
-          prefix: message.prefix
+          prefix: message.prefix,
+          requiretls: envelope.requiretls
         }
       end
 

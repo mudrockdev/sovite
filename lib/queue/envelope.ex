@@ -7,6 +7,10 @@ defmodule Sovite.Queue.Envelope do
   `srs_sender`, when set, is the sender to use instead when the message
   is forwarded to another domain: an SRS address (see `Sovite.SRS`).
 
+  `requiretls` is set when the client sent `REQUIRETLS` (RFC 8689): the
+  message may only be relayed over TLS verified with DANE or MTA-STS,
+  to servers that support `REQUIRETLS` too.
+
   `notification` is set on delivery status notifications Sovite
   generates itself: `:failure`, `:delay`, or `:double_bounce` (a failed
   notification reported to the postmaster). A failed `:double_bounce` is
@@ -25,7 +29,8 @@ defmodule Sovite.Queue.Envelope do
     :helo,
     :protocol,
     :body_type,
-    :notification
+    :notification,
+    requiretls: false
   ]
 
   @type t :: %__MODULE__{
@@ -39,7 +44,8 @@ defmodule Sovite.Queue.Envelope do
           helo: String.t() | nil,
           protocol: String.t() | nil,
           body_type: :"7bit" | :"8bitmime" | nil,
-          notification: :failure | :delay | :double_bounce | nil
+          notification: :failure | :delay | :double_bounce | nil,
+          requiretls: boolean()
         }
 
   @doc false
@@ -56,7 +62,8 @@ defmodule Sovite.Queue.Envelope do
       "helo" => envelope.helo,
       "protocol" => envelope.protocol,
       "body_type" => envelope.body_type && Atom.to_string(envelope.body_type),
-      "notification" => envelope.notification && Atom.to_string(envelope.notification)
+      "notification" => envelope.notification && Atom.to_string(envelope.notification),
+      "requiretls" => envelope.requiretls
     }
   end
 
@@ -66,6 +73,7 @@ defmodule Sovite.Queue.Envelope do
       when is_binary(id) and is_binary(sender) do
     with true <- Enum.all?(rcpts, &is_binary/1),
          true <- is_nil(map["srs_sender"]) or is_binary(map["srs_sender"]),
+         true <- map["requiretls"] in [nil, true, false],
          {:ok, received_at} <- optional(map["received_at"], &parse_time/1),
          {:ok, remote_ip} <- optional(map["remote_ip"], &parse_ip/1),
          {:ok, body_type} <- optional(map["body_type"], &parse_body_type/1),
@@ -82,7 +90,8 @@ defmodule Sovite.Queue.Envelope do
          helo: map["helo"],
          protocol: map["protocol"],
          body_type: body_type,
-         notification: notification
+         notification: notification,
+         requiretls: map["requiretls"] == true
        }}
     else
       _ -> {:error, :invalid_envelope}

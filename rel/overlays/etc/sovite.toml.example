@@ -79,6 +79,8 @@ bare_line_endings = "reject"
 vrfy = false
 # Clients that may relay to any domain. Empty: relay for no one.
 trusted_networks = []
+# Offer REQUIRETLS (RFC 8689) over TLS.
+requiretls = true
 
 [domains]
 # Domains this server is the final destination for. Defaults to the hostname.
@@ -119,8 +121,9 @@ max_addresses = 5
 ip_versions = ["ipv6", "ipv4"]
 connect_timeout = "30s"
 # TLS to other servers: none, may (opportunistic), encrypt, verify, or dane.
-# "dane" needs a local DNSSEC-validating resolver.
-tls = "may"
+# "dane" uses DANE where DNSSEC allows it (see [dns]), and is otherwise "may".
+# With "may" and "dane", recipient domains' MTA-STS policies apply too.
+tls = "dane"
 # tls_policy = { "example.com" = "verify" }
 # Log in to the relay host (only over TLS).
 # relayhost_username = "user"
@@ -198,6 +201,30 @@ reports = false
 # passes there.
 enabled = false
 # secrets = ["a long random string"]
+
+[dns]
+# DANE needs a DNSSEC-validating resolver on this host, such as Unbound.
+# Unset: the system's nameservers.
+# nameservers = ["127.0.0.1"]
+# Believe the resolver's DNSSEC validation: "auto" (only from this host),
+# "on", or "off".
+dnssec = "auto"
+
+[mta_sts]
+# Apply the MTA-STS policies of recipient domains.
+enabled = true
+# Serve this server's policy at https://mta-sts.<domain>/.well-known/mta-sts.txt.
+# The TLS certificate must include mta-sts.<domain>.
+serve = false
+# port = 443
+# The policy served: "testing" first, then "enforce".
+mode = "testing"
+# mx = ["mx.example.com"]
+max_age = "7d"
+
+[tls_rpt]
+# Send TLS-RPT reports to the domains you deliver to.
+reports = false
 
 [bounce]
 # Where to report notifications that could not be delivered. Unset: log only.

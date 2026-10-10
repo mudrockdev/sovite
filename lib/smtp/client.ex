@@ -12,7 +12,8 @@ defmodule Sovite.SMTP.Client do
 
   With `PIPELINING` (RFC 2920), `MAIL`, every `RCPT`, and `DATA` are sent
   in one batch. `SIZE` (RFC 1870) and `BODY=8BITMIME` (RFC 6152) are sent
-  when the server supports them. The body is dot-stuffed while streaming
+  when the server supports them, and `REQUIRETLS` (RFC 8689) when asked
+  for. The body is dot-stuffed while streaming
   with `Sovite.SMTP.DataEncoder`.
 
   Replies are parsed with `Sovite.SMTP.Reply.decode/2`, so a hostile
@@ -134,11 +135,15 @@ defmodule Sovite.SMTP.Client do
     * `:eight_bit_not_supported` - an 8-bit message (`body_type:
       :"8bitmime"`), but the server does not support `8BITMIME`.
     * `{:invalid_address, address}` - not a valid mailbox.
+    * `:requiretls_not_supported` - `requiretls: true`, but the
+      connection is not encrypted or the server does not offer
+      `REQUIRETLS`.
   """
   @type refusal ::
           {:message_too_large, pos_integer()}
           | :eight_bit_not_supported
           | {:invalid_address, String.t()}
+          | :requiretls_not_supported
 
   @typedoc """
   The outcome for one recipient: the reply that decided it, and the
@@ -343,16 +348,26 @@ defmodule Sovite.SMTP.Client do
     * `:size` - the message size in bytes, sent with `SIZE` and checked
       against the server's limit.
     * `:body_type` - `:"7bit"`, `:"8bitmime"`, or `nil` (not declared).
+    * `:requiretls` - send `REQUIRETLS`, so the server must relay the
+      message only over verified TLS too (RFC 8689). Defaults to `false`.
   """
   @spec deliver(t(), String.t(), [String.t(), ...], Enumerable.t(), keyword()) ::
           {:ok, t(), [result()]} | {:error, t(), refusal()} | {:error, error()}
   def deliver(%__MODULE__{} = client, sender, [_ | _] = recipients, body, opts \\ []) do
     size = Keyword.get(opts, :size)
     body_type = Keyword.get(opts, :body_type)
+    requiretls = Keyword.get(opts, :requiretls, false)
 
-    case check(client, sender, recipients, size, body_type) do
+    case check(client, sender, recipients, size, body_type, requiretls) do
       :ok ->
-        mail = ["MAIL FROM:<", sender, ">", mail_params(client, size, body_type)]
+        mail = [
+          "MAIL FROM:<",
+          sender,
+          ">",
+          mail_params(client, size, body_type),
+          if(requiretls, do: " REQUIRETLS", else: [])
+        ]
+
         run_transaction(client, mail, recipients, body)
 
       {:error, refusal} ->
@@ -443,7 +458,11 @@ defmodule Sovite.SMTP.Client do
 
   ## Transactions
 
-  defp check(client, sender, recipients, size, body_type) do
+  defp check(client, _sender, _recipients, _size, _body_type, true)
+       when client.tls == nil or not is_map_key(client.extensions, "REQUIRETLS"),
+       do: {:error, :requiretls_not_supported}
+
+  defp check(client, sender, recipients, size, body_type, _requiretls) do
     limit = size_limit(client)
 
     cond do

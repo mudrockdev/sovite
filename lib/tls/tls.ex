@@ -15,6 +15,11 @@ defmodule Sovite.TLS do
     * `Sovite.TLS.Certificate` - loads certificate chains and keys.
     * `Sovite.TLS.CertStore` - certificates by name, with SNI and reload.
     * `Sovite.TLS.DANE` - DANE TLSA verification for SMTP (RFC 7672).
+    * `Sovite.TLS.MTASTS` - MTA-STS policies (RFC 8461): discovery,
+      fetching, MX matching, and `Sovite.TLS.MTASTS.Server` to serve
+      them.
+    * `Sovite.TLS.TLSRPT` - TLS reporting (RFC 8460): report
+      destinations, the JSON report, and its delivery.
     * `Sovite.TLS.ACME` - obtains certificates from an ACME CA (RFC 8555).
   """
 
@@ -183,6 +188,44 @@ defmodule Sovite.TLS do
         ] ++ base
     end
   end
+
+  @doc """
+  Makes `ssl` client options report the certificate problems the
+  handshake finds. Each one is sent to `pid` as `{:tls_verify, ref,
+  reason}`: an `:ssl` bad-certificate reason such as `:unknown_ca`,
+  `:cert_expired`, or `:hostname_check_failed`, or the `:fail` reason of
+  the options' own `verify_fun` (such as `:dane_mismatch` from
+  `Sovite.TLS.DANE`).
+
+  With `enforce: false` the problems do not stop the handshake: they are
+  only reported. That is MTA-STS testing mode (RFC 8461 §5), and what
+  TLS-RPT (RFC 8460) collects. Options without `verify: :verify_peer`
+  are returned unchanged.
+  """
+  @spec report_verify([:ssl.tls_client_option()], {pid(), reference()}, keyword()) ::
+          [:ssl.tls_client_option()]
+  def report_verify(ssl, {pid, ref}, opts \\ []) do
+    if Keyword.get(ssl, :verify) == :verify_peer do
+      enforce = Keyword.get(opts, :enforce, true)
+      {fun, user_state} = Keyword.get(ssl, :verify_fun, {&default_verify/3, []})
+      reporting = &reported(fun.(&1, &2, &3), &3, {pid, ref}, enforce)
+      Keyword.put(ssl, :verify_fun, {reporting, user_state})
+    else
+      ssl
+    end
+  end
+
+  defp reported({:fail, reason}, state, {pid, ref}, enforce) do
+    send(pid, {:tls_verify, ref, reason})
+    if enforce, do: {:fail, reason}, else: {:valid, state}
+  end
+
+  defp reported(result, _state, _report_to, _enforce), do: result
+
+  # What :ssl does without a verify_fun.
+  defp default_verify(_cert, {:bad_cert, reason}, _state), do: {:fail, reason}
+  defp default_verify(_cert, {:extension, _}, state), do: {:unknown, state}
+  defp default_verify(_cert, _valid_or_valid_peer, state), do: {:valid, state}
 
   defp suites!(names) do
     case ciphers(names) do
