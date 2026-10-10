@@ -25,3 +25,6 @@ sovite-*.tar
 .elixir_ls
 /priv/plts/
 sovite.toml
+
+# Bun workspace dependencies.
+/node_modules/

@@ -1,0 +1,18 @@
+{
+	"name": "sovite",
+	"private": true,
+	"workspaces": [
+		"lib/core/sovite_web"
+	],
+	"scripts": {
+		"dev": "bun --filter sovite-web dev",
+		"build": "bun --filter sovite-web build",
+		"check": "bun --filter sovite-web check",
+		"lint": "bun --filter sovite-web lint",
+		"format": "bun --filter sovite-web format",
+		"test": "bun --filter sovite-web test"
+	},
+	"devDependencies": {
+		"@socketsecurity/bun-security-scanner": "^1.1.3"
+	}
+}
