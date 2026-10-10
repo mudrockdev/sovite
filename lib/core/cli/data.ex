@@ -12,13 +12,14 @@ defmodule Sovite.Core.CLI.Data do
     Aliases,
     BccRules,
     Domains,
+    GreylistEntries,
     Mailboxes,
     RelocatedUsers,
     SenderRelays,
     Transports
   }
 
-  @commands ~w(domain alias mailbox moved transport sender-relay access rewrite bcc)
+  @commands ~w(domain alias mailbox moved transport sender-relay access rewrite bcc greylist)
 
   @usage """
     domain list                       List the domains in the database
@@ -51,6 +52,8 @@ defmodule Sovite.Core.CLI.Data do
     bcc list                          List BCC rules
     bcc add KIND PATTERN ADDRESS      Copy mail whose sender/recipient (KIND) matches PATTERN to ADDRESS
     bcc delete KIND PATTERN ADDRESS
+    greylist list                     List greylisting triplets: client network, sender, recipient
+    greylist flush                    Forget them all, so every sender is greylisted again
   """
 
   @doc "The commands this module handles."
@@ -168,6 +171,11 @@ defmodule Sovite.Core.CLI.Data do
   def run(["access" | args], path), do: access(args, path)
   def run(["rewrite" | args], path), do: rewrite(args, path)
   def run(["bcc" | args], path), do: bcc(args, path)
+  def run(["greylist", "list"], path), do: with_repo(path, &list_greylist/1)
+
+  def run(["greylist", "flush"], path),
+    do: with_repo(path, &done("deleted #{GreylistEntries.delete_all(&1)} greylisting triplets"))
+
   def run(_argv, _path), do: :usage
 
   defp sender_relay(["list"], path), do: with_repo(path, &list_sender_relays/1)
@@ -353,6 +361,19 @@ defmodule Sovite.Core.CLI.Data do
 
   defp list_relocated(repo) do
     for entry <- RelocatedUsers.list(repo), do: IO.puts("#{entry.address}  #{entry.new_location}")
+    0
+  end
+
+  defp list_greylist(repo) do
+    for entry <- GreylistEntries.list(repo) do
+      state = if entry.passed_at, do: "passed", else: "waiting"
+      sender = if entry.sender == "", do: "<>", else: entry.sender
+      seen = DateTime.to_iso8601(entry.last_seen)
+      IO.puts("#{entry.client_network}  #{sender}  #{entry.recipient}  #{state}  #{seen}")
+    end
+
+    %{total: total, passed: passed} = GreylistEntries.counts(repo)
+    IO.puts("#{total} triplets, #{passed} passed")
     0
   end
 

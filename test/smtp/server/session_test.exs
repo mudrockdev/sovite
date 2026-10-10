@@ -18,6 +18,8 @@ defmodule Sovite.SMTP.Server.SessionTest do
     end
 
     @impl true
+    def handle_greet(input, state), do: respond(:greet, input, state)
+    @impl true
     def handle_helo(kind, name, state), do: respond(:helo, {kind, name}, state)
     @impl true
     def handle_mail(sender, params, state), do: respond(:mail, {sender, params}, state)
@@ -388,6 +390,106 @@ defmodule Sovite.SMTP.Server.SessionTest do
   test "closes on HTTP requests" do
     assert {:close, out, _} = input(started(), "POST / HTTP/1.1\r\nHost: x\r\n")
     assert replies(out) == ["421 4.7.0 mx.test Non-SMTP command, closing connection"]
+  end
+
+  test "closes on HTTP header lines" do
+    assert {:close, out, _} = input(started(), "User-Agent: curl/8.0\r\n")
+    assert replies(out) == ["421 4.7.0 mx.test Non-SMTP command, closing connection"]
+  end
+
+  describe "greeting delay" do
+    defp paused(handler_opts \\ [], opts \\ []) do
+      pause = fn _connection, state -> {:pause, 200, state} end
+      assert {:continue, "", session} = start([init: pause] ++ handler_opts, opts)
+      session
+    end
+
+    test "greets once the delay is over" do
+      session = paused()
+      assert Session.timeout(session) in 1..200
+      refute_received {:greet, _}
+
+      assert {:continue, out, session} = Session.handle_timeout(session)
+      assert IO.iodata_to_binary(out) == "220 mx.test ESMTP\r\n"
+      assert_received {:greet, ""}
+      assert Session.timeout(session) == 300_000
+    end
+
+    test "passes early input to the handler, then processes it" do
+      assert {:continue, out, _} = input(paused(), "EHLO c.test\r\nNOOP\r\n")
+      assert_received {:greet, "EHLO c.test\r\nNOOP\r\n"}
+      assert ["220 mx.test ESMTP", "250 ENHANCEDSTATUSCODES", "250 2.0.0 Ok"] = replies(out)
+    end
+
+    test "the handler can refuse an early talker" do
+      refuse = fn _input, state -> {:close, Reply.new(554, "5.7.1", "Talked first"), state} end
+
+      assert {:close, "554 5.7.1 Talked first\r\n", session} =
+               input(paused(greet: refuse), "EHLO x\r\n")
+
+      assert {:close, "", _} = input(session, "MAIL FROM:<a@x.test>\r\n")
+    end
+  end
+
+  test "tarpits error replies from :tarpit_after on" do
+    session = started([], tarpit_after: 2, tarpit_delay: 100)
+    {:continue, _, session} = input(session, "FOO\r\n")
+    assert {0, session} = Session.take_delay(session)
+
+    {:continue, _, session} = input(session, "FOO\r\nNOOP\r\nFOO\r\n")
+    assert {200, session} = Session.take_delay(session)
+    assert {0, _} = Session.take_delay(session)
+
+    # Off by default.
+    {:continue, _, session} = input(started(), "FOO\r\nFOO\r\nFOO\r\nFOO\r\n")
+    assert {0, _} = Session.take_delay(session)
+  end
+
+  describe "forbid_unauth_pipelining" do
+    defp strict, do: started([], forbid_unauth_pipelining: true)
+
+    test "allows pipelining where RFC 2920 does" do
+      {:continue, out, session} =
+        input(strict(), "EHLO c.test\r\n")
+
+      {:continue, out2, session} =
+        input(session, "MAIL FROM:<a@x.test>\r\nRCPT TO:<b@y.test>\r\nDATA\r\n")
+
+      assert codes(out <> out2) == [250, 250, 250, 354]
+      {:close, out, _} = input(session, "Subject: x\r\n\r\nhi\r\n.\r\nQUIT\r\n")
+      assert codes(out) == [250, 221]
+    end
+
+    test "closes on input after a command that must end a group" do
+      for line <- ["EHLO c.test", "NOOP", "VRFY alice"] do
+        session =
+          if line == "EHLO c.test",
+            do: strict(),
+            else: elem(input(strict(), "EHLO c.test\r\n"), 2)
+
+        assert {:close, out, _} = input(session, line <> "\r\nMAIL FROM:<a@x.test>\r\n")
+        assert replies(out) == ["554 5.5.0 Error: improper use of SMTP command pipelining"]
+      end
+
+      {:continue, _, session} =
+        input(strict(), "EHLO c.test\r\n")
+
+      {:continue, _, session} = input(session, "MAIL FROM:<a@x.test>\r\nRCPT TO:<b@y.test>\r\n")
+      assert {:close, out, _} = input(session, "DATA\r\nSubject: x\r\n")
+      assert replies(out) == ["554 5.5.0 Error: improper use of SMTP command pipelining"]
+      refute_received {:data, _}
+    end
+
+    test "closes on any pipelining after HELO" do
+      {:continue, _, session} = input(strict(), "HELO c.test\r\n")
+      assert {:close, out, _} = input(session, "MAIL FROM:<a@x.test>\r\nRCPT TO:<b@y.test>\r\n")
+      assert replies(out) == ["554 5.5.0 Error: improper use of SMTP command pipelining"]
+    end
+
+    test "is off by default" do
+      {:continue, out, _} = input(started(), "EHLO c.test\r\nNOOP\r\n")
+      assert codes(out) == [250, 250]
+    end
   end
 
   test "VRFY answers 252 unless enabled" do

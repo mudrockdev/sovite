@@ -18,6 +18,12 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :auth, :success]` | | `session_id`, `remote_ip`, `mechanism`, `username` |
   | `[:sovite, :auth, :failure]` | | `session_id`, `remote_ip`, `mechanism`, `username`, `reason` |
   | `[:sovite, :abuse, :penalty, :banned]` | `failures` | `penalty`, `key`, `ban_time` |
+  | `[:sovite, :abuse, :rate_limit, :exceeded]` | `limit`, `window` | `rate_limit`, `key` |
+  | `[:sovite, :abuse, :dnsbl, :listed]` | `weight` | `zone`, `query`, `codes` |
+  | `[:sovite, :abuse, :dnsbl, :error]` | | `zone`, `query`, `reason` |
+  | `[:sovite, :screen, :rejected]` | `score` | `session_id`, `remote_ip`, `stage`, `reasons` |
+  | `[:sovite, :greylist, :deferred]` | `retry_after` | `client_network`, `sender`, `recipient` |
+  | `[:sovite, :outbound, :suspended]` | `sent`, `failed` | `user`, `suspend_time` |
   | `[:sovite, :tls, :certificate, :loaded]` | | `cert_file`, `names`, `not_after` |
   | `[:sovite, :tls, :certificate, :error]` | | `cert_file`, `reason` |
   | `[:sovite, :tls, :acme, :issued]` | | `domains`, `not_after` |
@@ -49,9 +55,11 @@ defmodule Sovite.Core.Telemetry do
   Message lifecycle events (`:queue`, delivery `:stop` and `:exception`),
   authentication results of received mail, sent DMARC reports,
   successful logins, certificate loads and ACME issuance, failed TLS
-  handshakes, and SMTP commands that got a 4xx or 5xx reply are logged at
-  `:info`. Corrupt messages, discarded notifications, failed logins, bans,
-  certificate errors, and failed ACME orders are logged at `:warning`.
+  handshakes, SMTP commands that got a 4xx or 5xx reply, clients the
+  screen refused, exceeded rate limits, and failed DNS list lookups are
+  logged at `:info`. Corrupt messages, discarded notifications, failed
+  logins, bans, suspended users, certificate errors, and failed ACME
+  orders are logged at `:warning`.
   All other events are logged at `:debug`.
 
   Failed logins are logged as `auth.failure: mechanism=PLAIN,
@@ -76,6 +84,12 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :auth, :success],
     [:sovite, :auth, :failure],
     [:sovite, :abuse, :penalty, :banned],
+    [:sovite, :abuse, :rate_limit, :exceeded],
+    [:sovite, :abuse, :dnsbl, :listed],
+    [:sovite, :abuse, :dnsbl, :error],
+    [:sovite, :screen, :rejected],
+    [:sovite, :greylist, :deferred],
+    [:sovite, :outbound, :suspended],
     [:sovite, :tls, :certificate, :loaded],
     [:sovite, :tls, :certificate, :error],
     [:sovite, :tls, :acme, :issued],
@@ -113,7 +127,10 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :tls_rpt, :report, :sent],
     [:sovite, :auth, :success],
     [:sovite, :tls, :certificate, :loaded],
-    [:sovite, :tls, :acme, :issued]
+    [:sovite, :tls, :acme, :issued],
+    [:sovite, :abuse, :rate_limit, :exceeded],
+    [:sovite, :abuse, :dnsbl, :error],
+    [:sovite, :screen, :rejected]
   ]
 
   @warning_events [
@@ -121,6 +138,7 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :queue, :notification, :discarded],
     [:sovite, :auth, :failure],
     [:sovite, :abuse, :penalty, :banned],
+    [:sovite, :outbound, :suspended],
     [:sovite, :tls, :certificate, :error],
     [:sovite, :tls, :acme, :failed],
     [:sovite, :mta_sts, :failed],

@@ -81,6 +81,7 @@ defmodule Sovite.Core.ConfigTest do
              auth: false,
              require_tls: false,
              require_auth: false,
+             screen: true,
              tls_min_version: nil,
              tls_ciphers: nil
            }
@@ -630,6 +631,85 @@ defmodule Sovite.Core.ConfigTest do
       assert Enum.map(errors, &Exception.message/1) == [
                "mta_sts.serve: needs a TLS certificate ([[tls.certificate]] or [tls.acme])",
                "mta_sts.max_age: must be at most 365.25 days"
+             ]
+    end
+  end
+
+  describe "Phase 8 settings" do
+    test "defaults: tarpit and pipelining checks on, the rest off" do
+      {:ok, config} = Config.parse(~s([[listener]]\nport = 25\n[[listener]]\nmode = "lmtp"))
+      assert Enum.map(config.listener, & &1.screen) == [true, false]
+
+      assert %{tarpit_after: 3, tarpit_delay: 1_000, forbid_unauth_pipelining: true} =
+               config.smtp
+
+      assert %{greet_delay: nil, threshold: 1, early_talker_weight: 1, dnsbl: [], rhsbl: []} =
+               config.screen
+
+      assert config.greylist.enabled == false
+      assert Enum.all?(Map.values(config.rate_limit), &is_nil/1)
+      assert %{enabled: true, max_failure_percent: 50, min_failures: 20} = config.outbound
+    end
+
+    test "reads the screen, limits, and greylisting" do
+      {:ok, config} =
+        Config.parse("""
+        [screen]
+        greet_delay = "6s"
+        threshold = 3
+        [[screen.dnsbl]]
+        zone = "Zen.Spamhaus.org"
+        weight = 2
+        codes = ["127.0.0.[2..11]"]
+        [[screen.dnsbl]]
+        zone = "list.dnswl.org"
+        weight = -2
+        [[screen.rhsbl]]
+        zone = "dbl.spamhaus.org"
+        check = ["sender"]
+        [rate_limit]
+        client_messages = "100/1h"
+        user_recipients = "1000 / 1d"
+        [greylist]
+        enabled = true
+        delay = "1m"
+        """)
+
+      assert config.screen.greet_delay == 6_000
+      assert config.screen.early_talker_weight == 3
+
+      assert [%{zone: "zen.spamhaus.org", weight: 2, codes: [_]}, %{weight: -2}] =
+               config.screen.dnsbl
+
+      assert [%{zone: "dbl.spamhaus.org", weight: 1, check: [:sender]}] = config.screen.rhsbl
+      assert config.rate_limit.client_messages == {100, 3_600_000}
+      assert config.rate_limit.user_recipients == {1000, 86_400_000}
+      assert %{enabled: true, delay: 60_000} = config.greylist
+    end
+
+    test "rejects bad settings" do
+      {:error, errors} =
+        Config.parse("""
+        [screen]
+        [[screen.dnsbl]]
+        weight = 1
+        codes = ["127.0.0.256"]
+        [rate_limit]
+        client_messages = "many"
+        [greylist]
+        delay = "3d"
+        """)
+
+      assert [
+               "rate_limit.client_messages: expected a rate like \"100/1h\", got \"many\"",
+               "screen.dnsbl[0].codes[0]: invalid reply code" <> _,
+               "screen.dnsbl[0].zone: is required"
+             ] = errors |> Enum.map(&Exception.message/1) |> Enum.sort()
+
+      {:error, errors} = Config.parse(~s([greylist]\ndelay = "3d"))
+
+      assert Enum.map(errors, &Exception.message/1) == [
+               "greylist.retry_window: must be longer than greylist.delay"
              ]
     end
   end

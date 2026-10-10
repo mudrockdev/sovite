@@ -40,6 +40,31 @@ defmodule Sovite.SMTP.Server.Session do
   `Sovite.SMTP.Server.Handler`. Lines of up to 12288 bytes are accepted
   while `AUTH` is offered, for large initial responses and tokens.
 
+  ## Greeting delay
+
+  A handler's `init/2` may return `{:pause, milliseconds, state}` to hold
+  the greeting back, as postscreen does: clients must wait for it (RFC
+  5321 §3.1), so one that talks first is most likely a spam bot. The
+  session then returns no output, and `timeout/1` is the time left. When
+  it runs out, or as soon as the client sends anything, the handler's
+  `handle_greet/2` gets the early input (`""` if none) and decides
+  whether to greet the client. Early input of a client let in is then
+  processed as commands.
+
+  ## Tarpit
+
+  With `:tarpit_delay`, every error reply from the `:tarpit_after`th on
+  adds that many milliseconds to the session's delay: the caller waits
+  that long before sending the output (see `take_delay/1`). This slows
+  down dictionary attacks and other clients that keep getting errors.
+
+  ## Pipelining
+
+  With `forbid_unauth_pipelining: true`, a client that sends more input
+  after a command that must end a group (RFC 2920 §3.1: `EHLO`, `DATA`,
+  `NOOP`, ...), or after any command before `PIPELINING` was offered,
+  gets `554 5.5.0` and is disconnected: it did not wait for the reply.
+
   ## Options
 
     * `:hostname` - name in the greeting and `EHLO` reply. Required.
@@ -74,6 +99,10 @@ defmodule Sovite.SMTP.Server.Session do
       `requiretls: true` in the mail parameters: the handler must then
       only relay the message over TLS that is verified with DANE or
       MTA-STS. Defaults to `false`.
+    * `:tarpit_after` - errors before the tarpit starts. Defaults to 3.
+    * `:tarpit_delay` - milliseconds per error reply after that. Defaults
+      to 0: no tarpit.
+    * `:forbid_unauth_pipelining` - see "Pipelining". Defaults to `false`.
 
   The connection map may carry `:tls` (a `Sovite.TLS.info()`) when it is
   encrypted from the start (implicit TLS, RFC 8314).
@@ -137,8 +166,15 @@ defmodule Sovite.SMTP.Server.Session do
     plaintext_auth: false,
     max_auth_failures: 3,
     lmtp: false,
-    requiretls: false
+    requiretls: false,
+    tarpit_after: 3,
+    tarpit_delay: 0,
+    forbid_unauth_pipelining: false
   ]
+
+  # RFC 2920 §3.1: these may only be the last command of a group. QUIT
+  # closes anyway, and input after STARTTLS is dropped.
+  @group_end ~w(EHLO HELO LHLO DATA VRFY NOOP AUTH)
 
   defstruct [
     :connection,
@@ -155,7 +191,8 @@ defmodule Sovite.SMTP.Server.Session do
     buffer: <<>>,
     discarding: false,
     errors: 0,
-    auth_failures: 0
+    auth_failures: 0,
+    delay: 0
   ]
 
   @opaque t :: %__MODULE__{}
@@ -183,9 +220,34 @@ defmodule Sovite.SMTP.Server.Session do
 
     case module.init(connection, handler_opts) do
       {:ok, state} ->
+        greet(%{session | handler_state: state})
+
+      {:pause, delay, state} ->
+        deadline = System.monotonic_time(:millisecond) + delay
+        {:continue, [], %{session | handler_state: state, phase: {:greeting, deadline}}}
+
+      {:close, reply, state} ->
+        {:close, Reply.encode(reply), %{session | handler_state: state, phase: :closed}}
+    end
+  end
+
+  # Input that arrived before the greeting is passed to the handler, then
+  # processed as commands if the handler lets the client in.
+  defp greet(session) do
+    result =
+      if function_exported?(session.handler, :handle_greet, 2),
+        do: session.handler.handle_greet(session.buffer, session.handler_state),
+        else: {:ok, session.handler_state}
+
+    case result do
+      {:ok, state} ->
         protocol = if session.opts.lmtp, do: "LMTP", else: "ESMTP"
         greeting = Reply.new(220, "#{session.hostname} #{protocol}")
-        {:continue, Reply.encode(greeting), %{session | handler_state: state}}
+        session = %{session | handler_state: state, phase: :command}
+
+        if session.buffer == "",
+          do: {:continue, Reply.encode(greeting), session},
+          else: process(session, [Reply.encode(greeting)])
 
       {:close, reply, state} ->
         {:close, Reply.encode(reply), %{session | handler_state: state, phase: :closed}}
@@ -233,11 +295,26 @@ defmodule Sovite.SMTP.Server.Session do
   @doc "Milliseconds to wait for more input before calling `handle_timeout/1`."
   @spec timeout(t()) :: timeout()
   def timeout(%__MODULE__{phase: :data, opts: opts}), do: opts.data_timeout
+
+  def timeout(%__MODULE__{phase: {:greeting, deadline}}),
+    do: max(deadline - System.monotonic_time(:millisecond), 0)
+
   def timeout(%__MODULE__{opts: opts}), do: opts.command_timeout
+
+  @doc """
+  Returns the milliseconds to wait before sending the output of the last
+  call (see "Tarpit" above), and resets it.
+  """
+  @spec take_delay(t()) :: {non_neg_integer(), t()}
+  def take_delay(%__MODULE__{delay: delay} = session), do: {delay, %{session | delay: 0}}
 
   @doc "Processes bytes received from the client."
   @spec handle_input(t(), binary()) :: result()
   def handle_input(%__MODULE__{phase: :closed} = session, _bytes), do: {:close, [], session}
+
+  # The client did not wait for the greeting.
+  def handle_input(%__MODULE__{phase: {:greeting, _}} = session, bytes),
+    do: greet(%{session | buffer: session.buffer <> bytes})
 
   def handle_input(%__MODULE__{} = session, bytes) do
     process(%{session | buffer: session.buffer <> bytes}, [])
@@ -245,6 +322,8 @@ defmodule Sovite.SMTP.Server.Session do
 
   @doc "The client sent nothing for `timeout/1` milliseconds."
   @spec handle_timeout(t()) :: result()
+  def handle_timeout(%__MODULE__{phase: {:greeting, _}} = session), do: greet(session)
+
   def handle_timeout(%__MODULE__{} = session) do
     session = session |> abort_data(:timeout) |> abort_auth()
     reply = Reply.new(421, "4.4.2", "#{session.hostname} Error: timeout exceeded")
@@ -342,8 +421,15 @@ defmodule Sovite.SMTP.Server.Session do
     case Command.parse(line) do
       {:ok, command} ->
         case gate(command, session) do
-          :ok -> execute(command, session, out, started)
-          {:error, reply} -> reply(session, out, command_name(command), nil, reply, started)
+          :ok ->
+            execute(command, session, out, started)
+
+          {:error, reply} ->
+            reply(session, out, command_name(command), nil, reply, started)
+
+          {:close, reply} ->
+            session = %{abort_auth(session) | phase: :closed, buffer: <<>>}
+            reply(session, out, command_name(command), nil, reply, started)
         end
 
       {:error, verb, reason} ->
@@ -356,14 +442,32 @@ defmodule Sovite.SMTP.Server.Session do
     end
   end
 
-  # Commands that need TLS first, under require_tls.
-  defp gate(command, %{opts: %{require_tls: true}} = session) do
-    if command_name(command) in ~w(MAIL RCPT DATA VRFY AUTH) and tls(session) == nil,
-      do: {:error, Reply.new(530, "5.7.0", "Must issue a STARTTLS command first")},
-      else: :ok
+  defp gate(command, session) do
+    cond do
+      unauth_pipelining?(command, session) ->
+        {:close, Reply.new(554, "5.5.0", "Error: improper use of SMTP command pipelining")}
+
+      # Commands that need TLS first, under require_tls.
+      session.opts.require_tls and tls(session) == nil and
+          command_name(command) in ~w(MAIL RCPT DATA VRFY AUTH) ->
+        {:error, Reply.new(530, "5.7.0", "Must issue a STARTTLS command first")}
+
+      true ->
+        :ok
+    end
   end
 
-  defp gate(_command, _session), do: :ok
+  # More input after a command that must end a group, or after any command
+  # before PIPELINING was offered: the client did not wait for the reply.
+  # Spam bots do this, and so do SMTP smuggling attempts.
+  defp unauth_pipelining?(command, %{opts: %{forbid_unauth_pipelining: true}} = session) do
+    name = command_name(command)
+
+    session.buffer != "" and name not in ["QUIT", "STARTTLS"] and
+      (name in @group_end or not session.esmtp)
+  end
+
+  defp unauth_pipelining?(_command, _session), do: false
 
   defp command_name(command) when is_atom(command), do: verb_name(command)
   defp command_name(command), do: command |> elem(0) |> verb_name()
@@ -984,8 +1088,7 @@ defmodule Sovite.SMTP.Server.Session do
 
     out = [Reply.encode(reply) | out]
 
-    session =
-      if Reply.negative?(reply), do: %{session | errors: session.errors + 1}, else: session
+    session = if Reply.negative?(reply), do: count_error(session), else: session
 
     cond do
       session.phase == :closed or reply.code == 421 ->
@@ -1001,6 +1104,12 @@ defmodule Sovite.SMTP.Server.Session do
       true ->
         process(session, out)
     end
+  end
+
+  defp count_error(%{opts: opts} = session) do
+    errors = session.errors + 1
+    delay = if errors >= opts.tarpit_after, do: opts.tarpit_delay, else: 0
+    %{session | errors: errors, delay: session.delay + delay}
   end
 
   defp reply_event(session, command, argument, reply, started) do

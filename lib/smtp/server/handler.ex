@@ -25,9 +25,19 @@ defmodule Sovite.SMTP.Server.Handler do
 
   @doc """
   Called when the connection opens, before the greeting. Return
-  `{:close, reply, state}` to refuse the client (typically with `554`).
+  `{:close, reply, state}` to refuse the client (typically with `554`),
+  or `{:pause, milliseconds, state}` to wait that long before the
+  greeting (see "Greeting delay" in `Sovite.SMTP.Server.Session`).
   """
   @callback init(Session.connection(), opts :: term()) ::
+              {:ok, state()} | {:pause, non_neg_integer(), state()} | {:close, Reply.t(), state()}
+
+  @doc """
+  Called just before the greeting with what the client sent before it:
+  `""` unless the greeting was delayed and the client did not wait.
+  Return `{:close, reply, state}` to refuse the client instead.
+  """
+  @callback handle_greet(early_input :: binary(), state()) ::
               {:ok, state()} | {:close, Reply.t(), state()}
 
   @doc """
@@ -118,7 +128,8 @@ defmodule Sovite.SMTP.Server.Handler do
   @doc "The session ended."
   @callback terminate(reason :: term(), state()) :: any()
 
-  @optional_callbacks handle_rset: 1,
+  @optional_callbacks handle_greet: 2,
+                      handle_rset: 1,
                       handle_vrfy: 2,
                       handle_tls: 2,
                       auth_mechanisms: 1,

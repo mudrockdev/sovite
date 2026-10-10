@@ -11,6 +11,10 @@ defmodule Sovite.SMTP.Server.Connection do
   greeting. With `STARTTLS`, it runs when the session asks for it. A
   failed handshake closes the connection.
 
+  A tarpitted session's output is sent after its delay (see
+  `Sovite.SMTP.Server.Session.take_delay/1`); the socket is not read
+  meanwhile.
+
   On server shutdown, open sessions get `421 4.3.2` before the socket is
   closed.
 
@@ -60,7 +64,8 @@ defmodule Sovite.SMTP.Server.Connection do
       session_id: 8 |> :crypto.strong_rand_bytes() |> Base.encode32(padding: false, case: :lower),
       ssl_opts: nil,
       session: nil,
-      started_at: nil
+      started_at: nil,
+      tarpit: false
     }
 
     {:ok, state, {:continue, :handshake}}
@@ -130,6 +135,9 @@ defmodule Sovite.SMTP.Server.Connection do
   def handle_info({kind, _socket, _reason}, state) when kind in [:tcp_error, :ssl_error],
     do: {:stop, :normal, state}
 
+  def handle_info({:tarpit, result, output}, state),
+    do: send_output(result, output, %{state | tarpit: false})
+
   def handle_info(:timeout, state) do
     {result, output, session} = Session.handle_timeout(state.session)
     respond(result, output, %{state | session: session})
@@ -157,7 +165,21 @@ defmodule Sovite.SMTP.Server.Connection do
     )
   end
 
+  # A tarpitted session's output waits for its delay. The socket is not
+  # read meanwhile.
   defp respond(result, output, state) do
+    {delay, session} = Session.take_delay(state.session)
+    state = %{state | session: session}
+
+    if delay > 0 do
+      Process.send_after(self(), {:tarpit, result, output}, delay)
+      {:noreply, %{state | tarpit: true}}
+    else
+      send_output(result, output, state)
+    end
+  end
+
+  defp send_output(result, output, state) do
     send_result = if IO.iodata_length(output) > 0, do: send_data(state, output), else: :ok
 
     cond do
@@ -234,6 +256,7 @@ defmodule Sovite.SMTP.Server.Connection do
   defp close(%{transport: :ssl, socket: socket}), do: :ssl.close(socket)
 
   defp timeout(%{session: nil}), do: :infinity
+  defp timeout(%{tarpit: true}), do: :infinity
   defp timeout(%{session: session}), do: Session.timeout(session)
 
   defp hostname(state), do: state.opts |> Keyword.fetch!(:session) |> Keyword.fetch!(:hostname)

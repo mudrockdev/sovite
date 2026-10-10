@@ -43,7 +43,8 @@ defmodule Sovite.SMTP.Command do
 
     * `:unrecognized` - unknown verb
     * `:not_implemented` - a known SMTP verb this server does not support
-    * `:non_smtp` - an HTTP request line, as in cross-protocol attacks
+    * `:non_smtp` - an HTTP request or header line, as in cross-protocol
+      attacks
     * `:invalid_characters` - control or non-ASCII characters
     * `:syntax` - wrong arguments for the verb
     * `:invalid_sender` / `:invalid_recipient` - bad path or mailbox
@@ -87,10 +88,13 @@ defmodule Sovite.SMTP.Command do
       not printable?(line) -> {:error, Map.get(@verbs, verb), :invalid_characters}
       Map.has_key?(@verbs, verb) -> parse_verb(Map.fetch!(@verbs, verb), argument)
       verb in @not_implemented -> {:error, nil, :not_implemented}
-      verb in @http -> {:error, nil, :non_smtp}
+      verb in @http or header_line?(verb) -> {:error, nil, :non_smtp}
       true -> {:error, nil, :unrecognized}
     end
   end
+
+  # "Host: example.com", "User-Agent: ...": an HTTP request's header.
+  defp header_line?(verb), do: verb =~ ~r/\A[A-Z0-9-]+:\z/
 
   defp split_verb(line) do
     case :binary.split(line, " ") do

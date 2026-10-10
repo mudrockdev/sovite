@@ -97,6 +97,7 @@ mode = "submissions"
 | `auth` | boolean | `false` / `true` / `true` | Offer `AUTH`. It is only offered over TLS, unless `auth.plaintext` is set. |
 | `require_tls` | boolean | `false` / `true` / `true` | Refuse `MAIL`, `RCPT`, `DATA`, `VRFY`, and `AUTH` with `530 5.7.0` until the client has sent `STARTTLS`. Do not set it on port 25: senders on the Internet may not support TLS. |
 | `require_auth` | boolean | `false` / `true` / `true` | Refuse `MAIL` with `530 5.7.0` until the client has authenticated. Needs `auth = true`. |
+| `screen` | boolean | `true` on `smtp`, else `false` | Run the postscreen-like checks of [`[screen]`](#screen) and greylisting on clients outside `smtp.trusted_networks`. |
 | `tls_min_version` | `"1.2"` \| `"1.3"` | `tls.min_version` | Override for this listener. |
 | `tls_ciphers` | array of cipher names | `tls.ciphers` | Override for this listener. |
 
@@ -175,6 +176,11 @@ Settings for all listeners. Limits apply per listener.
 | `trusted_networks` | array of networks | `[]` | Clients that may relay mail to any domain, such as your own servers. Addresses or CIDR networks: `["127.0.0.1", "192.0.2.0/24", "2001:db8::/32"]`. |
 | `max_hops` | integer | `50` | A message with more `Received:` fields than this is refused with `554 5.4.6 Too many hops`: it is most likely in a mail loop (RFC 5321 §6.3). |
 | `requiretls` | boolean | `true` | Offer `REQUIRETLS` (RFC 8689) on encrypted connections, except LMTP. A message sent with it is only relayed over TLS verified with DANE or MTA-STS, see [REQUIRETLS](#requiretls). |
+| `tarpit_after` | integer | `3` | Error replies before the tarpit starts. |
+| `tarpit_delay` | duration | `1s` | From the `tarpit_after`th error reply on, each one is sent this much later, slowing down dictionary attacks and other clients that keep getting errors. |
+| `forbid_unauth_pipelining` | boolean | `true` | Disconnect a client with `554 5.5.0` when it sends more commands without waiting for the reply to one that must end a group (`EHLO`, `DATA`, `NOOP`, ..., RFC 2920 §3.1), or pipelines at all before `PIPELINING` was offered. Spam bots and SMTP smuggling attempts do this; real servers do not. Not on LMTP listeners. |
+
+HTTP requests and header lines (cross-protocol attacks) close the session with `421 4.7.0`.
 
 ## `[domains]`
 
@@ -380,6 +386,117 @@ With `reports = true`, Sovite records the outcome of each session to a domain's 
 | `contact_info` | string | `report_from` | How to reach you, in the reports. |
 
 For your own domains, `sovitectl dns records` prints a TLS-RPT record that sends the reports of others to `postmaster@<domain>`.
+
+## Anti-abuse
+
+Checks of clients that send mail to this server, in the order they run. None of them apply to `smtp.trusted_networks`, and the screen and greylisting only run on listeners with `screen` (by default, `smtp` ones).
+
+### `[screen]`
+
+A postscreen-like score for each client. The client's address is looked up in the DNS lists below while the greeting is held back for `greet_delay`; each list it is on adds that list's weight. A client that talks before the greeting is an early talker, a typical spam bot, and adds `early_talker_weight`. At `EHLO` and `MAIL`, the RHSBL lists add the weights of the `EHLO` name and the sender's domain.
+
+A client that reaches `threshold` is refused: before the greeting with `554 5.7.1 Service unavailable; client [192.0.2.1] blocked: listed by zen.spamhaus.org`, and the connection is closed; at `EHLO` or `MAIL`, that command gets `554 5.7.1`. A client at or below `allow_threshold`, such as one on a DNSWL list with a negative weight, skips the RHSBL lists and greylisting. A client that passed (no early talking, no failed lookup) is remembered for `cache_time`: its next connections are not delayed or looked up again.
+
+```toml
+[screen]
+greet_delay = "6s"
+
+[[screen.dnsbl]]
+zone = "zen.spamhaus.org"
+weight = 2
+codes = ["127.0.0.[2..11]"]
+
+[[screen.dnsbl]]
+zone = "bl.spamcop.net"
+weight = 1
+
+[[screen.dnsbl]]
+zone = "list.dnswl.org"
+weight = -2
+codes = ["127.0.[0..255].[1..3]"]
+
+[[screen.rhsbl]]
+zone = "dbl.spamhaus.org"
+weight = 2
+codes = ["127.0.1.[2..99]"]
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `greet_delay` | duration | unset | Hold the greeting back this long. Unset: no delay, and no early talker detection. A few seconds is enough; real servers wait 5 minutes for it (RFC 5321 §4.5.3.2.1). |
+| `early_talker_weight` | integer | `threshold` | Added for talking before the greeting. By default, enough to refuse the client on its own. |
+| `threshold` | integer | `1` | The score at which a client is refused. |
+| `allow_threshold` | integer | `-1` | The score at or below which a client is allow-listed. |
+| `lookup_timeout` | duration | `10s` | How long to wait for the DNS lists. Lists that do not answer in time add nothing. |
+| `cache_time` | duration | `1d` | How long a client that passed is remembered, in memory. |
+| `dnsbl` | array of tables | `[]` | DNSBL and DNSWL lists of client addresses (RFC 5782). |
+| `rhsbl` | array of tables | `[]` | Lists of domains (RFC 5782 §2.3). |
+
+Each list has:
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `zone` | domain | required | The list's DNS zone. |
+| `weight` | integer | `1` | Added to the score when the client or domain is listed. Negative for allow lists. |
+| `codes` | array of strings | `[]` | The reply addresses that count, such as `"127.0.0.2"`, `"127.0.0.[2..11]"`, or `"127.0.[0..255].[1;3]"`. Empty: any reply in `127.0.0.0/8`. Add the same zone twice to weigh codes differently. |
+| `check` | array of `helo`, `sender` | both | RHSBL only: which domains to look up. |
+
+Replies outside `127.0.0.0/8` are ignored, and `127.255.255.0/24` replies (list errors, such as Spamhaus refusing queries from public resolvers) count as failed lookups and are logged. Most lists only answer your own resolver, so use one on this host (see [`[dns]`](#dns)).
+
+### Restrictions for `EHLO` names and reverse DNS
+
+These checks can be added to the `[restrictions]` chains (`Sovite.Core.Restrictions` lists all checks):
+
+| Check | Effect |
+|---|---|
+| `require_reverse_hostname` | `550 5.7.25` unless the client address has a reverse DNS (PTR) name. |
+| `require_fcrdns` | `550 5.7.25` unless that name also resolves back to the client address. Stricter. |
+| `reject_forged_helo` | `550 5.7.1` if the `EHLO` name is this server's host name or one of `domains.local`, `localhost`, or an address literal other than the client's address. |
+| `require_known_helo` | `550 5.7.1` unless the `EHLO` name has address or MX records. |
+| `require_matching_helo` | `550 5.7.1` unless the `EHLO` name resolves to the client address, or is its address literal. Strictest. |
+
+When DNS fails, they reply `450` instead, so no client is refused for a temporary problem. For example:
+
+```toml
+[restrictions]
+helo = ["permit_trusted", "permit_authenticated", "reject_forged_helo", "require_fqdn_helo"]
+mail = ["permit_trusted", "permit_authenticated", "require_reverse_hostname"]
+```
+
+### `[rate_limit]`
+
+Limits over a sliding window, as `"count/duration"`, such as `"100/1h"`. Unset limits do not apply. Client limits count per client address (per /64 for IPv6), and authenticated clients only count against the user limits. Counts are kept in memory.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `client_connections` | rate | unset | New connections. Extra ones get `421 4.7.0` and are closed. |
+| `client_messages` | rate | unset | Messages (`MAIL` commands). Extra ones get `450 4.7.1`. |
+| `client_recipients` | rate | unset | Accepted recipients. Extra ones get `450 4.7.1`. |
+| `user_messages` | rate | unset | Messages per authenticated user: a sending quota. |
+| `user_recipients` | rate | unset | Recipients per authenticated user. |
+
+### `[greylist]`
+
+Greylisting: a valid recipient from an unknown client network (/24 or /64) and sender gets `450 4.7.1 ... Greylisted, try again in 300s`. Real mail servers try again, and are let through after `delay`; most spam bots never retry. Once a client network, sender, and recipient have passed, they pass at once until they go unused for `max_age`. Authenticated and allow-listed clients skip it. Triplets are kept in the database; if it fails, mail passes.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Greylist. Delays the first mail from every new sender by `delay` or more. |
+| `delay` | duration | `5m` | How long a new triplet is deferred. |
+| `retry_window` | duration | `2d` | How long a deferred triplet waits for its retry. |
+| `max_age` | duration | `35d` | How long a passed triplet is remembered after its last use. |
+
+### `[outbound]`
+
+Detects accounts that are probably compromised. Each recipient an authenticated user's message is queued for counts as sent, and each one that fails for good as failed. A user with at least `min_failures` failures in the last `window`, making up at least `max_failure_percent` of what they sent, is suspended for `suspend_time`: their `MAIL` commands get `550 5.7.1`, and a warning is logged (`outbound.suspended`). Suspensions are kept in memory, so restarting Sovite lifts them. Cap the volume a user can send with the `user_*` limits in [`[rate_limit]`](#rate_limit).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Suspend users. |
+| `max_failure_percent` | integer | `50` | Failed share of recipients, in percent. |
+| `min_failures` | integer | `20` | Failures needed before a user is suspended. |
+| `window` | duration | `1h` | The period counted. |
+| `suspend_time` | duration | `1h` | How long a suspension lasts. |
 
 ## `[auth]`
 

@@ -17,11 +17,14 @@ defmodule Sovite.Test.SMTPClient do
   @type t :: %__MODULE__{socket: term(), transport: :gen_tcp | :ssl}
   @type reply :: {code :: 100..599, lines :: [String.t()]}
 
-  @doc "Connects to `host:port`. The greeting is not read."
-  @spec connect(:inet.port_number(), :inet.socket_address() | charlist()) ::
+  @doc """
+  Connects to `host:port`. The greeting is not read. `opts` are extra
+  `:gen_tcp` options, such as `ip: {127, 0, 0, 2}` for the source address.
+  """
+  @spec connect(:inet.port_number(), :inet.socket_address() | charlist(), keyword()) ::
           {:ok, t()} | {:error, term()}
-  def connect(port, host \\ {127, 0, 0, 1}) do
-    opts = [:binary, active: false, packet: :line, buffer: 65_536]
+  def connect(port, host \\ {127, 0, 0, 1}, opts \\ []) do
+    opts = [:binary, active: false, packet: :line, buffer: 65_536] ++ opts
 
     with {:ok, socket} <- :gen_tcp.connect(host, port, opts, @timeout) do
       {:ok, %__MODULE__{socket: socket}}

@@ -176,6 +176,102 @@ defmodule Sovite.Core.RestrictionsTest do
              run.("require_known_recipient_domain", recipient: "b@gone.example")
   end
 
+  describe "reverse DNS" do
+    @reverse %{
+      {"7.2.0.192.in-addr.arpa", :ptr} => ["client.example.net"],
+      {"client.example.net", :a} => [{192, 0, 2, 7}],
+      {"8.2.0.192.in-addr.arpa", :ptr} => ["forged.example.net"],
+      {"forged.example.net", :a} => [{198, 51, 100, 1}],
+      {"9.2.0.192.in-addr.arpa", :ptr} => {:error, :servfail}
+    }
+
+    defp reverse(check, ip, fields \\ []) do
+      context = context([client_ip: ip, resolver: FakeDNS.resolver(@reverse)] ++ fields)
+      Restrictions.run([check], :connect, context)
+    end
+
+    test "require_reverse_hostname needs a PTR name" do
+      assert reverse("require_reverse_hostname", {192, 0, 2, 7}) == :ok
+      assert reverse("require_reverse_hostname", {192, 0, 2, 8}) == :ok
+
+      assert reverse("require_reverse_hostname", {192, 0, 2, 10}) |> reply() ==
+               {550,
+                "5.7.25 Client host rejected: cannot find your reverse hostname, [192.0.2.10]"}
+
+      assert {450, "4.7.25 " <> _} =
+               reverse("require_reverse_hostname", {192, 0, 2, 9}) |> reply()
+    end
+
+    test "require_fcrdns needs the name to resolve back" do
+      assert reverse("require_fcrdns", {192, 0, 2, 7}) == :ok
+
+      assert reverse("require_fcrdns", {192, 0, 2, 8}) |> reply() ==
+               {550, "5.7.25 Client host rejected: cannot find your hostname, [192.0.2.8]"}
+
+      assert {550, _} = reverse("require_fcrdns", {192, 0, 2, 10}) |> reply()
+      assert {450, _} = reverse("require_fcrdns", {192, 0, 2, 9}) |> reply()
+    end
+
+    test "uses a result looked up before" do
+      assert reverse("require_fcrdns", {192, 0, 2, 10}, client_dns: {:ok, "x.example"}) == :ok
+    end
+
+    test "is looked up when a chain needs it" do
+      assert Restrictions.reverse_dns?(%{connect: [], mail: ["require_fcrdns"]})
+      refute Restrictions.reverse_dns?(%{helo: ["require_fqdn_helo"]})
+    end
+  end
+
+  describe "EHLO names" do
+    @helo_dns %{
+      {"client.example.net", :a} => [{192, 0, 2, 7}],
+      {"other.example.net", :a} => [{198, 51, 100, 1}],
+      {"mail.example.net", :mx} => [{10, "client.example.net"}],
+      {"down.example.net", :a} => {:error, :timeout},
+      {"down.example.net", :mx} => {:error, :timeout}
+    }
+
+    defp helo(check, name, fields \\ []) do
+      context = context([helo: name, resolver: FakeDNS.resolver(@helo_dns)] ++ fields)
+      Restrictions.run([check], :helo, context)
+    end
+
+    test "reject_forged_helo" do
+      own = [own_names: ["mx.example.com", "example.com"]]
+      assert helo("reject_forged_helo", "client.example.net", own) == :ok
+      assert helo("reject_forged_helo", "[192.0.2.7]", own) == :ok
+
+      for name <- ["MX.example.com", "example.com.", "localhost", "[192.0.2.8]"] do
+        assert {550, "5.7.1 <" <> rest} = helo("reject_forged_helo", name, own) |> reply()
+        assert rest == name <> ">: Helo command rejected: forged hostname"
+      end
+    end
+
+    test "require_known_helo" do
+      assert helo("require_known_helo", "client.example.net") == :ok
+      assert helo("require_known_helo", "mail.example.net") == :ok
+      assert helo("require_known_helo", "[192.0.2.99]") == :ok
+
+      assert helo("require_known_helo", "nowhere.example.net") |> reply() ==
+               {550, "5.7.1 <nowhere.example.net>: Helo command rejected: Host not found"}
+
+      assert {450, "4.7.1 " <> _} = helo("require_known_helo", "down.example.net") |> reply()
+    end
+
+    test "require_matching_helo" do
+      assert helo("require_matching_helo", "client.example.net") == :ok
+      assert helo("require_matching_helo", "[192.0.2.7]") == :ok
+
+      assert helo("require_matching_helo", "other.example.net") |> reply() ==
+               {550,
+                "5.7.1 <other.example.net>: Helo command rejected: does not match your address"}
+
+      assert {550, _} = helo("require_matching_helo", "[192.0.2.8]") |> reply()
+      assert {550, _} = helo("require_matching_helo", "nowhere.example.net") |> reply()
+      assert {450, _} = helo("require_matching_helo", "down.example.net") |> reply()
+    end
+  end
+
   test "patterns tried" do
     assert Restrictions.client_keys("192.0.2.7") == ["192.0.2.7", "192.0.2", "192.0", "192"]
     assert Restrictions.client_keys("2001:db8::1") == ["2001:db8::1"]

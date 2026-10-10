@@ -71,8 +71,9 @@ These apply to every component and are checked in code review.
 | A broken certificate renewal taking TLS down | Certificates reloaded only when the new pair loads and matches; otherwise the old one stays | 3 |
 | Downgrade and MITM on outbound TLS | Per-destination TLS policy (`encrypt`, `verify`), DANE with DNSSEC-validated TLSA records | 3 |
 | Downgrade on outbound TLS without DNSSEC | MTA-STS | 7 |
-| Spam and bot traffic | postscreen-style checks, DNSBL, rate limits | 8 |
-| Compromised accounts | Outbound volume and bounce-rate detection | 8 |
+| Spam and bot traffic | Postscreen-style screen (greeting delay against early talkers, weighted DNSBL/DNSWL/RHSBL scores), greylisting, reverse DNS and `EHLO` checks, per-client rate limits, tarpit after errors | 8 |
+| Protocol abuse and SMTP smuggling | Clients that pipeline where RFC 2920 forbids it (including message data sent before `354`) are disconnected; HTTP requests and header lines close the session; bare LF or CR is refused | 8 |
+| Compromised accounts | Per-user sending quotas; users suspended when too much of their mail fails | 8 |
 
 ## 6. Supply Chain
 

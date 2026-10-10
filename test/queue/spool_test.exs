@@ -293,7 +293,8 @@ defmodule Sovite.Queue.SpoolTest do
             Map.put(valid, "remote_ip", 1),
             Map.put(valid, "received_at", "yesterday"),
             Map.put(valid, "body_type", "binarymime"),
-            Map.put(valid, "requiretls", "yes")
+            Map.put(valid, "requiretls", "yes"),
+            Map.put(valid, "auth_user", 1)
           ] do
         line = if is_binary(map_or_line), do: map_or_line, else: JSON.encode!(map_or_line) <> "\n"
         write_raw(path, line, @message)
@@ -302,7 +303,7 @@ defmodule Sovite.Queue.SpoolTest do
     end
 
     test "accepts a hand-written file with a valid envelope", %{path: path} do
-      env = envelope(requiretls: true)
+      env = envelope(requiretls: true, auth_user: "alice")
       write_raw(path, JSON.encode!(Envelope.to_map(env)) <> "\n", @message)
       assert {:ok, ^env, _offset} = Spool.read(path)
 

@@ -81,6 +81,12 @@ vrfy = false
 trusted_networks = []
 # Offer REQUIRETLS (RFC 8689) over TLS.
 requiretls = true
+# From the tarpit_after-th error reply on, send each one tarpit_delay later.
+tarpit_after = 3
+tarpit_delay = "1s"
+# Disconnect clients that pipeline commands without waiting for replies
+# where RFC 2920 forbids it, as spam bots and SMTP smuggling attempts do.
+forbid_unauth_pipelining = true
 
 [domains]
 # Domains this server is the final destination for. Defaults to the hostname.
@@ -225,6 +231,54 @@ max_age = "7d"
 [tls_rpt]
 # Send TLS-RPT reports to the domains you deliver to.
 reports = false
+
+[screen]
+# Postscreen-like checks of clients on smtp listeners. Hold the greeting
+# back this long; clients that talk first are refused. Unset: no delay.
+# greet_delay = "6s"
+# The score at which a client is refused, and at or below which it skips
+# greylisting and the domain lists.
+threshold = 1
+allow_threshold = -1
+
+# DNS lists of client addresses, each adding its weight to the score.
+# Most only answer a resolver of your own (see [dns]).
+# [[screen.dnsbl]]
+# zone = "zen.spamhaus.org"
+# weight = 2
+# codes = ["127.0.0.[2..11]"]
+# [[screen.dnsbl]]
+# zone = "list.dnswl.org"
+# weight = -2
+# codes = ["127.0.[0..255].[1..3]"]
+
+# Lists of domains, for the EHLO name and the sender's domain.
+# [[screen.rhsbl]]
+# zone = "dbl.spamhaus.org"
+# weight = 2
+# codes = ["127.0.1.[2..99]"]
+
+[greylist]
+# Defer mail from unknown client networks and senders until they retry.
+enabled = false
+delay = "5m"
+
+[rate_limit]
+# "count/duration", per client address or authenticated user. Unset: no limit.
+# client_connections = "60/1m"
+# client_messages = "100/1h"
+# client_recipients = "500/1h"
+# user_messages = "500/1d"
+# user_recipients = "2000/1d"
+
+[outbound]
+# Suspend authenticated users when this share of the recipients they
+# send to fails, as with stolen accounts sending spam.
+enabled = true
+max_failure_percent = 50
+min_failures = 20
+window = "1h"
+suspend_time = "1h"
 
 [bounce]
 # Where to report notifications that could not be delivered. Unset: log only.

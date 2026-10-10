@@ -144,6 +144,7 @@ defmodule Sovite.Core.SubmissionTest do
 
     {envelope, data} = queued(context, id)
     assert envelope.protocol == "ESMTPSA"
+    assert envelope.auth_user == "alice@example.com"
 
     assert data =~
              ~r/\AReceived: from client.test \(\[127.0.0.1\]\)\r\n\t\(using TLSv1.3 with cipher TLS_\w+ \(\d+\/\d+ bits\)\)\r\n\tby mx.example.com with ESMTPSA id #{id}/

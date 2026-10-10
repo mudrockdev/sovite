@@ -3,10 +3,10 @@ defmodule Sovite.Core.CLITest do
 
   import ExUnit.CaptureIO
 
-  alias Sovite.Core.CLI
+  alias Sovite.Core.{CLI, Greylist}
   alias Sovite.DKIM.SigningKey
   alias Sovite.SASL.Password
-  alias Sovite.Test.{Certs, FakeNameserver}
+  alias Sovite.Test.{Certs, Database, FakeNameserver}
   alias Sovite.TLS.MTASTS
 
   @moduletag :tmp_dir
@@ -199,6 +199,20 @@ defmodule Sovite.Core.CLITest do
       assert_received {^ref, status}
       assert_received {^ref, :stderr, stderr}
       {status, stdout, stderr}
+    end
+
+    test "lists and flushes greylisting triplets", %{config: config, tmp_dir: dir} do
+      repo = Database.start!(dir)
+      opts = %{repo: repo, delay: 60_000, retry_window: 86_400_000, max_age: 86_400_000}
+      {:defer, _} = Greylist.check(opts, {192, 0, 2, 1}, "", "bob@example.com")
+
+      assert {0, stdout, _} = cli(config, ["greylist", "list"])
+
+      assert stdout =~
+               ~r/\A192.0.2.0\/24  <>  bob@example.com  waiting  \S+\n1 triplets, 0 passed\n\z/
+
+      assert {0, "deleted 1 greylisting triplets\n", _} = cli(config, ["greylist", "flush"])
+      assert {0, "0 triplets, 0 passed\n", _} = cli(config, ["greylist", "list"])
     end
 
     test "manages users and sender addresses", %{config: config} do

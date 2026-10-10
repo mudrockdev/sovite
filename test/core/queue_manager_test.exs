@@ -3,7 +3,8 @@ defmodule Sovite.Core.QueueManagerTest do
   # remote MTA found through fake DNS.
   use ExUnit.Case, async: true
 
-  alias Sovite.Core.{Config, QueueManager}
+  alias Sovite.Abuse.{Cache, RateLimit}
+  alias Sovite.Core.{Config, Outbound, QueueManager}
   alias Sovite.Queue.{Envelope, ID, Spool}
   alias Sovite.Test.{FakeDNS, FakeMTA, TelemetryForwarder}
 
@@ -60,7 +61,7 @@ defmodule Sovite.Core.QueueManagerTest do
           resolver: FakeDNS.resolver(Map.merge(@dns, opts[:dns] || %{})),
           port: FakeMTA.port(context.mta),
           client: [command_timeout: 2_000, data_end_timeout: 2_000]
-        ]
+        ] ++ Keyword.get(opts, :manager, [])
 
     manager = start_supervised!({QueueManager, manager_opts})
     Map.put(context, :manager, manager)
@@ -223,6 +224,37 @@ defmodule Sovite.Core.QueueManagerTest do
 
       assert_removed(dsn_id, :delivered)
       assert queue_empty?(context.dir)
+    end
+
+    test "counts failures against the user who sent the message", context do
+      TelemetryForwarder.attach([[:sovite, :outbound, :suspended]])
+      rcpt = fn _ -> "550 5.1.1 User unknown" end
+      unique = System.unique_integer([:positive])
+      rate_limit = :"#{__MODULE__}.rate_limit#{unique}"
+      cache = :"#{__MODULE__}.cache#{unique}"
+      start_supervised!({RateLimit, name: rate_limit})
+      start_supervised!({Cache, name: cache})
+
+      {:ok, config} = Config.parse("[outbound]\nmin_failures = 2")
+      outbound = Outbound.opts(config, rate_limit, cache)
+
+      context =
+        context
+        |> start_mta(responses: %{rcpt: rcpt})
+        |> start_manager(manager: [outbound: outbound])
+
+      id =
+        enqueue(context, "alice@sender.example", ["a@example.net", "b@example.net"],
+          auth_user: "Alice"
+        )
+
+      assert_removed(id, :bounced)
+
+      assert_receive {:telemetry, [:sovite, :outbound, :suspended], %{failed: 2, sent: 0},
+                      %{user: "alice"}},
+                     @timeout
+
+      assert Outbound.suspended?(outbound, "alice")
     end
 
     test "retries temporary failures with backoff", context do

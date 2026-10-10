@@ -172,16 +172,16 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 8 — Anti-Abuse (postscreen-like)
 
-- [ ] Pre-greeting ("early talker") detection
-- [ ] DNSBL / DNSWL checks with weighted scoring
-- [ ] RHSBL checks for sender/HELO domains
-- [ ] Greylisting (built in, optional)
-- [ ] Reverse DNS / FCrDNS checks (configurable strictness)
-- [ ] HELO validation policies
-- [ ] Rate limits: per-IP connections, messages, recipients; per authenticated user sending quotas
-- [ ] Tarpitting on suspicious behavior
-- [ ] Protocol hygiene: reject pipelining abuse, non-SMTP commands, bare LF (SMTP smuggling)
-- [ ] Outbound abuse protection: detect compromised accounts by volume / bounce rate spikes
+- [x] Pre-greeting ("early talker") detection
+- [x] DNSBL / DNSWL checks with weighted scoring
+- [x] RHSBL checks for sender/HELO domains
+- [x] Greylisting (built in, optional)
+- [x] Reverse DNS / FCrDNS checks (configurable strictness)
+- [x] HELO validation policies
+- [x] Rate limits: per-IP connections, messages, recipients; per authenticated user sending quotas
+- [x] Tarpitting on suspicious behavior
+- [x] Protocol hygiene: reject pipelining abuse, non-SMTP commands, bare LF (SMTP smuggling)
+- [x] Outbound abuse protection: detect compromised accounts by volume / bounce rate spikes
 
 **Standards:** RFC 5782 (DNSBL), RFC 5965 (ARF, for feedback loops)
 

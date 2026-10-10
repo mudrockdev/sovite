@@ -22,6 +22,10 @@ defmodule Sovite.Core.SMTPHandler do
   `user%remote@local` or source routes do not relay: only the domain of
   the parsed mailbox counts.
 
+  The anti-abuse checks (`Sovite.Core.Screen`: the postscreen-like
+  client score, rate limits, greylisting, and suspended users) run
+  first at each stage.
+
   The restriction chains (`Sovite.Core.Restrictions`) run at connect,
   `EHLO`, `MAIL`, `RCPT`, `DATA`, and at the end of the data, after the
   built-in checks of each stage; they can reject, but never permit what
@@ -98,17 +102,19 @@ defmodule Sovite.Core.SMTPHandler do
 
   require Logger
 
-  alias Sovite.Abuse.Penalty
+  alias Sovite.Abuse.{Penalty, ReverseDNS}
 
   alias Sovite.Core.{
     Config,
     Logging,
     MailAuth,
+    Outbound,
     QueueManager,
     Recipients,
     Restrictions,
     Rewrite,
     Routing,
+    Screen,
     SenderCheck
   }
 
@@ -130,8 +136,10 @@ defmodule Sovite.Core.SMTPHandler do
       messages, if any.
     * `runtime` - `:repo` (a `Sovite.Core.Repo` reference), `:penalty`
       (the name of the `Sovite.Abuse.Penalty` for failed logins),
-      `:require_auth` (the listener requires authentication), and
-      `:resolver` (for restrictions that look up domains).
+      `:require_auth` (the listener requires authentication),
+      `:resolver` (for restrictions that look up domains), and the
+      `Sovite.Core.Screen` options `:screen`, `:screen_cache`,
+      `:rate_limit`, and `:outbound`.
   """
   @spec opts(Config.t(), GenServer.server() | nil, keyword()) :: map()
   def opts(config, queue_manager \\ nil, runtime \\ []) do
@@ -162,7 +170,10 @@ defmodule Sovite.Core.SMTPHandler do
         end),
       strip_headers: config.submission.strip_headers,
       mail_auth: MailAuth.opts(config, repo, resolver),
-      srs: config.srs
+      srs: config.srs,
+      screen: Screen.opts(config, runtime),
+      own_names: Enum.uniq([String.downcase(config.server.hostname) | config.domains.local]),
+      reverse_dns: Restrictions.reverse_dns?(config.restrictions)
     }
   end
 
@@ -262,7 +273,9 @@ defmodule Sovite.Core.SMTPHandler do
         header: nil,
         spf: nil,
         auth_work: nil,
-        prefix: []
+        prefix: [],
+        score: Screen.new(),
+        client_dns: nil
       })
 
     if opts.require_auth and banned?(state) do
@@ -273,23 +286,34 @@ defmodule Sovite.Core.SMTPHandler do
          "#{opts.hostname} Too many failed logins from your address, try again later"
        ), state}
     else
-      case restrict(state, :connect) do
-        {:ok, state} -> {:ok, %{state | session_action: state.action, action: nil}}
-        {:reply, reply, state} -> {:close, reply, state}
-      end
+      with {:ok, state} <- Screen.limit_connection(state),
+           do: connect(%{state | client_dns: client_dns(state)})
     end
   end
+
+  defp connect(state) do
+    case restrict(state, :connect) do
+      {:ok, state} -> Screen.connect(%{state | session_action: state.action, action: nil})
+      {:reply, reply, state} -> {:close, reply, state}
+    end
+  end
+
+  # Looked up once, for the restrictions that need it.
+  defp client_dns(%{reverse_dns: true, trusted: false} = state),
+    do: ReverseDNS.check(state.resolver, state.connection.remote_ip)
+
+  defp client_dns(_state), do: nil
+
+  @impl true
+  def handle_greet(early_input, state), do: Screen.greet(early_input, state)
 
   @impl true
   def handle_helo(kind, name, state) do
     state = %{state | helo: name, esmtp: kind != :helo, lmtp: kind == :lhlo}
 
-    case restrict(state, :helo) do
-      {:ok, state} ->
-        {:ok, %{state | session_action: state.action || state.session_action, action: nil}}
-
-      reply ->
-        reply
+    with {:ok, state} <- Screen.helo(state),
+         {:ok, state} <- restrict(state, :helo) do
+      {:ok, %{state | session_action: state.action || state.session_action, action: nil}}
     end
   end
 
@@ -300,7 +324,8 @@ defmodule Sovite.Core.SMTPHandler do
   def handle_mail(sender, _params, state) do
     state = %{state | sender: sender, envelope_sender: nil, expansions: [], action: nil, spf: nil}
 
-    with {:ok, state} <- check_sender(sender, state),
+    with {:ok, state} <- Screen.mail(sender, state),
+         {:ok, state} <- check_sender(sender, state),
          {:ok, state} <- restrict(state, :mail),
          {:ok, state} <- check_spf(sender, state) do
       rewrite_sender(sender, state)
@@ -363,6 +388,16 @@ defmodule Sovite.Core.SMTPHandler do
 
   @impl true
   def handle_rcpt(recipient, state) do
+    with {:ok, checked} <- check_rcpt(recipient, state) do
+      # A deferred recipient must not stay among the expansions.
+      case Screen.rcpt(recipient, checked) do
+        {:ok, checked} -> {:ok, checked}
+        {:reply, reply, _checked} -> {:reply, reply, state}
+      end
+    end
+  end
+
+  defp check_rcpt(recipient, state) do
     case srs_reverse(recipient, state) do
       nil ->
         check_recipient(recipient, state)
@@ -480,7 +515,9 @@ defmodule Sovite.Core.SMTPHandler do
         authenticated: state.identity != nil,
         access: state.access,
         resolver: state.resolver,
-        delimiter: state.routing.delimiter
+        delimiter: state.routing.delimiter,
+        own_names: state.own_names,
+        client_dns: state.client_dns
       },
       Map.new(extra)
     )
@@ -569,9 +606,7 @@ defmodule Sovite.Core.SMTPHandler do
   defp banned?(state), do: Penalty.banned?(state.penalty, penalty_key(state.connection.remote_ip))
 
   @doc false
-  # IPv6 clients usually control a whole /64, so count failures per /64.
-  def penalty_key({a, b, c, d, _, _, _, _}), do: {a, b, c, d, 0, 0, 0, 0}
-  def penalty_key(ip), do: ip
+  defdelegate penalty_key(ip), to: Screen, as: :address_key
 
   defp auth_event(result, state, mechanism, username, reason) do
     :telemetry.execute([:sovite, :auth, result], %{}, %{
@@ -640,6 +675,7 @@ defmodule Sovite.Core.SMTPHandler do
       helo: state.helo,
       protocol: protocol,
       body_type: transaction.params.body,
+      auth_user: state.identity,
       requiretls: Map.get(transaction.params, :requiretls, false)
     }
 
@@ -831,6 +867,7 @@ defmodule Sovite.Core.SMTPHandler do
       {:ok, _path, _size} ->
         state = %{state | writer: nil, action: nil, prefix: []}
         Logger.metadata(queue_id: nil)
+        Outbound.sent(state.screen.outbound, state.identity, length(state.expansions))
         release(action, state)
         {:reply, Reply.new(250, "2.0.0", "Ok: queued as #{state.queue_id}"), state}
 

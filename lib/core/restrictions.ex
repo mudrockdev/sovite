@@ -22,6 +22,14 @@ defmodule Sovite.Core.Restrictions do
   | `require_fqdn_helo` | from `helo` | `504` unless the name has a dot or is an address literal. |
   | `require_fqdn_sender` / `require_fqdn_recipient` | from `mail` / `rcpt` | `504` unless the domain has a dot. |
   | `require_known_sender_domain` / `require_known_recipient_domain` | from `mail` / `rcpt` | `550` if the domain has no MX or address records, or a Null MX; `450` when DNS fails. |
+  | `require_reverse_hostname` | all | `550 5.7.25` unless the client address has a reverse DNS (PTR) name. |
+  | `require_fcrdns` | all | `550 5.7.25` unless that name also resolves back to the client address (forward-confirmed reverse DNS). Stricter. |
+  | `reject_forged_helo` | from `helo` | `550` if the `EHLO` name is this server's host name or one of its local domains, `localhost`, or an address literal other than the client's address. |
+  | `require_known_helo` | from `helo` | `550` unless the `EHLO` name has address or MX records. Address literals pass. |
+  | `require_matching_helo` | from `helo` | `550` unless the `EHLO` name resolves to the client address, or is its address literal. Strictest. |
+
+  The DNS checks reply `450` (`4.7.25` or `4.7.1`) when DNS fails, so a
+  client is never refused for a temporary problem.
 
   Checks whose information is not known yet are skipped: a `helo_access`
   in the `mail` stage of a client that sent no `EHLO` does nothing.
@@ -53,8 +61,10 @@ defmodule Sovite.Core.Restrictions do
       `user@` (any domain). The null sender is `<>`.
   """
 
+  alias Sovite.Abuse.ReverseDNS
   alias Sovite.Core.Lookup
   alias Sovite.DNS.MX
+  alias Sovite.{Net, Validators}
   alias Sovite.SMTP.Reply
 
   @stages [:connect, :helo, :mail, :rcpt, :data, :end_of_data]
@@ -74,8 +84,15 @@ defmodule Sovite.Core.Restrictions do
     "require_fqdn_sender" => @from_mail,
     "require_fqdn_recipient" => [:rcpt],
     "require_known_sender_domain" => @from_mail,
-    "require_known_recipient_domain" => [:rcpt]
+    "require_known_recipient_domain" => [:rcpt],
+    "require_reverse_hostname" => @stages,
+    "require_fcrdns" => @stages,
+    "reject_forged_helo" => @stages -- [:connect],
+    "require_known_helo" => @stages -- [:connect],
+    "require_matching_helo" => @stages -- [:connect]
   }
+
+  @reverse_dns_checks ["require_reverse_hostname", "require_fcrdns"]
 
   @typedoc "The verdict of a chain."
   @type verdict ::
@@ -100,6 +117,15 @@ defmodule Sovite.Core.Restrictions do
   @spec allowed?(String.t(), atom()) :: boolean()
   def allowed?(name, stage), do: stage in Map.fetch!(@checks, name)
 
+  @doc """
+  Whether any of the chains (a map of stage to checks) looks at the
+  client's reverse DNS, so it is worth looking up once per session.
+  """
+  @spec reverse_dns?(%{atom() => [String.t()]}) :: boolean()
+  def reverse_dns?(chains),
+    do:
+      Enum.any?(chains, fn {_stage, checks} -> Enum.any?(checks, &(&1 in @reverse_dns_checks)) end)
+
   @typedoc """
   What a chain looks at:
 
@@ -108,8 +134,12 @@ defmodule Sovite.Core.Restrictions do
     * `:trusted`, `:authenticated` - booleans.
     * `:access` - the access rule tables (`Sovite.Core.Lookup.tables()`)
       by kind: `:client`, `:helo`, `:sender`, `:recipient`.
-    * `:resolver` - for the known-domain checks.
+    * `:resolver` - for the DNS checks.
     * `:delimiter` - the extension delimiter characters.
+    * `:own_names` - this server's host name and local domains, lower-cased,
+      for `reject_forged_helo`.
+    * `:client_dns` - the result of `Sovite.Abuse.ReverseDNS.check/2` for
+      the client, if already known. Looked up when needed otherwise.
   """
   @type context :: map()
 
@@ -187,7 +217,97 @@ defmodule Sovite.Core.Restrictions do
        when rcpt != nil,
        do: unknown_domain(rcpt, context, "Recipient address rejected", "1.2")
 
+  defp evaluate("require_reverse_hostname", _stage, context) do
+    case client_dns(context) do
+      {:error, :temporary} -> reverse_dns_reject(context, 450, "reverse hostname")
+      :none -> reverse_dns_reject(context, 550, "reverse hostname")
+      _name -> :continue
+    end
+  end
+
+  defp evaluate("require_fcrdns", _stage, context) do
+    case client_dns(context) do
+      {:ok, _name} -> :continue
+      {:error, :temporary} -> reverse_dns_reject(context, 450, "hostname")
+      _ -> reverse_dns_reject(context, 550, "hostname")
+    end
+  end
+
+  defp evaluate("reject_forged_helo", _stage, %{helo: helo} = context) when helo != nil do
+    name = helo |> String.downcase(:ascii) |> String.trim_trailing(".")
+
+    forged =
+      case Validators.parse_address_literal(helo) do
+        {:ok, ip} ->
+          Net.normalize(ip) != Net.normalize(context.client_ip)
+
+        {:error, _} ->
+          name in ["localhost", "localhost.localdomain"] or name in own_names(context)
+      end
+
+    if forged,
+      do: {:reject, Reply.new(550, "5.7.1", "<#{helo}>: Helo command rejected: forged hostname")},
+      else: :continue
+  end
+
+  defp evaluate("require_known_helo", _stage, %{helo: helo} = context) when helo != nil do
+    if Validators.address_literal?(helo) do
+      :continue
+    else
+      case MX.hosts(context.resolver, helo) do
+        {:ok, _hosts} -> :continue
+        {:error, {:temporary, _}} -> helo_reject(helo, 450, "Host not found")
+        {:error, _} -> helo_reject(helo, 550, "Host not found")
+      end
+    end
+  end
+
+  defp evaluate("require_matching_helo", _stage, %{helo: helo} = context) when helo != nil do
+    ip = Net.normalize(context.client_ip)
+
+    case helo_addresses(helo, ip, context.resolver) do
+      {:ok, addresses} ->
+        if ip in Enum.map(addresses, &Net.normalize/1),
+          do: :continue,
+          else: helo_reject(helo, 550, "does not match your address")
+
+      {:error, :nxdomain} ->
+        helo_reject(helo, 550, "Host not found")
+
+      {:error, _} ->
+        helo_reject(helo, 450, "Host not found")
+    end
+  end
+
   defp evaluate(_check, _stage, _context), do: :continue
+
+  # The address of a literal, or those the name resolves to.
+  defp helo_addresses(helo, ip, resolver) do
+    case Validators.parse_address_literal(helo) do
+      {:ok, literal} ->
+        {:ok, [literal]}
+
+      {:error, _} ->
+        Sovite.DNS.lookup(resolver, helo, if(tuple_size(ip) == 4, do: :a, else: :aaaa))
+    end
+  end
+
+  defp client_dns(%{client_dns: result}) when result != nil, do: result
+  defp client_dns(context), do: ReverseDNS.check(context.resolver, context.client_ip)
+
+  # RFC 7372 §3.3: X.7.25, reverse DNS validation failed.
+  defp reverse_dns_reject(context, code, what) do
+    ip = context.client_ip |> Net.normalize() |> :inet.ntoa()
+    status = if code == 450, do: "4.7.25", else: "5.7.25"
+    {:reject, Reply.new(code, status, "Client host rejected: cannot find your #{what}, [#{ip}]")}
+  end
+
+  defp helo_reject(helo, code, text) do
+    status = if code == 450, do: "4.7.1", else: "5.7.1"
+    {:reject, Reply.new(code, status, "<#{helo}>: Helo command rejected: #{text}")}
+  end
+
+  defp own_names(context), do: Map.get(context, :own_names, [])
 
   defp permit_if(true), do: :permit
   defp permit_if(_), do: :continue

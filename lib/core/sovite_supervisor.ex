@@ -27,9 +27,10 @@ defmodule Sovite.Core.Supervisor do
 
   In start order: the log file handler, the database (migrated before
   anything else starts), the cache of the domains in the database, the
-  failed-login counter, the certificate store and the ACME client (when
-  TLS is configured), the MTA-STS policy cache (with `mta_sts.enabled`),
-  the queue manager, the DMARC and TLS report senders (with
+  failed-login counter, the rate limiter, the caches of screened clients
+  and suspended users, the greylist cleaner (with `greylist.enabled`),
+  the certificate store and the ACME client (when TLS is configured),
+  the MTA-STS policy cache (with `mta_sts.enabled`), the queue manager, the DMARC and TLS report senders (with
   `dmarc.reports` and `tls_rpt.reports`), the listeners, and the
   MTA-STS policy server (with `mta_sts.serve`). They stop in reverse
   order, so listeners close first.
@@ -42,16 +43,18 @@ defmodule Sovite.Core.Supervisor do
 
   require Logger
 
-  alias Sovite.Abuse.Penalty
+  alias Sovite.Abuse.{Cache, Penalty, RateLimit}
   alias Sovite.Core.Repo.Tables.DomainCache
 
   alias Sovite.Core.{
     ACME,
     Config,
     DMARCReports,
+    Greylist,
     Logging,
     MailAuth,
     MTASTS,
+    Outbound,
     QueueManager,
     Repo,
     SMTPHandler,
@@ -65,6 +68,9 @@ defmodule Sovite.Core.Supervisor do
   @cert_store Sovite.Core.CertStore
   @penalty Sovite.Core.AuthPenalty
   @mta_sts Sovite.Core.MTASTS
+  @rate_limit Sovite.Core.RateLimit
+  @screen_cache Sovite.Core.ScreenCache
+  @suspensions Sovite.Core.Suspensions
 
   @spec start_link(keyword()) ::
           Supervisor.on_start()
@@ -94,7 +100,7 @@ defmodule Sovite.Core.Supervisor do
     runtime = runtime(config, manager_opts)
 
     manager_opts =
-      [resolver: runtime.resolver, mta_sts: runtime.mta_sts] ++
+      [resolver: runtime.resolver, mta_sts: runtime.mta_sts, outbound: runtime.outbound] ++
         Keyword.drop(manager_opts, [:resolver])
 
     # Children stop in reverse order: listeners first, so no new mail
@@ -121,14 +127,16 @@ defmodule Sovite.Core.Supervisor do
       repo: Repo.ref(config.database),
       penalty: if(Config.auth_enabled?(config), do: @penalty),
       cert_store: if(Config.tls_enabled?(config), do: @cert_store),
-      mta_sts: if(config.mta_sts.enabled, do: @mta_sts)
+      mta_sts: if(config.mta_sts.enabled, do: @mta_sts),
+      outbound: Outbound.opts(config, @rate_limit, @suspensions)
     }
   end
 
-  # The failed-login counter, the certificate store and ACME client, and
-  # the MTA-STS policy cache.
+  # The failed-login counter, the anti-abuse processes, the certificate
+  # store and ACME client, and the MTA-STS policy cache.
   defp security_specs(config, runtime) do
     if(runtime.penalty, do: [penalty_spec(config)], else: []) ++
+      abuse_specs(config, runtime) ++
       if(runtime.cert_store, do: tls_specs(config), else: []) ++
       if(runtime.mta_sts, do: [mta_sts_spec(config, runtime)], else: [])
   end
@@ -144,6 +152,14 @@ defmodule Sovite.Core.Supervisor do
 
     if(serve, do: [policy_server_spec(config, runtime)], else: []) ++
       if(dnssec_check?(config), do: [dnssec_check_spec(runtime.resolver)], else: [])
+  end
+
+  defp abuse_specs(config, runtime) do
+    [
+      {RateLimit, name: @rate_limit},
+      {Cache, name: @screen_cache},
+      {Cache, name: @suspensions}
+    ] ++ if(config.greylist.enabled, do: [{Greylist, repo: runtime.repo}], else: [])
   end
 
   defp penalty_spec(config) do
@@ -270,7 +286,11 @@ defmodule Sovite.Core.Supervisor do
         repo: runtime.repo,
         penalty: runtime.penalty,
         require_auth: listener.require_auth,
-        resolver: runtime.resolver
+        resolver: runtime.resolver,
+        screen: listener.screen,
+        screen_cache: @screen_cache,
+        rate_limit: @rate_limit,
+        outbound: runtime.outbound
       )
 
     {Sovite.SMTP.Server,
@@ -295,7 +315,10 @@ defmodule Sovite.Core.Supervisor do
      auth_required: listener.require_auth,
      plaintext_auth: config.auth.plaintext,
      lmtp: mode == :lmtp,
-     requiretls: smtp.requiretls and mode != :lmtp}
+     requiretls: smtp.requiretls and mode != :lmtp,
+     tarpit_after: smtp.tarpit_after,
+     tarpit_delay: smtp.tarpit_delay,
+     forbid_unauth_pipelining: smtp.forbid_unauth_pipelining and mode != :lmtp}
   end
 
   defp tls_options(nil, _listener), do: nil

@@ -152,6 +152,51 @@ defmodule Sovite.Core.SupervisorTest do
     assert String.ends_with?(message, "\r\nSubject: hi\r\n\r\nhello\r\n")
   end
 
+  test "screens and greylists clients of smtp listeners", %{tmp_dir: dir} do
+    {:ok, config} =
+      Config.parse(
+        toml(
+          dir,
+          """
+          [domains]
+          local = ["example.com"]
+          [screen]
+          greet_delay = "200ms"
+          [greylist]
+          enabled = true
+          """,
+          """
+          [[listener]]
+          address = "127.0.0.1"
+          port = 0
+          """
+        )
+      )
+
+    supervisor =
+      start_supervised!(
+        {Sovite.Core.Supervisor,
+         config: config, name: nil, queue_manager: [resolver: FakeDNS.resolver(%{})]}
+      )
+
+    ids = for {id, _pid, _type, _modules} <- Supervisor.which_children(supervisor), do: id
+    assert Sovite.Core.Greylist in ids
+    assert {Sovite.Abuse.RateLimit, Sovite.Core.RateLimit} in ids
+
+    {:ok, client} = SMTPClient.connect(listener_port(supervisor))
+    :ok = SMTPClient.send_raw(client, "EHLO early.test\r\n")
+    assert {:ok, {554, [text]}} = SMTPClient.read_reply(client)
+    assert text =~ "talked before the greeting"
+
+    {:ok, client} = SMTPClient.connect(listener_port(supervisor))
+    {time, {:ok, {220, _}}} = :timer.tc(fn -> SMTPClient.read_reply(client) end, :millisecond)
+    assert time >= 150
+    {:ok, {250, _}} = SMTPClient.command(client, "EHLO client.test")
+    {:ok, {250, _}} = SMTPClient.command(client, "MAIL FROM:<a@example.net>")
+    assert {:ok, {450, [text]}} = SMTPClient.command(client, "RCPT TO:<b@example.com>")
+    assert text =~ "Greylisted"
+  end
+
   test "delivers inbound mail over LMTP with a status per recipient", %{tmp_dir: dir} do
     # Unix socket paths are limited to about 100 bytes, too few for tmp_dir.
     socket = Path.join(System.tmp_dir!(), "sovite-lmtp-#{System.unique_integer([:positive])}")

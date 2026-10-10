@@ -33,6 +33,8 @@ defmodule Sovite.Core.Config.Schema do
   #   :command                 - a non-empty array of strings, the first an absolute path
   #   :header_name             - a header field name, lower-cased
   #   :dkim_selector           - a DKIM selector: one or more DNS labels
+  #   :rate                    - {count, window_ms}, from "100/1h"
+  #   :dnsbl_code              - a DNS list reply pattern, see Sovite.Abuse.DNSBL.parse_code/1
   #   {:list, type}            - an array; errors name the index, as in "key[0]"
   #   {:map, key_type, value_type} - a table with arbitrary keys; errors name the key
   #   {:integer, min, max}
@@ -43,6 +45,7 @@ defmodule Sovite.Core.Config.Schema do
   #   default: value or zero-arity function (defaults are validated too)
   #   required: true
 
+  alias Sovite.Abuse.DNSBL
   alias Sovite.Core.Config.Error
   alias Sovite.Core.{Restrictions, SenderCheck, Transport}
   alias Sovite.LDAP.Filter
@@ -484,6 +487,21 @@ defmodule Sovite.Core.Config.Schema do
 
   defp cast(:dkim_selector, value), do: type_error("a DKIM selector", value)
 
+  defp cast(:rate, value) when is_binary(value) do
+    with [count, window] <- String.split(value, "/", parts: 2),
+         {count, ""} when count in 1..1_000_000_000 <- Integer.parse(String.trim(count)),
+         {:ok, window} <- cast(:duration, window) do
+      {:ok, {count, window}}
+    else
+      _ -> rate_error(value)
+    end
+  end
+
+  defp cast(:rate, value), do: rate_error(value)
+
+  defp cast(:dnsbl_code, value) when is_binary(value), do: DNSBL.parse_code(value)
+  defp cast(:dnsbl_code, value), do: type_error(~s(a reply code like "127.0.0.[2..11]"), value)
+
   defp cast(:duration, value) when is_integer(value) and value > 0, do: {:ok, value * 1000}
 
   defp cast(:duration, value) when is_binary(value) do
@@ -522,6 +540,8 @@ defmodule Sovite.Core.Config.Schema do
   defp unit_ms("m"), do: 60_000
   defp unit_ms("h"), do: 3_600_000
   defp unit_ms("d"), do: 86_400_000
+
+  defp rate_error(value), do: type_error(~s(a rate like "100/1h"), value)
 
   defp duration_error(value), do: type_error(~s(a duration like "30s", "5m", or "1h"), value)
 

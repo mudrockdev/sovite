@@ -10,12 +10,18 @@ defmodule Sovite.Core.Config do
   `get/0`.
   """
 
-  alias Sovite.Core.Config.{AuthRules, Error, RoutingRules, Schema, TransportRules}
+  alias Sovite.Core.Config.{AbuseRules, AuthRules, Error, RoutingRules, Schema, TransportRules}
   alias Sovite.Core.{Repo, Restrictions}
 
   @default_path "/etc/sovite/sovite.toml"
 
   @tls_levels [:none, :may, :encrypt, :verify, :dane]
+
+  @dnsbl_fields [
+    {:zone, :domain, required: true},
+    {:weight, {:integer, -1000, 1000}, default: 1},
+    {:codes, {:list, :dnsbl_code}, default: []}
+  ]
 
   @schema [
     {:server,
@@ -52,6 +58,7 @@ defmodule Sovite.Core.Config do
          {:auth, :boolean, []},
          {:require_tls, :boolean, []},
          {:require_auth, :boolean, []},
+         {:screen, :boolean, []},
          {:tls_min_version, :tls_version, []},
          {:tls_ciphers, :ciphers, []}
        ]}}, default: [%{}]},
@@ -97,7 +104,10 @@ defmodule Sovite.Core.Config do
         {:vrfy, :boolean, default: false},
         {:trusted_networks, {:list, :cidr}, default: []},
         {:max_hops, {:integer, 1, 1000}, default: 50},
-        {:requiretls, :boolean, default: true}
+        {:requiretls, :boolean, default: true},
+        {:tarpit_after, {:integer, 1, 1000}, default: 3},
+        {:tarpit_delay, :duration, default: "1s"},
+        {:forbid_unauth_pipelining, :boolean, default: true}
       ]}, []},
     {:domains,
      {:section,
@@ -275,6 +285,49 @@ defmodule Sovite.Core.Config do
         {:report_from, :mailbox, []},
         {:contact_info, :string, []}
       ]}, []},
+    {:screen,
+     {:section,
+      [
+        {:greet_delay, :duration, []},
+        {:early_talker_weight, {:integer, -1000, 1000}, []},
+        {:threshold, {:integer, 1, 1000}, default: 1},
+        {:allow_threshold, {:integer, -1000, 0}, default: -1},
+        {:lookup_timeout, :duration, default: "10s"},
+        {:cache_time, :duration, default: "1d"},
+        {:dnsbl, {:list, {:section, @dnsbl_fields}}, default: []},
+        {:rhsbl,
+         {:list,
+          {:section,
+           @dnsbl_fields ++
+             [{:check, {:list, {:enum, [:helo, :sender]}}, default: ["helo", "sender"]}]}},
+         default: []}
+      ]}, []},
+    {:greylist,
+     {:section,
+      [
+        {:enabled, :boolean, default: false},
+        {:delay, :duration, default: "5m"},
+        {:retry_window, :duration, default: "2d"},
+        {:max_age, :duration, default: "35d"}
+      ]}, []},
+    {:rate_limit,
+     {:section,
+      [
+        {:client_connections, :rate, []},
+        {:client_messages, :rate, []},
+        {:client_recipients, :rate, []},
+        {:user_messages, :rate, []},
+        {:user_recipients, :rate, []}
+      ]}, []},
+    {:outbound,
+     {:section,
+      [
+        {:enabled, :boolean, default: true},
+        {:max_failure_percent, {:integer, 1, 100}, default: 50},
+        {:min_failures, {:integer, 1, 1_000_000}, default: 20},
+        {:window, :duration, default: "1h"},
+        {:suspend_time, :duration, default: "1h"}
+      ]}, []},
     {:bounce, {:section, [{:double_bounce_recipient, :mailbox, []}]}, []},
     {:log,
      {:section,
@@ -314,11 +367,21 @@ defmodule Sovite.Core.Config do
     :dns,
     :mta_sts,
     :tls_rpt,
+    :screen,
+    :greylist,
+    :rate_limit,
+    :outbound,
     :bounce,
     :log
   ]
 
   @type tls_level :: :none | :may | :encrypt | :verify | :dane
+
+  @typedoc "A rate limit: `{count, window}`, the window in milliseconds."
+  @type rate :: {pos_integer(), pos_integer()}
+
+  @typedoc "A DNS list for `[screen]`, see `Sovite.Abuse.DNSBL`."
+  @type dns_list :: %{zone: String.t(), weight: integer(), codes: list()}
 
   @type t :: %__MODULE__{
           server: %{hostname: String.t(), authserv_id: String.t()},
@@ -344,6 +407,7 @@ defmodule Sovite.Core.Config do
               auth: boolean(),
               require_tls: boolean(),
               require_auth: boolean(),
+              screen: boolean(),
               tls_min_version: :"tlsv1.2" | :"tlsv1.3" | nil,
               tls_ciphers: [String.t()] | nil
             }
@@ -367,7 +431,10 @@ defmodule Sovite.Core.Config do
             vrfy: boolean(),
             trusted_networks: [Sovite.Net.network()],
             max_hops: pos_integer(),
-            requiretls: boolean()
+            requiretls: boolean(),
+            tarpit_after: pos_integer(),
+            tarpit_delay: pos_integer(),
+            forbid_unauth_pipelining: boolean()
           },
           domains: %{
             local: [String.t()],
@@ -472,6 +539,38 @@ defmodule Sovite.Core.Config do
             report_from: String.t(),
             contact_info: String.t()
           },
+          screen: %{
+            greet_delay: pos_integer() | nil,
+            early_talker_weight: integer(),
+            threshold: pos_integer(),
+            allow_threshold: integer(),
+            lookup_timeout: pos_integer(),
+            cache_time: pos_integer(),
+            dnsbl: [dns_list()],
+            rhsbl: [
+              %{zone: String.t(), weight: integer(), codes: list(), check: [:helo | :sender]}
+            ]
+          },
+          greylist: %{
+            enabled: boolean(),
+            delay: pos_integer(),
+            retry_window: pos_integer(),
+            max_age: pos_integer()
+          },
+          rate_limit: %{
+            client_connections: rate() | nil,
+            client_messages: rate() | nil,
+            client_recipients: rate() | nil,
+            user_messages: rate() | nil,
+            user_recipients: rate() | nil
+          },
+          outbound: %{
+            enabled: boolean(),
+            max_failure_percent: pos_integer(),
+            min_failures: pos_integer(),
+            window: pos_integer(),
+            suspend_time: pos_integer()
+          },
           bounce: %{double_bounce_recipient: String.t() | nil},
           log: Sovite.Core.Logging.config()
         }
@@ -522,7 +621,8 @@ defmodule Sovite.Core.Config do
            |> listener_defaults()
            |> local_domains()
            |> AuthRules.defaults()
-           |> TransportRules.defaults(),
+           |> TransportRules.defaults()
+           |> AbuseRules.defaults(),
          {values, key_errors} = AuthRules.load_keys(values),
          :ok <- check(values, key_errors) do
       {:ok, struct!(__MODULE__, values)}
@@ -540,10 +640,10 @@ defmodule Sovite.Core.Config do
 
   # Unset listener keys get the defaults of the listener's mode.
   @mode_defaults %{
-    smtp: %{port: 25, auth: false, require_tls: false, require_auth: false},
-    submission: %{port: 587, auth: true, require_tls: true, require_auth: true},
-    submissions: %{port: 465, auth: true, require_tls: true, require_auth: true},
-    lmtp: %{port: 24, auth: false, require_tls: false, require_auth: false}
+    smtp: %{port: 25, auth: false, require_tls: false, require_auth: false, screen: true},
+    submission: %{port: 587, auth: true, require_tls: true, require_auth: true, screen: false},
+    submissions: %{port: 465, auth: true, require_tls: true, require_auth: true, screen: false},
+    lmtp: %{port: 24, auth: false, require_tls: false, require_auth: false, screen: false}
   }
 
   defp listener_defaults(values),
@@ -630,6 +730,7 @@ defmodule Sovite.Core.Config do
       |> Kernel.++(key_errors)
       |> Kernel.++(AuthRules.errors(values))
       |> Kernel.++(TransportRules.errors(values))
+      |> Kernel.++(AbuseRules.errors(values))
       |> Enum.filter(& &1)
 
     if errors == [], do: :ok, else: {:error, errors}

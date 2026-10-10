@@ -20,7 +20,9 @@ defmodule Sovite.Core.QueueManager do
   worst, the recipients of the jobs in flight are delivered again, which
   SMTP allows. When all jobs of a message are done:
 
-    1. Failed recipients are reported to the sender (`Sovite.Core.Bounce`).
+    1. Failed recipients are reported to the sender (`Sovite.Core.Bounce`),
+       and counted against the user who sent the message, if any
+       (`Sovite.Core.Outbound`).
     2. If no recipient is pending, the message is deleted.
     3. If the message is older than `queue.max_lifetime`, its pending
        recipients fail and are reported, and it is deleted.
@@ -43,7 +45,7 @@ defmodule Sovite.Core.QueueManager do
 
   require Logger
 
-  alias Sovite.Core.{Bounce, Config, Delivery, Recipients, Router, Routing}
+  alias Sovite.Core.{Bounce, Config, Delivery, Outbound, Recipients, Router, Routing}
   alias Sovite.Queue.{Backoff, Entry, Spool}
   alias Sovite.SMTP.Client
 
@@ -79,6 +81,8 @@ defmodule Sovite.Core.QueueManager do
     * `:scan_interval` - milliseconds between scans of `incoming/`.
       Defaults to one minute.
     * `:max_active` - messages in memory at once. Defaults to 10000.
+    * `:outbound` - `Sovite.Core.Outbound` options, if failures are
+      counted.
   """
   @spec opts(Sovite.Core.Config.t(), Sovite.Core.Repo.t() | nil) :: keyword()
   def opts(config, repo \\ nil) do
@@ -716,6 +720,8 @@ defmodule Sovite.Core.QueueManager do
       failures ->
         record = {:notified, Enum.map(failures, &elem(&1, 0))}
         {result, message} = send_notification(state, :failure, message, failures, record)
+        user = message.entry.envelope.auth_user
+        if result == :ok, do: Outbound.failed(state.opts[:outbound], user, length(failures))
         {result == :ok, message}
     end
   end
