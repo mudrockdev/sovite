@@ -36,7 +36,8 @@ defmodule Sovite.Core.Bounce do
   @type source :: %{
           path: Path.t(),
           message_offset: non_neg_integer(),
-          message_size: non_neg_integer()
+          message_size: non_neg_integer(),
+          prefix: binary()
         }
 
   @doc """
@@ -82,7 +83,9 @@ defmodule Sovite.Core.Bounce do
     envelope = entry.envelope
 
     with {:ok, headers} <-
-           Spool.read_headers(source.path, source.message_offset, source.message_size) do
+           Spool.read_headers(source.path, source.message_offset, source.message_size,
+             prefix: source.prefix
+           ) do
       {message, body_type} =
         DSN.build(%{
           kind: kind,

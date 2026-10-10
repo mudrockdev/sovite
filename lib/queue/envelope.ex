@@ -4,6 +4,8 @@ defmodule Sovite.Queue.Envelope do
   arrived.
 
   `sender` is `""` for the null reverse-path (`MAIL FROM:<>`).
+  `srs_sender`, when set, is the sender to use instead when the message
+  is forwarded to another domain: an SRS address (see `Sovite.SRS`).
 
   `notification` is set on delivery status notifications Sovite
   generates itself: `:failure`, `:delay`, or `:double_bounce` (a failed
@@ -15,6 +17,7 @@ defmodule Sovite.Queue.Envelope do
   defstruct [
     :queue_id,
     :sender,
+    :srs_sender,
     :recipients,
     :received_at,
     :session_id,
@@ -28,6 +31,7 @@ defmodule Sovite.Queue.Envelope do
   @type t :: %__MODULE__{
           queue_id: String.t(),
           sender: String.t(),
+          srs_sender: String.t() | nil,
           recipients: [String.t(), ...],
           received_at: DateTime.t() | nil,
           session_id: String.t() | nil,
@@ -44,6 +48,7 @@ defmodule Sovite.Queue.Envelope do
     %{
       "queue_id" => envelope.queue_id,
       "sender" => envelope.sender,
+      "srs_sender" => envelope.srs_sender,
       "recipients" => envelope.recipients,
       "received_at" => envelope.received_at && DateTime.to_iso8601(envelope.received_at),
       "session_id" => envelope.session_id,
@@ -60,6 +65,7 @@ defmodule Sovite.Queue.Envelope do
   def from_map(%{"queue_id" => id, "sender" => sender, "recipients" => [_ | _] = rcpts} = map)
       when is_binary(id) and is_binary(sender) do
     with true <- Enum.all?(rcpts, &is_binary/1),
+         true <- is_nil(map["srs_sender"]) or is_binary(map["srs_sender"]),
          {:ok, received_at} <- optional(map["received_at"], &parse_time/1),
          {:ok, remote_ip} <- optional(map["remote_ip"], &parse_ip/1),
          {:ok, body_type} <- optional(map["body_type"], &parse_body_type/1),
@@ -68,6 +74,7 @@ defmodule Sovite.Queue.Envelope do
        %__MODULE__{
          queue_id: id,
          sender: sender,
+         srs_sender: map["srs_sender"],
          recipients: rcpts,
          received_at: received_at,
          session_id: map["session_id"],

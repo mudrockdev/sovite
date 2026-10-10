@@ -10,7 +10,7 @@ defmodule Sovite.Core.Config do
   `get/0`.
   """
 
-  alias Sovite.Core.Config.{Error, RoutingRules, Schema}
+  alias Sovite.Core.Config.{AuthRules, Error, RoutingRules, Schema}
   alias Sovite.Core.{Repo, Restrictions}
 
   @default_path "/etc/sovite/sovite.toml"
@@ -18,7 +18,12 @@ defmodule Sovite.Core.Config do
   @tls_levels [:none, :may, :encrypt, :verify, :dane]
 
   @schema [
-    {:server, {:section, [{:hostname, :hostname, default: &__MODULE__.system_hostname/0}]}, []},
+    {:server,
+     {:section,
+      [
+        {:hostname, :hostname, default: &__MODULE__.system_hostname/0},
+        {:authserv_id, :hostname, []}
+      ]}, []},
     {:database,
      {:section,
       [
@@ -188,6 +193,58 @@ defmodule Sovite.Core.Config do
           ]}, []}
       ]}, []},
     {:submission, {:section, [{:strip_headers, {:list, :string}, default: ["Return-Path"]}]}, []},
+    {:spf,
+     {:section,
+      [
+        {:verify, :boolean, default: true},
+        {:helo, :boolean, default: true},
+        {:reject_fail, :boolean, default: false},
+        {:timeout, :duration, default: "20s"}
+      ]}, []},
+    {:dkim,
+     {:section,
+      [
+        {:verify, :boolean, default: true},
+        {:sign, :boolean, default: true},
+        {:headers, {:list, :header_name}, []},
+        {:expiration, :duration, []},
+        {:key,
+         {:list,
+          {:section,
+           [
+             {:domain, :domain, required: true},
+             {:selector, :dkim_selector, required: true},
+             {:file, :absolute_path, required: true},
+             {:sign, :boolean, default: true}
+           ]}}, default: []}
+      ]}, []},
+    {:arc,
+     {:section,
+      [
+        {:verify, :boolean, default: true},
+        {:seal, :boolean, default: false},
+        {:domain, :domain, []},
+        {:selector, :dkim_selector, []},
+        {:trusted_sealers, {:list, :domain}, default: []}
+      ]}, []},
+    {:dmarc,
+     {:section,
+      [
+        {:verify, :boolean, default: true},
+        {:policy, {:enum, [:report, :enforce]}, default: :report},
+        {:reports, :boolean, default: false},
+        {:report_interval, :duration, default: "1d"},
+        {:report_org, :string, []},
+        {:report_from, :mailbox, []}
+      ]}, []},
+    {:srs,
+     {:section,
+      [
+        {:enabled, :boolean, default: false},
+        {:domain, :domain, []},
+        {:secrets, {:list, :string}, default: []},
+        {:max_age, {:integer, 1, 1000}, default: 21}
+      ]}, []},
     {:bounce, {:section, [{:double_bounce_recipient, :mailbox, []}]}, []},
     {:log,
      {:section,
@@ -219,6 +276,11 @@ defmodule Sovite.Core.Config do
     :pipe,
     :auth,
     :submission,
+    :spf,
+    :dkim,
+    :arc,
+    :dmarc,
+    :srs,
     :bounce,
     :log
   ]
@@ -226,7 +288,7 @@ defmodule Sovite.Core.Config do
   @type tls_level :: :none | :may | :encrypt | :verify | :dane
 
   @type t :: %__MODULE__{
-          server: %{hostname: String.t()},
+          server: %{hostname: String.t(), authserv_id: String.t()},
           database: %{
             adapter: :sqlite | :postgres | :mysql,
             path: Path.t(),
@@ -311,6 +373,48 @@ defmodule Sovite.Core.Config do
           },
           auth: map(),
           submission: %{strip_headers: [String.t()]},
+          spf: %{
+            verify: boolean(),
+            helo: boolean(),
+            reject_fail: boolean(),
+            timeout: pos_integer()
+          },
+          dkim: %{
+            verify: boolean(),
+            sign: boolean(),
+            headers: [String.t()] | nil,
+            expiration: pos_integer() | nil,
+            key: [
+              %{
+                domain: String.t(),
+                selector: String.t(),
+                file: Path.t(),
+                sign: boolean(),
+                signing_key: Sovite.DKIM.SigningKey.t() | nil
+              }
+            ]
+          },
+          arc: %{
+            verify: boolean(),
+            seal: boolean(),
+            domain: String.t() | nil,
+            selector: String.t() | nil,
+            trusted_sealers: [String.t()]
+          },
+          dmarc: %{
+            verify: boolean(),
+            policy: :report | :enforce,
+            reports: boolean(),
+            report_interval: pos_integer(),
+            report_org: String.t(),
+            report_from: String.t()
+          },
+          srs: %{
+            enabled: boolean(),
+            domain: String.t(),
+            secrets: [String.t()],
+            max_age: pos_integer()
+          },
           bounce: %{double_bounce_recipient: String.t() | nil},
           log: Sovite.Core.Logging.config()
         }
@@ -356,8 +460,9 @@ defmodule Sovite.Core.Config do
   @spec validate(map()) :: {:ok, t()} | {:error, [Error.t()]}
   def validate(map) do
     with {:ok, values} <- Schema.validate(map, @schema),
-         values = values |> listener_defaults() |> local_domains(),
-         :ok <- check(values) do
+         values = values |> listener_defaults() |> local_domains() |> AuthRules.defaults(),
+         {values, key_errors} = AuthRules.load_keys(values),
+         :ok <- check(values, key_errors) do
       {:ok, struct!(__MODULE__, values)}
     end
   end
@@ -419,7 +524,7 @@ defmodule Sovite.Core.Config do
   end
 
   # Rules that involve more than one key.
-  defp check(values) do
+  defp check(values, key_errors) do
     errors =
       [
         values.queue.min_backoff > values.queue.max_backoff &&
@@ -439,6 +544,8 @@ defmodule Sovite.Core.Config do
       |> Kernel.++(auth_errors(values))
       |> Kernel.++(acme_errors(values.tls.acme))
       |> Kernel.++(RoutingRules.errors(values))
+      |> Kernel.++(key_errors)
+      |> Kernel.++(AuthRules.errors(values))
       |> Enum.filter(& &1)
 
     if errors == [], do: :ok, else: {:error, errors}

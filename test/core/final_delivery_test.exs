@@ -62,7 +62,8 @@ defmodule Sovite.Core.FinalDeliveryTest do
       body_type: nil,
       path: path,
       message_offset: loaded.message_offset,
-      message_size: loaded.message_size
+      message_size: loaded.message_size,
+      prefix: loaded.prefix
     }
   end
 

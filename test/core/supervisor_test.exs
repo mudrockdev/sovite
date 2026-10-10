@@ -111,7 +111,12 @@ defmodule Sovite.Core.SupervisorTest do
     :telemetry.attach(handler_id, event, &__MODULE__.forward_event/4, test)
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
-    supervisor = start_supervised!({Sovite.Core.Supervisor, config: config, name: nil})
+    supervisor =
+      start_supervised!(
+        {Sovite.Core.Supervisor,
+         config: config, name: nil, queue_manager: [resolver: FakeDNS.resolver(%{})]}
+      )
+
     {:ok, client} = SMTPClient.connect(listener_port(supervisor))
 
     assert {:ok, {250, ["2.0.0 Ok: queued as " <> queue_id]}} =
@@ -132,10 +137,14 @@ defmodule Sovite.Core.SupervisorTest do
     assert [{:recipient, "b@example.com", :deferred, %{status: "4.3.5"}}, {:retry, 1, _}] =
              loaded.records
 
-    message = path |> File.read!() |> binary_part(loaded.message_offset, loaded.message_size)
+    message =
+      path
+      |> Spool.stream_message(loaded.message_offset, loaded.message_size, loaded.prefix)
+      |> Enum.join()
 
+    # The authentication results come first, then the trace field.
     assert message =~
-             ~r/\AReceived: from client.test \(\[127.0.0.1\]\)\r\n\tby mx.example.org with ESMTP id #{queue_id}\r\n/
+             ~r/\AAuthentication-Results: mx.example.org;\r\n\tspf=none smtp.mailfrom=a@example.net;.*\r\nReceived: from client.test \(\[127.0.0.1\]\)\r\n\tby mx.example.org with ESMTP id #{queue_id}\r\n/s
 
     assert String.ends_with?(message, "\r\nSubject: hi\r\n\r\nhello\r\n")
   end
@@ -204,7 +213,9 @@ defmodule Sovite.Core.SupervisorTest do
     assert message.mail_from == "s@example.net"
     assert message.rcpt_to == recipients
     assert message.delivered == ["a@example.com"]
-    assert message.data =~ ~r/\AReceived: from client.test .* id #{queue_id};/s
+
+    assert message.data =~
+             ~r/\AAuthentication-Results: .*\r\nReceived: from client.test .* id #{queue_id};/s
 
     # The full mailbox is retried; the others are done.
     assert_receive {:deferred, %{queue_id: ^queue_id}}, 5_000
@@ -235,7 +246,12 @@ defmodule Sovite.Core.SupervisorTest do
     :telemetry.attach(handler_id, event, &__MODULE__.forward_event/4, self())
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
-    supervisor = start_supervised!({Sovite.Core.Supervisor, config: config, name: nil})
+    supervisor =
+      start_supervised!(
+        {Sovite.Core.Supervisor,
+         config: config, name: nil, queue_manager: [resolver: FakeDNS.resolver(%{})]}
+      )
+
     {:ok, client} = SMTPClient.connect(listener_port(supervisor))
 
     assert {:ok, {220, ["mx.example.org LMTP"]}} = SMTPClient.read_reply(client)

@@ -30,6 +30,8 @@ defmodule Sovite.Core.Config.Schema do
   #   :pipe_name               - letters, digits, "_", "-"; see Sovite.Core.Transport.pipe_name?/1
   #   :env_name                - an environment variable name
   #   :command                 - a non-empty array of strings, the first an absolute path
+  #   :header_name             - a header field name, lower-cased
+  #   :dkim_selector           - a DKIM selector: one or more DNS labels
   #   {:list, type}            - an array; errors name the index, as in "key[0]"
   #   {:map, key_type, value_type} - a table with arbitrary keys; errors name the key
   #   {:integer, min, max}
@@ -447,6 +449,23 @@ defmodule Sovite.Core.Config.Schema do
 
   defp cast(:command, value),
     do: type_error("a command: an array with a program's absolute path and its arguments", value)
+
+  defp cast(:header_name, value) when is_binary(value) do
+    if value =~ ~r/\A[\x21-\x39\x3b-\x7e]+\z/,
+      do: {:ok, String.downcase(value)},
+      else: {:error, "#{inspect(value)} is not a header field name"}
+  end
+
+  defp cast(:header_name, value), do: type_error("a header field name", value)
+
+  defp cast(:dkim_selector, value) when is_binary(value) do
+    if value =~
+         ~r/\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\z/,
+       do: {:ok, value},
+       else: {:error, "#{inspect(value)} is not a valid selector: use DNS labels"}
+  end
+
+  defp cast(:dkim_selector, value), do: type_error("a DKIM selector", value)
 
   defp cast(:duration, value) when is_integer(value) and value > 0, do: {:ok, value * 1000}
 

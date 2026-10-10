@@ -111,6 +111,14 @@ defmodule Sovite.MixProject do
         SMTP: [~r/^Sovite\.SMTP/],
         TLS: [~r/^Sovite\.TLS/],
         Abuse: [~r/^Sovite\.Abuse/],
+        "Email authentication": [
+          ~r/^Sovite\.SPF/,
+          ~r/^Sovite\.DKIM/,
+          ~r/^Sovite\.DMARC/,
+          ~r/^Sovite\.ARC/,
+          ~r/^Sovite\.AuthResults/,
+          ~r/^Sovite\.SRS/
+        ],
         "Local delivery": [~r/^Sovite\.Maildir/, ~r/^Sovite\.Pipe/],
         DSN: [~r/^Sovite\.DSN/],
         Core: [~r/^Sovite\.Core/, Sovite]

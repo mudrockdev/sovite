@@ -5,7 +5,7 @@ defmodule Sovite.Core.SMTPHandlerAuthTest do
   alias Sovite.Core.{Config, SMTPHandler}
   alias Sovite.Queue.Spool
   alias Sovite.SASL.Password
-  alias Sovite.Test.{FakeDovecot, SMTPClient}
+  alias Sovite.Test.{FakeDNS, FakeDovecot, SMTPClient}
 
   @moduletag :tmp_dir
 
@@ -33,7 +33,7 @@ defmodule Sovite.Core.SMTPHandlerAuthTest do
          ip: {127, 0, 0, 1},
          port: 0,
          hostname: "mx.example.com",
-         handler: {SMTPHandler, SMTPHandler.opts(config)},
+         handler: {SMTPHandler, SMTPHandler.opts(config, nil, resolver: FakeDNS.resolver(%{}))},
          auth: true,
          plaintext_auth: true},
         id: make_ref()

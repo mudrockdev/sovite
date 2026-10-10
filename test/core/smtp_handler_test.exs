@@ -4,7 +4,7 @@ defmodule Sovite.Core.SMTPHandlerTest do
 
   alias Sovite.Core.{Config, SMTPHandler}
   alias Sovite.Queue.Spool
-  alias Sovite.Test.SMTPClient
+  alias Sovite.Test.{FakeDNS, SMTPClient}
 
   @moduletag :tmp_dir
 
@@ -28,7 +28,7 @@ defmodule Sovite.Core.SMTPHandlerTest do
          ip: {127, 0, 0, 1},
          port: 0,
          hostname: config.server.hostname,
-         handler: {SMTPHandler, SMTPHandler.opts(config)},
+         handler: {SMTPHandler, SMTPHandler.opts(config, nil, resolver: FakeDNS.resolver(%{}))},
          max_message_size: config.smtp.max_message_size,
          vrfy: config.smtp.vrfy}
       )
@@ -54,8 +54,9 @@ defmodule Sovite.Core.SMTPHandlerTest do
 
   defp queued(%{queue: queue}, queue_id) do
     path = Path.join([queue, "incoming", queue_id])
-    {:ok, envelope, offset} = Spool.read(path)
-    {envelope, path |> File.read!() |> binary_part(offset, File.stat!(path).size - offset)}
+    {:ok, loaded} = Spool.load(path)
+    stream = Spool.stream_message(path, loaded.message_offset, loaded.message_size, loaded.prefix)
+    {loaded.envelope, Enum.join(stream)}
   end
 
   defp queue_files(%{queue: queue}, dir), do: File.ls!(Path.join(queue, dir))
@@ -180,6 +181,10 @@ defmodule Sovite.Core.SMTPHandlerTest do
     assert envelope.protocol == "ESMTP"
     assert envelope.remote_ip == {127, 0, 0, 1}
     assert is_binary(envelope.session_id)
+
+    # Results of the checks on mail from outside come first.
+    assert ["Authentication-Results: mx.example.com;" <> _, message] =
+             String.split(message, ~r/(?<=\r\n)(?=Received:)/, parts: 2)
 
     assert [received, rest] = String.split(message, "Subject: hi", parts: 2)
 

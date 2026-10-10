@@ -8,7 +8,8 @@ defmodule Sovite.Queue.SpoolTest do
 
   @moduletag :tmp_dir
 
-  @header_size 112
+  @header_size 123
+  @old_header_size 112
   @message "From: a@example.net\r\nSubject: hi\r\n\r\nHello\r\n"
 
   setup %{tmp_dir: dir} do
@@ -66,7 +67,7 @@ defmodule Sovite.Queue.SpoolTest do
         String.pad_leading(Integer.to_string(byte_size(message)), 20, "0") <>
         " " <> digest <> "\n"
 
-    assert byte_size(header) == @header_size
+    assert byte_size(header) == @old_header_size
     File.write!(path, header <> body)
   end
 
@@ -248,7 +249,7 @@ defmodule Sovite.Queue.SpoolTest do
       <<header::binary-size(@header_size), body::binary>> = contents
 
       for bad <- [
-            String.replace(header, "SOVITE-QUEUE 2", "SOVITE-QUEUE 3"),
+            String.replace(header, "SOVITE-QUEUE 3", "SOVITE-QUEUE 4"),
             String.replace(header, "SOVITE-QUEUE", "sovite-queue"),
             String.replace(header, " 0000", " 00x0", global: false),
             String.replace(header, "\n", " "),
@@ -261,15 +262,18 @@ defmodule Sovite.Queue.SpoolTest do
     end
 
     test "rejects signed sizes in the header", %{path: path, contents: contents} do
-      <<"SOVITE-QUEUE 2 ", env, env_rest::binary-9, " ", msg, msg_rest::binary-19, rest::binary>> =
-        contents
+      <<"SOVITE-QUEUE 3 ", env, env_rest::binary-9, " ", msg, msg_rest::binary-19, " ", prefix,
+        prefix_rest::binary-9, rest::binary>> = contents
 
-      assert {env, msg} == {?0, ?0}
+      assert {env, msg, prefix} == {?0, ?0, ?0}
 
-      File.write!(path, "SOVITE-QUEUE 2 0#{env_rest} -#{msg_rest}" <> rest)
+      File.write!(path, "SOVITE-QUEUE 3 0#{env_rest} -#{msg_rest} 0#{prefix_rest}" <> rest)
       assert Spool.read(path) == {:error, :invalid_header}
 
-      File.write!(path, "SOVITE-QUEUE 2 -#{env_rest} 0#{msg_rest}" <> rest)
+      File.write!(path, "SOVITE-QUEUE 3 -#{env_rest} 0#{msg_rest} 0#{prefix_rest}" <> rest)
+      assert Spool.read(path) == {:error, :invalid_header}
+
+      File.write!(path, "SOVITE-QUEUE 3 0#{env_rest} 0#{msg_rest} -#{prefix_rest}" <> rest)
       assert Spool.read(path) == {:error, :invalid_header}
     end
 
@@ -441,6 +445,31 @@ defmodule Sovite.Queue.SpoolTest do
       assert Spool.stream_message(path, loaded.message_offset, 0) |> Enum.to_list() == []
     end
 
+    test "a prefix given to commit/2 comes first", %{tmp_dir: dir} do
+      {:ok, writer} = Spool.open(dir, envelope())
+      {:ok, writer} = Spool.write(writer, @message)
+      prefix = "Authentication-Results: mx; none\r\n"
+      assert {:ok, path, size} = Spool.commit(writer, [prefix])
+      assert size == byte_size(prefix <> @message)
+
+      assert {:ok, loaded} = Spool.load(path)
+      assert loaded.prefix == prefix
+      assert loaded.message_size == size
+
+      stream = Spool.stream_message(path, loaded.message_offset, loaded.message_size, prefix)
+      assert Enum.join(stream) == prefix <> @message
+
+      assert Spool.read_headers(path, loaded.message_offset, size, prefix: prefix) ==
+               {:ok, prefix <> "From: a@example.net\r\nSubject: hi\r\n"}
+
+      assert Spool.read_headers(path, loaded.message_offset, size, prefix: prefix, limit: 40) ==
+               {:ok, prefix}
+
+      # The checksum covers the prefix.
+      File.write!(path, String.replace(File.read!(path), "mx; none", "mx; pass"))
+      assert Spool.read(path) == {:error, :checksum_mismatch}
+    end
+
     test "read_headers/4 returns the header section", %{tmp_dir: dir} do
       path = spool!(dir)
       {:ok, loaded} = Spool.load(path)
@@ -449,7 +478,7 @@ defmodule Sovite.Queue.SpoolTest do
                {:ok, "From: a@example.net\r\nSubject: hi\r\n"}
 
       # Cut at a line end when over the limit.
-      assert Spool.read_headers(path, loaded.message_offset, loaded.message_size, 25) ==
+      assert Spool.read_headers(path, loaded.message_offset, loaded.message_size, limit: 25) ==
                {:ok, "From: a@example.net\r\n"}
 
       body_only = spool!(dir, envelope(), ["\r\nbody\r\n"])

@@ -22,6 +22,22 @@ defmodule Sovite.Message.AddressList do
   end
 
   @doc """
+  Returns the addresses in `value` (`local@domain`, as written), in
+  order, or `:error` if a quoted string, comment, or angle address is
+  not closed. Display names, comments, and group names are skipped;
+  what does not parse as an address is left out, as `rewrite/2` leaves
+  it alone.
+
+      iex> Sovite.Message.AddressList.addresses(~s|"Doe, J" <j@x.example>, Team: k@y;|)
+      {:ok, ["j@x.example", "k@y"]}
+  """
+  @spec addresses(binary()) :: {:ok, [String.t()]} | :error
+  def addresses(value) do
+    with {:ok, units} <- tokenize(value, [], []),
+         do: {:ok, Enum.flat_map(units, &unit_addresses/1)}
+  end
+
+  @doc """
   Rewrites the addresses in a whole header field (`"To: a@b\\r\\n"`), as
   kept by `Sovite.Message.Headers`.
   """
@@ -96,7 +112,29 @@ defmodule Sovite.Message.AddressList do
       else: rewrite_bare(pieces, fun)
   end
 
+  defp unit_addresses(pieces) do
+    if Enum.any?(pieces, &match?({:angle, _}, &1)) do
+      for {:angle, inside} <- pieces,
+          {:ok, _route, address} <- [angle_address(inside)],
+          do: address
+    else
+      case bare_parts(pieces) do
+        {_before, address, true, _after} -> [address]
+        {_before, _text, false, _after} -> []
+      end
+    end
+  end
+
   defp rewrite_angle({:angle, inside}, fun) do
+    case angle_address(inside) do
+      {:ok, route, address} -> ["<", route, fun.(address), ">"]
+      :error -> ["<", inside, ">"]
+    end
+  end
+
+  defp rewrite_angle(piece, _fun), do: encode_piece(piece)
+
+  defp angle_address(inside) do
     # An obsolete source route (<@relay:user@domain>) is kept as it is.
     {route, address} =
       case :binary.split(inside, ":") do
@@ -105,19 +143,18 @@ defmodule Sovite.Message.AddressList do
       end
 
     trimmed = String.trim(address)
-
-    if trimmed != "" and String.contains?(trimmed, "@") do
-      ["<", route, fun.(trimmed), ">"]
-    else
-      ["<", inside, ">"]
-    end
+    if trimmed != "" and String.contains?(trimmed, "@"), do: {:ok, route, trimmed}, else: :error
   end
 
-  defp rewrite_angle(piece, _fun), do: encode_piece(piece)
+  defp rewrite_bare(pieces, fun) do
+    {before, address, rewritable, rest} = bare_parts(pieces)
+    [before, if(rewritable, do: fun.(address), else: address), rest]
+  end
 
   # A bare address: the pieces between leading and trailing whitespace
-  # and comments.
-  defp rewrite_bare(pieces, fun) do
+  # and comments. Returns what comes before it, the address, whether it
+  # is one addr-spec, and what comes after it.
+  defp bare_parts(pieces) do
     {sep, pieces} =
       case List.last(pieces) do
         {:sep, _} = sep -> {[encode_piece(sep)], Enum.drop(pieces, -1)}
@@ -133,16 +170,8 @@ defmodule Sovite.Message.AddressList do
     {lead_ws, address} = split_leading_ws(address)
     {address, trail_ws} = split_trailing_ws(address)
 
-    rewritten = if rewritable?(address, core), do: fun.(address), else: address
-
-    [
-      Enum.map(leading, &encode_piece/1),
-      lead_ws,
-      rewritten,
-      trail_ws,
-      Enum.map(trailing, &encode_piece/1),
-      sep
-    ]
+    {[Enum.map(leading, &encode_piece/1), lead_ws], address, rewritable?(address, core),
+     [trail_ws, Enum.map(trailing, &encode_piece/1), sep]}
   end
 
   # One addr-spec: has an "@", no comment inside, and no whitespace

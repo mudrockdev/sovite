@@ -32,7 +32,8 @@ defmodule Sovite.Core.Repo do
     {20_261_004_000_008, Migrations.CreateSenderRelays},
     {20_261_004_000_009, Migrations.CreateAccessRules},
     {20_261_004_000_010, Migrations.CreateAddressRewrites},
-    {20_261_004_000_011, Migrations.CreateBccRules}
+    {20_261_004_000_011, Migrations.CreateBccRules},
+    {20_261_010_000_001, Migrations.CreateDMARCReportEntries}
   ]
 
   @doc "The migrations, in order, as `{version, module}`."

@@ -39,6 +39,15 @@ defmodule Sovite.Message.AddressListTest do
     assert AddressList.rewrite_field("no colon", &String.upcase/1) == "no colon"
   end
 
+  test "lists the addresses in a value" do
+    value = ~S| "Alice, (work)" <alice@host.example>, bob@x (Bob) ,| <> "\r\n" <> ~S| Team: c@d;|
+    assert AddressList.addresses(value) == {:ok, ["alice@host.example", "bob@x", "c@d"]}
+
+    assert AddressList.addresses("<@r1:u@d>, undisclosed-recipients:;") == {:ok, ["u@d"]}
+    assert AddressList.addresses("not an address, <>") == {:ok, []}
+    assert AddressList.addresses(~S|"unterminated <a@b>|) == :error
+  end
+
   property "the identity rewrite never changes a value" do
     check all(value <- string(:printable, max_length: 80)) do
       assert AddressList.rewrite(value, & &1) == value

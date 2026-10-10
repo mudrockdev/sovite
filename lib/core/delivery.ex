@@ -97,7 +97,8 @@ defmodule Sovite.Core.Delivery do
           body_type: :"7bit" | :"8bitmime" | nil,
           path: Path.t(),
           message_offset: non_neg_integer(),
-          message_size: non_neg_integer()
+          message_size: non_neg_integer(),
+          prefix: binary()
         }
 
   @type result :: {String.t(), Record.status(), Record.details()}
@@ -220,7 +221,8 @@ defmodule Sovite.Core.Delivery do
 
   # Recipients that a Delivered-To: field already names.
   defp loops(job) do
-    with {:ok, header} <- Spool.read_headers(job.path, job.message_offset, job.message_size) do
+    with {:ok, header} <-
+           Spool.read_headers(job.path, job.message_offset, job.message_size, prefix: job.prefix) do
       fields = Headers.parse(header)
       {:ok, Enum.filter(job.recipients, &Trace.delivered_to?(fields, &1))}
     end

@@ -31,6 +31,9 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :smtp, :client, :delivery, :start]` | `system_time` | `queue_id`, `relay` |
   | `[:sovite, :smtp, :client, :delivery, :stop]` | `duration` | `queue_id`, `relay`, `recipient`, `status`, `reply` |
   | `[:sovite, :smtp, :client, :delivery, :exception]` | `duration` | `queue_id`, `relay`, `kind`, `reason` |
+  | `[:sovite, :smtp, :message, :authenticated]` | | `session_id`, `queue_id`, `spf`, `dkim`, `arc`, `dmarc`, `disposition` |
+  | `[:sovite, :dmarc, :report, :sent]` | `rows`, `messages` | `domain`, `report_id`, `queue_id`, `to` |
+  | `[:sovite, :dmarc, :report, :skipped]` | `messages` | `domain`, `reason` |
 
   Delivery `:stop` events come once per recipient; `status` is
   `:delivered`, `:deferred`, or `:failed`. `:notification` events are
@@ -38,6 +41,7 @@ defmodule Sovite.Core.Telemetry do
   the ID of the queued notification.
 
   Message lifecycle events (`:queue`, delivery `:stop` and `:exception`),
+  authentication results of received mail, sent DMARC reports,
   successful logins, certificate loads and ACME issuance, failed TLS
   handshakes, and SMTP commands that got a 4xx or 5xx reply are logged at
   `:info`. Corrupt messages, discarded notifications, failed logins, bans,
@@ -78,7 +82,10 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :queue, :notification, :discarded],
     [:sovite, :smtp, :client, :delivery, :start],
     [:sovite, :smtp, :client, :delivery, :stop],
-    [:sovite, :smtp, :client, :delivery, :exception]
+    [:sovite, :smtp, :client, :delivery, :exception],
+    [:sovite, :smtp, :message, :authenticated],
+    [:sovite, :dmarc, :report, :sent],
+    [:sovite, :dmarc, :report, :skipped]
   ]
 
   @info_events [
@@ -88,6 +95,8 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :queue, :notification, :sent],
     [:sovite, :smtp, :client, :delivery, :stop],
     [:sovite, :smtp, :client, :delivery, :exception],
+    [:sovite, :smtp, :message, :authenticated],
+    [:sovite, :dmarc, :report, :sent],
     [:sovite, :auth, :success],
     [:sovite, :tls, :certificate, :loaded],
     [:sovite, :tls, :acme, :issued]

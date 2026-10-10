@@ -215,7 +215,8 @@ defmodule Sovite.Core.Delivery.Local do
 
   defp trace(sender, rcpt), do: Trace.return_path(sender) <> Trace.delivered_to(rcpt)
 
-  defp message(job), do: Spool.stream_message(job.path, job.message_offset, job.message_size)
+  defp message(job),
+    do: Spool.stream_message(job.path, job.message_offset, job.message_size, job.prefix)
 
   defp result(rcpt, <<class, _::binary>> = status, text) do
     outcome =

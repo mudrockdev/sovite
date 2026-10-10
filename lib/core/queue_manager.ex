@@ -429,6 +429,7 @@ defmodule Sovite.Core.QueueManager do
               path: path,
               message_offset: loaded.message_offset,
               message_size: loaded.message_size,
+              prefix: loaded.prefix,
               end_offset: loaded.end_offset,
               jobs: 0,
               expired: false
@@ -470,20 +471,27 @@ defmodule Sovite.Core.QueueManager do
       |> Enum.split_with(&match?({_rcpt, {:deliver, _}}, &1))
 
     message = record_results(message, Enum.map(immediate, &immediate_result/1))
-    groups = Enum.group_by(remote, fn {_rcpt, route} -> route end, &elem(&1, 0))
+
+    groups =
+      Enum.group_by(
+        remote,
+        fn {rcpt, route} -> {route, job_sender(state, envelope, rcpt, route)} end,
+        &elem(&1, 0)
+      )
 
     jobs =
-      for {{:deliver, destination}, recipients} <- groups,
+      for {{{:deliver, destination}, sender}, recipients} <- groups,
           chunk <- Enum.chunk_every(recipients, state.opts.max_recipients) do
         %{
           queue_id: id,
           destination: destination,
           recipients: chunk,
-          sender: envelope.sender,
+          sender: sender,
           body_type: envelope.body_type,
           path: message.path,
           message_offset: message.message_offset,
-          message_size: message.message_size
+          message_size: message.message_size,
+          prefix: message.prefix
         }
       end
 
@@ -500,6 +508,20 @@ defmodule Sovite.Core.QueueManager do
       %{state | ready: ready}
     end
   end
+
+  # Mail forwarded to another domain goes out with its SRS sender, if it
+  # has one, so SPF passes at the destination.
+  defp job_sender(state, %{srs_sender: srs} = envelope, rcpt, {:deliver, %{transport: :smtp}})
+       when srs != nil do
+    with {:ok, {_local, domain}} <- Sovite.Validators.split_mailbox(rcpt),
+         :remote <- Routing.class(state.opts.routing, String.downcase(domain, :ascii)) do
+      srs
+    else
+      _ -> envelope.sender
+    end
+  end
+
+  defp job_sender(_state, envelope, _rcpt, _route), do: envelope.sender
 
   defp immediate_result({rcpt, {:defer, status, text}}),
     do: {rcpt, :deferred, details({status, text})}

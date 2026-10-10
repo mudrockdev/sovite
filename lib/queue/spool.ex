@@ -27,15 +27,24 @@ defmodule Sovite.Queue.Spool do
   Each queue file is a header line, the envelope as one line of JSON, the
   message, and any number of delivery records:
 
-      SOVITE-QUEUE 2 <envelope bytes:10> <message bytes:20> <sha256:64>\\n
+      SOVITE-QUEUE 3 <envelope bytes:10> <message bytes:20> <prefix bytes:10> <sha256:64>\\n
       {"queue_id":"...","sender":"...","recipients":[...],...}\\n
-      <message, CRLF line endings, as received>
+      <message as received, CRLF line endings>
+      <prefix>
       R <sha256:64> {"type":"recipient",...}\\n
       R <sha256:64> {"type":"retry",...}\\n
 
+  The prefix is header fields given to `commit/2`, such as
+  `Authentication-Results:` or `DKIM-Signature:`, that can only be
+  computed once the whole message has been received. They belong at the
+  top of the message: `load/2` returns them as `prefix`, and
+  `stream_message/4` and `read_headers/4` put them first. The message
+  size in the header includes them.
+
   The header has a fixed length. It is written last, so a file whose
   header does not parse was never committed. The SHA-256 in the header
-  covers the envelope and message. Files are created with mode `0600`.
+  covers the envelope, message, and prefix. Files are created with mode
+  `0600`. Versions 1 and 2 have no prefix.
 
   Records (`Sovite.Queue.Record`) are appended with `append/3` and
   `fsync`ed; each line carries the SHA-256 of its JSON. Only the last
@@ -45,9 +54,11 @@ defmodule Sovite.Queue.Spool do
 
   alias Sovite.Queue.{Envelope, ID, Record}
 
-  @version "2"
+  @version "3"
   @magic "SOVITE-QUEUE "
-  @header_size byte_size(@magic) + 2 + 10 + 1 + 20 + 1 + 64 + 1
+  @header_size byte_size(@magic) + 2 + 10 + 1 + 20 + 1 + 10 + 1 + 64 + 1
+  # Versions 1 and 2 have no prefix size.
+  @old_header_size @header_size - 11
   @queues [:incoming, :active, :deferred, :hold, :corrupt]
 
   @enforce_keys [:fd, :tmp_path, :path, :envelope, :hash]
@@ -59,13 +70,15 @@ defmodule Sovite.Queue.Spool do
   @type queue :: :incoming | :active | :deferred | :hold | :corrupt
 
   @typedoc """
-  A queue file read by `load/2`. The message is the `message_size` bytes
-  at `message_offset`; `end_offset` is where the next record goes.
+  A queue file read by `load/2`. The message is `prefix` followed by the
+  stored message at `message_offset`; `message_size` is the size of the
+  two together. `end_offset` is where the next record goes.
   """
   @type loaded :: %{
           envelope: Envelope.t(),
           message_offset: non_neg_integer(),
           message_size: non_neg_integer(),
+          prefix: binary(),
           records: [Record.t()],
           end_offset: non_neg_integer()
         }
@@ -157,16 +170,20 @@ defmodule Sovite.Queue.Spool do
 
   @doc """
   Makes the message durable and moves it to `incoming/`. Returns the
-  final path and the message size in bytes.
+  final path and the message size in bytes, `prefix` included.
+
+  `prefix` is header fields to put at the top of the message, see the
+  file format above.
 
   On error the temporary file is deleted.
   """
-  @spec commit(writer()) :: {:ok, Path.t(), non_neg_integer()} | {:error, File.posix()}
-  def commit(%__MODULE__{} = writer) do
-    digest = writer.hash |> :crypto.hash_final() |> Base.encode16(case: :lower)
-    header = header(writer.envelope_size, writer.message_size, digest)
-
-    with :ok <- :file.pwrite(writer.fd, 0, header),
+  @spec commit(writer(), iodata()) ::
+          {:ok, Path.t(), non_neg_integer()} | {:error, File.posix()}
+  def commit(%__MODULE__{} = writer, prefix \\ []) do
+    with {:ok, writer} <- append_data(writer, prefix),
+         digest = writer.hash |> :crypto.hash_final() |> Base.encode16(case: :lower),
+         header = header(writer, IO.iodata_length(prefix), digest),
+         :ok <- :file.pwrite(writer.fd, 0, header),
          :ok <- :file.datasync(writer.fd),
          :ok <- :file.close(writer.fd),
          :ok <- :file.rename(writer.tmp_path, writer.path),
@@ -267,12 +284,16 @@ defmodule Sovite.Queue.Spool do
   end
 
   defp load_open(fd, verify?, records?) do
-    with {:ok, header} <- :file.read(fd, @header_size),
-         {:ok, version, envelope_size, message_size, digest} <- parse_header(header),
+    with {:ok, header} <- :file.pread(fd, 0, @header_size),
+         {:ok, version, sizes, digest} <- parse_header(header),
+         {envelope_size, message_size, prefix_size} = sizes,
+         header_size = if(version == 3, do: @header_size, else: @old_header_size),
+         {:ok, _} <- :file.position(fd, header_size),
          {:ok, envelope_line} <- read_exactly(fd, envelope_size),
-         message_offset = @header_size + envelope_size,
+         message_offset = header_size + envelope_size,
          end_offset = message_offset + message_size,
          :ok <- verify_message(fd, verify?, envelope_line, message_size, digest),
+         {:ok, prefix} <- read_prefix(fd, end_offset, prefix_size),
          {:ok, map} <- decode_envelope(envelope_line),
          {:ok, envelope} <- Envelope.from_map(map),
          {:ok, records, end_offset} <- read_records(fd, version, records?, end_offset) do
@@ -281,12 +302,23 @@ defmodule Sovite.Queue.Spool do
          envelope: envelope,
          message_offset: message_offset,
          message_size: message_size,
+         prefix: prefix,
          records: records,
          end_offset: end_offset
        }}
     else
       :eof -> {:error, :invalid_header}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp read_prefix(_fd, _end_offset, 0), do: {:ok, ""}
+
+  defp read_prefix(fd, end_offset, size) do
+    case :file.pread(fd, end_offset - size, size) do
+      {:ok, prefix} when byte_size(prefix) == size -> {:ok, prefix}
+      {:error, reason} -> {:error, reason}
+      _short -> {:error, :checksum_mismatch}
     end
   end
 
@@ -308,14 +340,16 @@ defmodule Sovite.Queue.Spool do
 
   defp verify_message(_fd, false, _envelope_line, _message_size, _digest), do: :ok
 
-  defp header(envelope_size, message_size, digest) do
+  defp header(writer, prefix_size, digest) do
     [
       @magic,
       @version,
       " ",
-      String.pad_leading(Integer.to_string(envelope_size), 10, "0"),
+      String.pad_leading(Integer.to_string(writer.envelope_size), 10, "0"),
       " ",
-      String.pad_leading(Integer.to_string(message_size), 20, "0"),
+      String.pad_leading(Integer.to_string(writer.message_size), 20, "0"),
+      " ",
+      String.pad_leading(Integer.to_string(prefix_size), 10, "0"),
       " ",
       digest,
       ?\n
@@ -323,16 +357,35 @@ defmodule Sovite.Queue.Spool do
   end
 
   defp parse_header(
+         <<@magic, ?3, " ", envelope::binary-10, " ", message::binary-20, " ", prefix::binary-10,
+           " ", digest::binary-64, ?\n>>
+       ) do
+    with {:ok, envelope, message, digest} <- parse_sizes(envelope, message, digest),
+         true <- digits?(prefix) and String.to_integer(prefix) <= message do
+      {:ok, 3, {envelope, message, String.to_integer(prefix)}, digest}
+    else
+      _ -> {:error, :invalid_header}
+    end
+  end
+
+  defp parse_header(
          <<@magic, version, " ", envelope::binary-10, " ", message::binary-20, " ",
-           digest::binary-64, ?\n>>
+           digest::binary-64, ?\n, _rest::binary>>
        )
        when version in [?1, ?2] do
-    if digits?(envelope) and digits?(message) and String.match?(digest, ~r/\A[0-9a-f]{64}\z/),
-      do: {:ok, version - ?0, String.to_integer(envelope), String.to_integer(message), digest},
-      else: {:error, :invalid_header}
+    case parse_sizes(envelope, message, digest) do
+      {:ok, envelope, message, digest} -> {:ok, version - ?0, {envelope, message, 0}, digest}
+      :error -> {:error, :invalid_header}
+    end
   end
 
   defp parse_header(_header), do: {:error, :invalid_header}
+
+  defp parse_sizes(envelope, message, digest) do
+    if digits?(envelope) and digits?(message) and String.match?(digest, ~r/\A[0-9a-f]{64}\z/),
+      do: {:ok, String.to_integer(envelope), String.to_integer(message), digest},
+      else: :error
+  end
 
   defp digits?(string), do: String.match?(string, ~r/\A[0-9]+\z/)
 
@@ -364,9 +417,9 @@ defmodule Sovite.Queue.Spool do
     end
   end
 
-  defp read_records(_fd, 2, false, end_offset), do: {:ok, [], end_offset}
+  defp read_records(_fd, _version, false, end_offset), do: {:ok, [], end_offset}
 
-  defp read_records(fd, 2, true, end_offset) do
+  defp read_records(fd, _version, true, end_offset) do
     with {:ok, _} <- :file.position(fd, end_offset) do
       read_record_lines(fd, end_offset, [])
     end
@@ -422,10 +475,14 @@ defmodule Sovite.Queue.Spool do
 
   @doc """
   Streams the message of the queue file at `path`, as returned by
-  `load/2`, in chunks of up to 64 KiB.
+  `load/2`, in chunks of up to 64 KiB: `prefix` first, then the stored
+  message.
   """
-  @spec stream_message(Path.t(), non_neg_integer(), non_neg_integer()) :: Enumerable.t(binary())
-  def stream_message(path, offset, size) do
+  @spec stream_message(Path.t(), non_neg_integer(), non_neg_integer(), binary()) ::
+          Enumerable.t(binary())
+  def stream_message(path, offset, size, prefix \\ "")
+
+  def stream_message(path, offset, size, "") do
     Stream.resource(
       fn ->
         {:ok, fd} = :file.open(path, [:read, :raw, :binary])
@@ -451,19 +508,31 @@ defmodule Sovite.Queue.Spool do
     )
   end
 
+  def stream_message(path, offset, size, prefix),
+    do: Stream.concat([prefix], stream_message(path, offset, size - byte_size(prefix)))
+
   @doc """
   Returns the header fields of the message in the queue file at `path`,
-  up to the empty line that ends them (not included), and at most `limit`
-  bytes, cut at the end of a line.
+  `prefix` first, up to the empty line that ends them (not included).
+
+  ## Options
+
+    * `:prefix` - the `prefix` from `load/2`. Defaults to none.
+    * `:limit` - the most bytes to read, cut at the end of a line.
+      Defaults to 64 KiB.
   """
-  @spec read_headers(Path.t(), non_neg_integer(), non_neg_integer(), pos_integer()) ::
+  @spec read_headers(Path.t(), non_neg_integer(), non_neg_integer(), keyword()) ::
           {:ok, binary()} | {:error, File.posix()}
-  def read_headers(path, offset, size, limit \\ 65_536) do
+  def read_headers(path, offset, size, opts \\ []) do
+    prefix = Keyword.get(opts, :prefix, "")
+    limit = Keyword.get(opts, :limit, 65_536)
+    stored = min(size - byte_size(prefix), max(limit - byte_size(prefix), 0))
+
     with {:ok, fd} <- :file.open(path, [:read, :raw, :binary]) do
       try do
-        case :file.pread(fd, offset, min(size, limit)) do
-          {:ok, data} -> {:ok, header_section(data)}
-          :eof -> {:ok, ""}
+        case :file.pread(fd, offset, stored) do
+          {:ok, data} -> {:ok, header_section(prefix <> data)}
+          :eof -> {:ok, header_section(prefix)}
           {:error, reason} -> {:error, reason}
         end
       after

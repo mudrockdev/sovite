@@ -142,15 +142,15 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 6 — Email Authentication
 
-- [ ] SPF verification for inbound (MAIL FROM and HELO identities), with DNS lookup limits enforced
-- [ ] DKIM verification (RSA-SHA256, Ed25519); reject RSA-SHA1 per RFC 8301
-- [ ] DKIM signing for outbound: multiple selectors, per-domain keys, dual signing (RSA + Ed25519), key rotation support
-- [ ] DMARC evaluation with alignment checks and policy enforcement (configurable: report-only / enforce)
-- [ ] DMARC aggregate report generation (optional, opt-in)
-- [ ] ARC verification and sealing (for forwarders and mailing lists)
-- [ ] `Authentication-Results:` header generation; strip forged incoming `Authentication-Results:` for our own authserv-id
-- [ ] Sender Rewriting Scheme (SRS) for forwarded mail
-- [ ] DNS helper CLI: print the SPF, DKIM, DMARC, MTA-STS, and TLS-RPT records a domain needs
+- [x] SPF verification for inbound (MAIL FROM and HELO identities), with DNS lookup limits enforced
+- [x] DKIM verification (RSA-SHA256, Ed25519); reject RSA-SHA1 per RFC 8301
+- [x] DKIM signing for outbound: multiple selectors, per-domain keys, dual signing (RSA + Ed25519), key rotation support
+- [x] DMARC evaluation with alignment checks and policy enforcement (configurable: report-only / enforce)
+- [x] DMARC aggregate report generation (optional, opt-in)
+- [x] ARC verification and sealing (for forwarders and mailing lists)
+- [x] `Authentication-Results:` header generation; strip forged incoming `Authentication-Results:` for our own authserv-id
+- [x] Sender Rewriting Scheme (SRS) for forwarded mail
+- [x] DNS helper CLI: print the SPF, DKIM, DMARC, MTA-STS, and TLS-RPT records a domain needs
 
 **Standards:** RFC 7208, RFC 6376, RFC 8301, RFC 8463, RFC 7489 (and DMARCbis as it lands), RFC 8617, RFC 8601, RFC 7372, RFC 6591
 

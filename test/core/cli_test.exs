@@ -4,6 +4,7 @@ defmodule Sovite.Core.CLITest do
   import ExUnit.CaptureIO
 
   alias Sovite.Core.CLI
+  alias Sovite.DKIM.SigningKey
   alias Sovite.SASL.Password
 
   @moduletag :tmp_dir
@@ -23,6 +24,97 @@ defmodule Sovite.Core.CLITest do
 
     assert stderr =~ "#{path}: log.foo: unknown key"
     assert stderr =~ "#{path}: log.level: expected one of"
+  end
+
+  describe "DKIM keys and DNS records" do
+    test "dkim generate writes a private key and prints its record", %{tmp_dir: dir} do
+      file = Path.join(dir, "example.com.pem")
+
+      output =
+        capture_io(fn ->
+          assert CLI.run(["dkim", "generate", "Example.com", "s2026", file, "rsa:1024"]) == 0
+        end)
+
+      assert output =~ ~s(s2026._domainkey.example.com. IN TXT "v=DKIM1; k=rsa; p=)
+      assert output =~ ~s(file = "#{file}")
+      assert Bitwise.band(File.stat!(file).mode, 0o777) == 0o600
+      assert {:ok, _key} = SigningKey.from_pem(File.read!(file), "example.com", "s")
+
+      # An existing file is never overwritten.
+      stderr =
+        capture_io(:stderr, fn ->
+          assert CLI.run(["dkim", "generate", "example.com", "s2026", file, "ed25519"]) == 1
+        end)
+
+      assert stderr =~ "cannot write #{file}: file already exists"
+
+      for args <- [["rsa:512"], ["dsa"], ["rsa:x"]] do
+        capture_io(:stderr, fn ->
+          assert CLI.run(["dkim", "generate", "example.com", "s", file <> "2" | args]) == 64
+        end)
+      end
+
+      assert capture_io(:stderr, fn ->
+               assert CLI.run(["dkim", "generate", "bad_domain!", "s", file <> "3"]) == 1
+             end) =~ "invalid domain"
+
+      assert capture_io(:stderr, fn ->
+               assert CLI.run(["dkim", "generate", "example.com", "-s", file <> "3"]) == 1
+             end) =~ "invalid selector"
+    end
+
+    test "dns records prints what a domain needs", %{tmp_dir: dir} do
+      key = Path.join(dir, "key.pem")
+      File.write!(key, SigningKey.generate(:rsa, 2048))
+      config = Path.join(dir, "sovite.toml")
+
+      File.write!(config, """
+      [server]
+      hostname = "mx.example.com"
+      [delivery]
+      source_address = ["192.0.2.25", "2001:db8::25"]
+      [[dkim.key]]
+      domain = "example.com"
+      selector = "old"
+      file = "#{key}"
+      sign = false
+      """)
+
+      output =
+        capture_io(fn ->
+          assert CLI.run(["--config", config, "dns", "records", "example.com"]) == 0
+        end)
+
+      assert output =~ "example.com. IN MX 10 mx.example.com."
+
+      assert output =~
+               ~s(example.com. IN TXT "v=spf1 a:mx.example.com ip4:192.0.2.25 ip6:2001:db8::25 -all")
+
+      # Long keys are split into strings of at most 255 bytes.
+      assert [_, strings] = Regex.run(~r/old._domainkey.example.com. IN TXT (.*)\n/, output)
+      assert length(String.split(strings, ~s(" "))) == 2
+      assert output =~ "old does not sign"
+
+      assert output =~
+               ~s(_dmarc.example.com. IN TXT "v=DMARC1; p=none; rua=mailto:postmaster@example.com")
+
+      assert output =~ ~s(_mta-sts.example.com. IN TXT "v=STSv1; id=)
+      assert output =~ ";   mx: mx.example.com"
+
+      assert output =~
+               ~s(_smtp._tls.example.com. IN TXT "v=TLSRPTv1; rua=mailto:postmaster@example.com")
+
+      other = capture_io(fn -> CLI.run(["--config", config, "dns", "records", "example.org"]) end)
+      assert other =~ "No [[dkim.key]] for example.org"
+
+      stderr =
+        capture_io(:stderr, fn ->
+          assert CLI.run(["--config", key, "dns", "records", "x.example"]) == 1
+        end)
+
+      assert stderr =~ "invalid TOML"
+      assert capture_io(:stderr, fn -> assert CLI.run(["dns", "frob"]) == 64 end) =~ "Usage"
+    end
   end
 
   test "unknown commands print usage and exit 64" do

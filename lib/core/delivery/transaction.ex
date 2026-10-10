@@ -10,7 +10,7 @@ defmodule Sovite.Core.Delivery.Transaction do
   alias Sovite.TLS
 
   def transaction(job, client, remote) do
-    body = Spool.stream_message(job.path, job.message_offset, job.message_size)
+    body = Spool.stream_message(job.path, job.message_offset, job.message_size, job.prefix)
     opts = [size: job.message_size, body_type: job.body_type]
 
     case Client.deliver(client, job.sender, job.recipients, body, opts) do

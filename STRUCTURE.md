@@ -56,6 +56,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | `dmarc/` | `Sovite.DMARC` | DMARC record parsing, alignment, policy evaluation, aggregate reports |
 | `arc/` | `Sovite.ARC` | ARC verification and sealing (RFC 8617) |
 | `auth_results/` | `Sovite.AuthResults` | `Authentication-Results:` header build/parse (RFC 8601) |
+| `srs/` | `Sovite.SRS` | Sender Rewriting Scheme (SRS0/SRS1) addresses for forwarded mail |
 | `tls/` | `Sovite.TLS` | Certificate store with SNI, DANE verification, MTA-STS policy fetch/cache, TLS-RPT reports |
 | `milter/` | `Sovite.Milter` | Milter protocol client |
 | `policy/` | `Sovite.Policy` | Postfix policy delegation protocol (client **and** server, so policy servers can be written in Elixir) |
@@ -67,7 +68,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration |
+| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), email authentication of received and sent mail (SPF, DKIM, ARC, DMARC, SRS) and DMARC reports, bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration |
 
 New components are added as new folders, placed in the lowest layer their dependencies allow.
 
@@ -85,6 +86,8 @@ lib/core/
   cli/               # sovitectl commands
   delivery.ex        # Sovite.Core.Delivery: runs one job, SMTP here
   delivery/          # LMTP, local (Maildir and pipe), and the shared transaction/result code
+  mail_auth.ex       # Sovite.Core.MailAuth: SPF/DKIM/ARC/DMARC checks, signing, sealing
+  dmarc_reports.ex   # Sovite.Core.DMARCReports: aggregate report sender
   ...                # routing, rewriting, restrictions, queue manager
 ```
 

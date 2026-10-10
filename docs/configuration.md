@@ -30,6 +30,7 @@ Every setting is optional. A release ships a commented example at `etc/sovite.to
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `hostname` | hostname | system hostname | Fully qualified name used in the SMTP greeting, `EHLO`, and `Received:` headers. Set it explicitly: the system hostname is often not fully qualified. |
+| `authserv_id` | hostname | `hostname` | The name in the `Authentication-Results:` fields this server adds (RFC 8601). Fields with this name that arrive with a message are removed. Use the same value on all servers of one site. |
 
 ## `[database]`
 
@@ -414,6 +415,102 @@ Set `auth.mechanisms` to what Dovecot offers if it is more than `PLAIN` and `LOG
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `strip_headers` | array of strings | `["Return-Path"]` | Header fields removed from messages of authenticated clients. Add `"X-Originating-IP"` and similar to hide client details. |
+
+## Email authentication
+
+Mail from outside (clients that are neither in `smtp.trusted_networks` nor authenticated, on listeners other than LMTP) is checked:
+
+1. **SPF** (RFC 7208) when the client sends `MAIL`: may the client's address send mail for the `MAIL FROM` domain, and for the `HELO` name? At most 10 DNS-querying terms and 2 void lookups are followed, as the RFC says.
+2. **DKIM** (RFC 6376) signatures, while the message is received. RSA-SHA256 and Ed25519-SHA256 (RFC 8463) are accepted; RSA-SHA1 signatures and RSA keys shorter than 1024 bits never pass (RFC 8301). At most 10 signatures per message are checked.
+3. **ARC** (RFC 8617): the chain of seals forwarders and mailing lists added.
+4. **DMARC** (RFC 7489) at the end of the data: does SPF or DKIM pass for a domain aligned with the `From:` domain? The policy is found by walking up the DNS tree from the `From:` domain (as DMARCbis does), so no public suffix list is needed.
+
+The results go into an `Authentication-Results:` field at the top of the message:
+
+```
+Authentication-Results: mx.example.org;
+	spf=pass smtp.mailfrom=alice@example.com;
+	spf=pass smtp.helo=mail.example.com;
+	dkim=pass header.d=example.com header.i=@example.com header.s=s2026 header.a=rsa-sha256 header.b=Xw3qPg5R;
+	arc=none;
+	dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com
+```
+
+Mail from users (trusted or authenticated clients) is DKIM signed instead, with every key of [`[[dkim.key]]`](#dkim) for the `From:` domain, or for its closest parent domain that has keys.
+
+To publish the DNS records a domain needs, run `sovitectl dns records example.com`. It prints the MX, SPF, DKIM, DMARC, MTA-STS, and TLS-RPT records for this server's settings. `sovitectl dkim generate example.com s2026 /etc/sovite/dkim/example.com.pem` makes a new key (`rsa`, `rsa:4096`, or `ed25519` as a last argument) and prints its record.
+
+### `[spf]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `verify` | boolean | `true` | Check SPF for mail from outside. |
+| `helo` | boolean | `true` | Also check the `HELO` name. For the null sender `<>`, the `HELO` name is always the identity checked. |
+| `reject_fail` | boolean | `false` | Refuse `MAIL` with `550 5.7.23` when SPF fails. Off by default: forwarding breaks SPF, and DMARC makes the better decision with DKIM too. |
+| `timeout` | duration | `20s` | Time for the whole check. Longer checks give `temperror`. |
+
+### `[dkim]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `verify` | boolean | `true` | Check the DKIM signatures of mail from outside. |
+| `sign` | boolean | `true` | Sign mail from users with the keys below. |
+| `headers` | array of strings | see below | The header fields signed, when present. Defaults to `From`, `Reply-To`, `Subject`, `Date`, `Message-ID`, `To`, `Cc`, `In-Reply-To`, `References`, the `MIME-Version` and `Content-*` fields, `Sender`, the `Resent-*` and `List-*` fields, and `Autocrypt`. `From` is signed once more than it occurs, so another `From:` cannot be added later. |
+| `expiration` | duration | unset | Signatures expire after this long (`x=`). Unset: they do not expire. |
+
+Each `[[dkim.key]]` is one key:
+
+```toml
+[[dkim.key]]
+domain = "example.com"
+selector = "s2026r"
+file = "/etc/sovite/dkim/example.com.s2026r.pem"
+
+[[dkim.key]]
+domain = "example.com"
+selector = "s2026e"
+file = "/etc/sovite/dkim/example.com.s2026e.pem"   # an Ed25519 key: mail gets both signatures
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `domain` | domain | required | The signing domain (`d=`). |
+| `selector` | selector | required | The selector (`s=`): the record is published at `<selector>._domainkey.<domain>`. |
+| `file` | absolute path | required | The private key, PEM: PKCS #8 or PKCS #1, RSA (at least 1024 bits; use 2048) or Ed25519. It is read when the config is loaded, so a broken key is a config error. Keep it readable by the Sovite user only. |
+| `sign` | boolean | `true` | Sign with this key. Set `false` to keep a key in the config, and in `sovitectl dns records`, while it is not used. |
+
+To **rotate** a key: add the new key with `sign = false`, publish its record, and wait for DNS caches (a day is plenty). Then set `sign = true` on the new key and `sign = false` on the old one. Remove the old key and its record a week or so later, once no mail signed with it is waiting to be checked.
+
+### `[arc]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `verify` | boolean | `true` | Check the ARC chain of mail from outside. |
+| `seal` | boolean | `false` | ARC seal mail from outside that an alias forwards to another domain, with the key `domain` and `selector` name. The seal records this server's results, so the destination can trust them when SPF and DKIM no longer pass after forwarding. |
+| `domain`, `selector` | domain, selector | unset | The `[[dkim.key]]` to seal with. Required with `seal`. |
+| `trusted_sealers` | array of domains | `[]` | Forwarders and mailing lists whose seals you trust: a message that fails DMARC, but has an unbroken ARC chain last sealed by one of them, is not rejected or held. |
+
+### `[dmarc]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `verify` | boolean | `true` | Evaluate DMARC for mail from outside. |
+| `policy` | `report` \| `enforce` | `report` | With `report`, results are only recorded. With `enforce`, a failing message is refused with `550 5.7.26` when its domain's policy is `reject`, and put in the hold queue when it is `quarantine` (`pct=` and `t=y` are honoured). |
+| `reports` | boolean | `false` | Send aggregate reports (RFC 7489 §7.2) to the `rua=` addresses of the domains whose mail this server receives. Results are kept in the database until they are reported. Destinations outside the reported domain are only used if they publish that they accept its reports. |
+| `report_interval` | duration | `1d` | How often reports are sent. |
+| `report_org` | string | `server.hostname` | The organization named in reports. |
+| `report_from` | email address | `postmaster@<server.hostname>` | The sender of reports. |
+
+### `[srs]`
+
+The Sender Rewriting Scheme lets this server forward mail without breaking SPF at the destination. When an alias sends mail from outside on to another domain, that delivery uses a sender such as `SRS0=HHHH=TT=example.com=alice@mx.example.org` instead of `alice@example.com`. Bounces to it come back here, are checked, and are sent on to `alice@example.com`. The original sender stays in the queue: bounces from this server go to it directly, and local deliveries still see it.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Rewrite senders when forwarding. |
+| `domain` | domain | `server.hostname` | The domain of SRS addresses. It must be a local domain of this server, with MX records pointing here. |
+| `secrets` | array of strings | `[]` | Keys for the hash that makes SRS addresses impossible to forge. Required, at least 16 characters each. The first one signs; all are accepted, so to change the secret, put the new one first and drop the old one after `max_age` days. |
+| `max_age` | integer | `21` | Days an SRS address is accepted for bounces. |
 
 ## `[bounce]`
 

@@ -148,6 +148,19 @@ defmodule Sovite.Core.QueueManagerTest do
                [["b@example.net", "d@example.net"], ["c@other.example"]]
     end
 
+    test "forwards mail to other domains with its SRS sender", %{mta: mta} = context do
+      srs = "SRS0=abcd=AB=sender.example=alice@mx.example.org"
+
+      id =
+        enqueue(context, "alice@sender.example", ["bob@example.net", "carol@other.example"],
+          srs_sender: srs
+        )
+
+      messages = [assert_message(mta), assert_message(mta)]
+      assert Enum.all?(messages, &(&1.mail_from == srs))
+      assert_removed(id, :delivered)
+    end
+
     test "delivers to address literals", %{mta: mta} = context do
       id = enqueue(context, "alice@sender.example", ["bob@[127.0.0.1]"])
       assert_removed(id, :delivered)

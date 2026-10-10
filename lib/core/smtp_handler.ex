@@ -53,6 +53,18 @@ defmodule Sovite.Core.SMTPHandler do
   a missing `Date:` or `Message-ID:` is added, and the header fields in
   `submission.strip_headers` are removed.
 
+  ## Email authentication
+
+  Mail from outside is checked with SPF, DKIM, ARC, and DMARC, mail from
+  users is DKIM signed, and forwarded mail is ARC sealed, see
+  `Sovite.Core.MailAuth`.
+
+  With `srs.enabled`, mail from outside that an alias forwards to another
+  domain gets an SRS sender address (`Sovite.SRS`) for that delivery, so
+  SPF passes at the destination. Bounces to those addresses are accepted
+  for the original sender at `RCPT`, and invalid or expired ones are
+  refused with `550 5.1.1`.
+
   ## Loops
 
   A message with more than `smtp.max_hops` `Received:` fields is refused
@@ -84,6 +96,7 @@ defmodule Sovite.Core.SMTPHandler do
   alias Sovite.Core.{
     Config,
     Logging,
+    MailAuth,
     QueueManager,
     Recipients,
     Restrictions,
@@ -94,10 +107,10 @@ defmodule Sovite.Core.SMTPHandler do
 
   alias Sovite.Core.Repo.Tables.{AccessRules, Users}
 
+  alias Sovite.{AuthResults, SASL, SRS}
   alias Sovite.Message.{Date, Headers, MessageID, Received, Trace}
   alias Sovite.Net
   alias Sovite.Queue.{Envelope, ID, Spool}
-  alias Sovite.SASL
   alias Sovite.SMTP.Reply
 
   # Header sections larger than this are passed through unchanged.
@@ -116,6 +129,7 @@ defmodule Sovite.Core.SMTPHandler do
   @spec opts(Config.t(), GenServer.server() | nil, keyword()) :: map()
   def opts(config, queue_manager \\ nil, runtime \\ []) do
     repo = runtime[:repo]
+    resolver = Keyword.get_lazy(runtime, :resolver, &Sovite.DNS.default_resolver/0)
 
     %{
       queue_manager: queue_manager,
@@ -128,7 +142,7 @@ defmodule Sovite.Core.SMTPHandler do
       max_hops: config.smtp.max_hops,
       restrictions: config.restrictions,
       access: access_tables(repo),
-      resolver: Keyword.get_lazy(runtime, :resolver, &Sovite.DNS.default_resolver/0),
+      resolver: resolver,
       repo: repo,
       penalty: runtime[:penalty],
       require_auth: Keyword.get(runtime, :require_auth, false),
@@ -139,7 +153,9 @@ defmodule Sovite.Core.SMTPHandler do
         Map.new(config.auth.senders, fn {login, patterns} ->
           {String.downcase(login), patterns}
         end),
-      strip_headers: config.submission.strip_headers
+      strip_headers: config.submission.strip_headers,
+      mail_auth: MailAuth.opts(config, repo, resolver),
+      srs: config.srs
     }
   end
 
@@ -236,7 +252,10 @@ defmodule Sovite.Core.SMTPHandler do
         action: nil,
         writer: nil,
         queue_id: nil,
-        header: nil
+        header: nil,
+        spf: nil,
+        auth_work: nil,
+        prefix: []
       })
 
     if opts.require_auth and banned?(state) do
@@ -272,13 +291,29 @@ defmodule Sovite.Core.SMTPHandler do
 
   @impl true
   def handle_mail(sender, _params, state) do
-    state = %{state | sender: sender, envelope_sender: nil, expansions: [], action: nil}
+    state = %{state | sender: sender, envelope_sender: nil, expansions: [], action: nil, spf: nil}
 
     with {:ok, state} <- check_sender(sender, state),
-         {:ok, state} <- restrict(state, :mail) do
+         {:ok, state} <- restrict(state, :mail),
+         {:ok, state} <- check_spf(sender, state) do
       rewrite_sender(sender, state)
     end
   end
+
+  defp check_spf(sender, state) do
+    if inbound?(state) do
+      case MailAuth.check_spf(state.mail_auth, state.connection.remote_ip, state.helo, sender) do
+        {:ok, spf} -> {:ok, %{state | spf: spf}}
+        {:reject, reply, spf} -> {:reply, reply, %{state | spf: spf}}
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  # Mail from clients that are neither trusted nor authenticated. Over
+  # LMTP the client is the MTA that already checked the mail.
+  defp inbound?(state), do: not state.trusted and state.identity == nil and not state.lmtp
 
   defp check_sender(sender, %{identity: identity, sender_check: true} = state)
        when identity != nil do
@@ -321,6 +356,34 @@ defmodule Sovite.Core.SMTPHandler do
 
   @impl true
   def handle_rcpt(recipient, state) do
+    case srs_reverse(recipient, state) do
+      nil ->
+        check_recipient(recipient, state)
+
+      {:ok, original} ->
+        with {:ok, state} <- restrict(state, :rcpt, recipient: recipient),
+             do: {:ok, %{state | expansions: state.expansions ++ [original]}}
+
+      {:error, _reason} ->
+        {:reply, Reply.new(550, "5.1.1", "<#{recipient}>: Invalid or expired SRS address"), state}
+    end
+  end
+
+  # A bounce to an SRS address this server made: back to the original
+  # sender.
+  defp srs_reverse(recipient, %{srs: %{enabled: true} = srs}) do
+    with {:ok, {_local, domain}} <- Sovite.Validators.split_mailbox(recipient),
+         true <- String.downcase(domain, :ascii) == srs.domain,
+         true <- SRS.srs?(recipient) do
+      SRS.reverse(recipient, secrets: srs.secrets, max_age: srs.max_age)
+    else
+      _ -> nil
+    end
+  end
+
+  defp srs_reverse(_recipient, _state), do: nil
+
+  defp check_recipient(recipient, state) do
     case classify(recipient, state) do
       :remote when not state.trusted and state.identity == nil ->
         {:reply, Reply.new(554, "5.7.1", "<#{recipient}>: Relay access denied"), state}
@@ -557,9 +620,12 @@ defmodule Sovite.Core.SMTPHandler do
         auth: state.identity != nil
       )
 
+    sender = state.envelope_sender || transaction.sender
+
     envelope = %Envelope{
       queue_id: queue_id,
-      sender: state.envelope_sender || transaction.sender,
+      sender: sender,
+      srs_sender: srs_sender(sender, recipients, state),
       recipients: recipients,
       received_at: received_at,
       session_id: state.connection.session_id,
@@ -592,19 +658,58 @@ defmodule Sovite.Core.SMTPHandler do
     end
   end
 
+  # The sender for forwarding mail from outside to other domains.
+  defp srs_sender(sender, recipients, %{srs: %{enabled: true} = srs} = state) when sender != "" do
+    if inbound?(state) and remote?(sender, state) and Enum.any?(recipients, &remote?(&1, state)) do
+      case SRS.forward(sender, srs.domain, secrets: srs.secrets) do
+        {:ok, address} -> address
+        {:error, _reason} -> nil
+      end
+    end
+  end
+
+  defp srs_sender(_sender, _recipients, _state), do: nil
+
+  defp remote?(address, state) do
+    case Sovite.Validators.split_mailbox(address) do
+      {:ok, {_local, domain}} ->
+        Routing.class(state.routing, String.downcase(domain, :ascii)) == :remote
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  defp auth_context(state) do
+    %{
+      session_id: state.connection.session_id,
+      queue_id: state.queue_id,
+      ip: state.connection.remote_ip,
+      helo: state.helo,
+      sender: state.sender || "",
+      recipients: state.expansions,
+      inbound: inbound?(state),
+      forwarded: Enum.any?(state.expansions, &remote?(&1, state)),
+      spf: state.spf
+    }
+  end
+
   defp header_rewriting?(state),
     do: (state.trusted or state.identity != nil) and Rewrite.rewrites_headers?(state.routing)
 
   @impl true
-  def handle_data_chunk(chunk, %{header: nil} = state), do: write(state, chunk)
+  def handle_data_chunk(chunk, %{header: nil} = state),
+    do: write(%{state | auth_work: MailAuth.update(state.auth_work, chunk)}, chunk)
 
   def handle_data_chunk(chunk, state) do
     buffer = state.header <> IO.iodata_to_binary(chunk)
 
     case Headers.split(buffer) do
       {:ok, header, body} ->
-        with {:ok, header} <- checked_header(header, state),
-             do: write(%{state | header: nil}, [header, "\r\n", body])
+        with {:ok, header, state} <- checked_header(header, state) do
+          state = %{state | header: nil, auth_work: MailAuth.update(state.auth_work, body)}
+          write(state, [header, "\r\n", body])
+        end
 
       :more when byte_size(buffer) > @max_header_section ->
         write(%{state | header: nil}, buffer)
@@ -625,35 +730,34 @@ defmodule Sovite.Core.SMTPHandler do
     end
   end
 
-  # Refuses a looping message, and fixes the header section if needed.
+  # Refuses a looping message, fixes the header section if needed, and
+  # plans the authentication checks.
   defp checked_header(header, state) do
-    fields = Headers.parse(header)
+    received = Headers.parse(header)
 
-    cond do
-      Trace.hops(fields) > state.max_hops ->
-        {:reply, Reply.new(554, "5.4.6", "Too many hops"), abort(state)}
-
-      state.identity != nil or header_rewriting?(state) ->
-        {:ok, fix_header(fields, state)}
-
-      true ->
-        {:ok, header}
+    if Trace.hops(received) > state.max_hops do
+      {:reply, Reply.new(554, "5.4.6", "Too many hops"), abort(state)}
+    else
+      fields = fix_header(received, state)
+      work = MailAuth.start(state.mail_auth, received, fields, auth_context(state))
+      header = if fields == received, do: header, else: Headers.encode(fields)
+      {:ok, header, %{state | auth_work: work}}
     end
   end
 
-  # The RFC 6409 §8.1-8.3 fixes, and address rewriting.
+  # Forged results for this server go; then the RFC 6409 §8.1-8.3 fixes,
+  # and address rewriting.
   defp fix_header(fields, state) do
+    fields = AuthResults.strip(fields, state.mail_auth.authserv_id)
+
     fields =
       if state.identity,
         do: submission_fixes(fields, state),
         else: fields
 
-    fields =
-      if header_rewriting?(state),
-        do: Rewrite.header_fields(state.routing, fields),
-        else: fields
-
-    Headers.encode(fields)
+    if header_rewriting?(state),
+      do: Rewrite.header_fields(state.routing, fields),
+      else: fields
   end
 
   defp submission_fixes(fields, state) do
@@ -675,21 +779,31 @@ defmodule Sovite.Core.SMTPHandler do
     header =
       if header == "" or String.ends_with?(header, "\r\n"), do: header, else: header <> "\r\n"
 
-    with {:ok, header} <- checked_header(header, state),
+    with {:ok, header, state} <- checked_header(header, state),
          {:ok, state} <- write(%{state | header: nil}, header),
          do: handle_data_end(transaction, state)
   end
 
   def handle_data_end(_transaction, state) do
-    checks = Map.get(state.restrictions, :end_of_data, [])
+    {prefix, verdict} = MailAuth.finish(state.auth_work, auth_context(state))
+    state = %{state | auth_work: nil, prefix: prefix}
 
-    action =
-      case Restrictions.run(checks, :end_of_data, restriction_context(state, [])) do
-        :ok -> state.action
-        action -> stronger(state.action, action)
-      end
+    case verdict do
+      {:reject, reply} ->
+        finish({:reject, reply}, state)
 
-    finish(action || state.session_action, state)
+      verdict ->
+        action = if verdict == :accept, do: state.action, else: stronger(state.action, verdict)
+        checks = Map.get(state.restrictions, :end_of_data, [])
+
+        action =
+          case Restrictions.run(checks, :end_of_data, restriction_context(state, [])) do
+            :ok -> action
+            restriction -> stronger(action, restriction)
+          end
+
+        finish(action || state.session_action, state)
+    end
   end
 
   defp finish({:reject, reply}, state) do
@@ -705,9 +819,9 @@ defmodule Sovite.Core.SMTPHandler do
   end
 
   defp finish(action, state) do
-    case Spool.commit(state.writer) do
+    case Spool.commit(state.writer, state.prefix) do
       {:ok, _path, _size} ->
-        state = %{state | writer: nil, action: nil}
+        state = %{state | writer: nil, action: nil, prefix: []}
         Logger.metadata(queue_id: nil)
         release(action, state)
         {:reply, Reply.new(250, "2.0.0", "Ok: queued as #{state.queue_id}"), state}
@@ -771,12 +885,12 @@ defmodule Sovite.Core.SMTPHandler do
     abort(state)
   end
 
-  defp abort(%{writer: nil} = state), do: %{state | header: nil}
+  defp abort(%{writer: nil} = state), do: %{state | header: nil, auth_work: nil, prefix: []}
 
   defp abort(state) do
     Spool.abort(state.writer)
     Logger.metadata(queue_id: nil)
-    %{state | writer: nil, header: nil}
+    %{state | writer: nil, header: nil, auth_work: nil, prefix: []}
   end
 
   defp queue_error(state, reason) do

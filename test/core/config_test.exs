@@ -2,6 +2,7 @@ defmodule Sovite.Core.ConfigTest do
   use ExUnit.Case, async: true
 
   alias Sovite.Core.Config
+  alias Sovite.DKIM.SigningKey
 
   @moduletag :tmp_dir
 
@@ -47,7 +48,7 @@ defmodule Sovite.Core.ConfigTest do
     assert {:ok, config} = Config.parse(toml)
 
     assert Map.take(config, [:server, :queue, :log]) == %{
-             server: %{hostname: "mail.example.com"},
+             server: %{hostname: "mail.example.com", authserv_id: "mail.example.com"},
              queue: %{
                directory: "/srv/sovite/queue",
                max_lifetime: 5 * 86_400_000,
@@ -556,6 +557,111 @@ defmodule Sovite.Core.ConfigTest do
       assert errors(~s([delivery]\nrelayhost_username = "u")) == [
                "delivery.relayhost_username: needs delivery.relayhost"
              ]
+    end
+  end
+
+  describe "Phase 6 settings" do
+    defp phase6_errors(toml) do
+      {:error, errors} = Config.parse(toml)
+      Enum.map(errors, &Exception.message/1)
+    end
+
+    test "defaults: verify everything, sign with keys, enforce nothing" do
+      {:ok, config} = Config.parse(~s([server]\nhostname = "mx.example.com"))
+      assert config.server.authserv_id == "mx.example.com"
+      assert config.spf == %{verify: true, helo: true, reject_fail: false, timeout: 20_000}
+      assert %{verify: true, sign: true, key: [], headers: nil} = config.dkim
+      assert %{verify: true, seal: false, trusted_sealers: []} = config.arc
+
+      assert config.dmarc == %{
+               verify: true,
+               policy: :report,
+               reports: false,
+               report_interval: 86_400_000,
+               report_org: "mx.example.com",
+               report_from: "postmaster@mx.example.com"
+             }
+
+      assert config.srs == %{enabled: false, domain: "mx.example.com", secrets: [], max_age: 21}
+    end
+
+    test "loads DKIM keys", %{tmp_dir: dir} do
+      file = Path.join(dir, "key.pem")
+      File.write!(file, SigningKey.generate(:ed25519))
+
+      {:ok, config} =
+        Config.parse("""
+        [dkim]
+        headers = ["From", "Subject"]
+        expiration = "7d"
+        [[dkim.key]]
+        domain = "Example.COM"
+        selector = "s2026"
+        file = "#{file}"
+        [arc]
+        seal = true
+        domain = "example.com"
+        selector = "s2026"
+        """)
+
+      assert config.dkim.headers == ["from", "subject"]
+      assert [%{domain: "example.com", sign: true, signing_key: key}] = config.dkim.key
+      assert key.algorithm == :ed25519_sha256
+    end
+
+    test "rejects broken keys and settings", %{tmp_dir: dir} do
+      file = Path.join(dir, "key.pem")
+      File.write!(file, "not a key")
+
+      assert phase6_errors("""
+             [[dkim.key]]
+             domain = "example.com"
+             selector = "a_b"
+             file = "#{file}"
+             [[dkim.key]]
+             domain = "example.com"
+             selector = "s1"
+             file = "#{file}"
+             [[dkim.key]]
+             domain = "example.com"
+             selector = "s1"
+             file = "#{dir}/missing.pem"
+             [arc]
+             seal = true
+             [srs]
+             enabled = true
+             secrets = ["short"]
+             """) == [
+               ~s(dkim.key[0].selector: "a_b" is not a valid selector: use DNS labels)
+             ]
+
+      assert phase6_errors("""
+             [[dkim.key]]
+             domain = "example.com"
+             selector = "s1"
+             file = "#{file}"
+             [[dkim.key]]
+             domain = "example.com"
+             selector = "s1"
+             file = "#{dir}/missing.pem"
+             [arc]
+             seal = true
+             [srs]
+             enabled = true
+             secrets = ["short"]
+             """) == [
+               "dkim.key[0].file: no private key found",
+               "dkim.key[1].file: cannot read #{dir}/missing.pem: no such file or directory",
+               "dkim.key[1]: selector s1 of example.com is already defined",
+               "arc.seal: needs arc.domain and arc.selector to name a [[dkim.key]]",
+               "srs.secrets[0]: must be at least 16 characters"
+             ]
+
+      assert phase6_errors("[srs]\nenabled = true") ==
+               ["srs.secrets: is required when SRS is enabled"]
+
+      assert phase6_errors(~s([dmarc]\npolicy = "strict")) ==
+               [~s(dmarc.policy: expected one of "report", "enforce", got "strict")]
     end
   end
 

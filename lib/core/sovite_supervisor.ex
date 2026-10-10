@@ -28,8 +28,8 @@ defmodule Sovite.Core.Supervisor do
   In start order: the log file handler, the database (migrated before
   anything else starts), the cache of the domains in the database, the
   failed-login counter, the certificate store
-  and the ACME client (when TLS is configured), the queue manager, and
-  the listeners. They stop in reverse order, so listeners close first.
+  and the ACME client (when TLS is configured), the queue manager, the
+  DMARC report sender (with `dmarc.reports`), and the listeners. They stop in reverse order, so listeners close first.
   """
 
   use Supervisor
@@ -42,6 +42,7 @@ defmodule Sovite.Core.Supervisor do
   alias Sovite.Core.{
     ACME,
     Config,
+    DMARCReports,
     Logging,
     QueueManager,
     Repo,
@@ -103,6 +104,7 @@ defmodule Sovite.Core.Supervisor do
         if(auth, do: [penalty_spec(config)], else: []) ++
         if(tls, do: tls_specs(config), else: []) ++
         [{QueueManager, QueueManager.opts(config, repo) ++ manager_opts}] ++
+        if(config.dmarc.reports, do: [dmarc_reports_spec(config, runtime)], else: []) ++
         Enum.map(config.listener, &listener(&1, config, runtime))
 
     Supervisor.init(children, strategy: :one_for_one)
@@ -114,6 +116,19 @@ defmodule Sovite.Core.Supervisor do
      max_failures: config.auth.max_failures,
      window: config.auth.failure_window,
      ban_time: config.auth.ban_time}
+  end
+
+  defp dmarc_reports_spec(config, runtime) do
+    {DMARCReports,
+     [
+       repo: runtime.repo,
+       directory: config.queue.directory,
+       hostname: config.server.hostname,
+       org_name: config.dmarc.report_org,
+       from: config.dmarc.report_from,
+       interval: config.dmarc.report_interval,
+       queue_manager: runtime.queue_manager
+     ] ++ if(runtime.resolver, do: [resolver: runtime.resolver], else: [])}
   end
 
   defp tls_specs(config) do

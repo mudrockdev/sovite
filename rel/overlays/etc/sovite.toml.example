@@ -158,6 +158,47 @@ sender_check = true
 # Header fields removed from messages of authenticated clients.
 strip_headers = ["Return-Path"]
 
+# Email authentication. Mail from outside is checked with SPF, DKIM, ARC,
+# and DMARC, and the results are added as an Authentication-Results field.
+# `sovitectl dns records example.com` prints the DNS records to publish.
+[spf]
+verify = true
+# Refuse MAIL when SPF fails. DMARC usually makes the better decision.
+reject_fail = false
+
+[dkim]
+verify = true
+# Sign mail from users with the keys below. Make a key with:
+#   sovitectl dkim generate example.com s2026 /etc/sovite/dkim/example.com.pem
+sign = true
+
+# [[dkim.key]]
+# domain = "example.com"
+# selector = "s2026"
+# file = "/etc/sovite/dkim/example.com.pem"
+
+[arc]
+verify = true
+# Seal mail that aliases forward to other domains, with a [[dkim.key]].
+# seal = true
+# domain = "example.com"
+# selector = "s2026"
+# Forwarders and lists whose seals may override a failing DMARC policy.
+trusted_sealers = []
+
+[dmarc]
+# "report": only record results. "enforce": refuse or hold failing mail as
+# the sender's policy asks.
+policy = "report"
+# Send aggregate reports to the domains whose mail you receive.
+reports = false
+
+[srs]
+# Rewrite the sender of mail forwarded to other domains, so SPF still
+# passes there.
+enabled = false
+# secrets = ["a long random string"]
+
 [bounce]
 # Where to report notifications that could not be delivered. Unset: log only.
 # double_bounce_recipient = "postmaster@example.com"
