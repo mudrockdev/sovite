@@ -514,6 +514,7 @@ defmodule Sovite.Core.QueueManager do
           message_size: message.message_size,
           prefix: message.prefix,
           requiretls: envelope.requiretls and envelope.content_filter == nil,
+          smtputf8: envelope.smtputf8,
           xforward: if(envelope.content_filter, do: xforward(envelope))
         }
       end
@@ -554,7 +555,7 @@ defmodule Sovite.Core.QueueManager do
 
   defp job_sender(state, %{srs_sender: srs} = envelope, rcpt, {:deliver, %{transport: :smtp}})
        when srs != nil do
-    with {:ok, {_local, domain}} <- Sovite.Validators.split_mailbox(rcpt),
+    with {:ok, {_local, domain}} <- Sovite.Validators.split_mailbox(rcpt, utf8: true),
          :remote <- Routing.class(state.opts.routing, String.downcase(domain, :ascii)) do
       srs
     else

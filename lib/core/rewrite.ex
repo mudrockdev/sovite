@@ -39,6 +39,7 @@ defmodule Sovite.Core.Rewrite do
 
   alias Sovite.Core.Routing
   alias Sovite.Message.AddressList
+  alias Sovite.Validators
 
   @sender_headers ~w(from sender reply-to resent-from resent-sender)
   @recipient_headers ~w(to cc bcc resent-to resent-cc resent-bcc)
@@ -154,16 +155,35 @@ defmodule Sovite.Core.Rewrite do
   end
 
   defp header_sender(routing, address) do
-    case sender(routing, address) do
-      {:ok, new} -> new
-      {:error, _table} -> address
-    end
+    header_address(address, fn ascii ->
+      case sender(routing, ascii) do
+        {:ok, new} -> new
+        {:error, _table} -> ascii
+      end
+    end)
   end
 
   defp header_recipient(routing, address) do
-    case recipient(routing, address) do
-      {:ok, new} -> hide_subdomains(routing, new)
-      {:error, _table} -> address
+    header_address(address, fn ascii ->
+      case recipient(routing, ascii) do
+        {:ok, new} -> hide_subdomains(routing, new)
+        {:error, _table} -> ascii
+      end
+    end)
+  end
+
+  # Header fields may have domains in U-labels (RFC 6532); the tables
+  # have A-labels. An address nothing rewrites keeps the form it had.
+  defp header_address(address, rewrite) do
+    ascii =
+      case Validators.ascii_domain(address) do
+        {:ok, ascii} -> ascii
+        {:error, _} -> address
+      end
+
+    case rewrite.(ascii) do
+      ^ascii -> address
+      new -> new
     end
   end
 end

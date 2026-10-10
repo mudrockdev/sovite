@@ -182,9 +182,12 @@ defmodule Sovite.Core.Config.Schema do
 
   defp cast({:enum, allowed}, value), do: enum_error(allowed, value)
 
+  # Internationalized names are kept in A-labels, the form DNS uses.
   defp cast(:hostname, value) when is_binary(value) do
-    if Sovite.Validators.hostname?(value),
-      do: {:ok, value},
+    hostname = ascii_name(value)
+
+    if Sovite.Validators.hostname?(hostname),
+      do: {:ok, hostname},
       else: {:error, "#{inspect(value)} is not a valid hostname"}
   end
 
@@ -255,18 +258,23 @@ defmodule Sovite.Core.Config.Schema do
   defp cast(:strftime, value), do: type_error("a strftime format string", value)
 
   defp cast(:domain, value) when is_binary(value) do
-    if Sovite.Validators.domain?(value),
-      do: {:ok, String.downcase(value, :ascii)},
+    domain = ascii_name(value)
+
+    if Sovite.Validators.domain?(domain),
+      do: {:ok, String.downcase(domain, :ascii)},
       else: {:error, "#{inspect(value)} is not a valid domain"}
   end
 
   defp cast(:domain, value), do: type_error("a domain", value)
 
-  # Lower-cased, since recipients are compared case-insensitively.
+  # Lower-cased, since recipients are compared case-insensitively. The
+  # local part may be internationalized (RFC 6531); the domain is kept in
+  # A-labels.
   defp cast(:mailbox, value) when is_binary(value) do
-    if Sovite.Validators.mailbox?(value),
-      do: {:ok, String.downcase(value, :ascii)},
-      else: {:error, "#{inspect(value)} is not a valid email address"}
+    case Sovite.Validators.ascii_domain(value) do
+      {:ok, mailbox} -> {:ok, String.downcase(mailbox, :ascii)}
+      {:error, _} -> {:error, "#{inspect(value)} is not a valid email address"}
+    end
   end
 
   defp cast(:mailbox, value), do: type_error("an email address", value)
@@ -366,7 +374,7 @@ defmodule Sovite.Core.Config.Schema do
   defp cast({:url, _schemes}, value), do: type_error("a URL", value)
 
   defp cast(:sender_pattern, value) when is_binary(value) do
-    value = String.downcase(value, :ascii)
+    value = value |> ascii_pattern() |> String.downcase(:ascii)
 
     if SenderCheck.valid_pattern?(value),
       do: {:ok, value},
@@ -579,6 +587,26 @@ defmodule Sovite.Core.Config.Schema do
   defp rate_error(value), do: type_error(~s(a rate like "100/1h"), value)
 
   defp duration_error(value), do: type_error(~s(a duration like "30s", "5m", or "1h"), value)
+
+  # A domain in U-labels as A-labels; anything else as it is, to be
+  # checked by the caller.
+  defp ascii_name(value) do
+    with true <- Sovite.Validators.international?(value),
+         {:ok, ascii} <- Sovite.IDNA.to_ascii(value) do
+      ascii
+    else
+      _ -> value
+    end
+  end
+
+  defp ascii_pattern("@" <> domain), do: "@" <> ascii_name(domain)
+
+  defp ascii_pattern(value) do
+    case Sovite.Validators.ascii_domain(value) do
+      {:ok, mailbox} -> mailbox
+      {:error, _} -> value
+    end
+  end
 
   defp type_error(expected, value), do: {:error, "expected #{expected}, got #{inspect(value)}"}
 

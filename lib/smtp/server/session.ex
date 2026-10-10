@@ -88,6 +88,18 @@ defmodule Sovite.SMTP.Server.Session do
   handler in the transaction's `:xforward` map. They change nothing
   else.
 
+  ## SMTPUTF8
+
+  With `smtputf8: true`, `SMTPUTF8` (RFC 6531) is offered in the `EHLO`
+  and `LHLO` replies. A `MAIL FROM` with the `SMTPUTF8` parameter sets
+  `smtputf8: true` in the mail parameters, and lets the sender and the
+  recipients of that transaction be internationalized addresses, with
+  UTF-8 local parts and U-label domains (`Sovite.Validators`). Without
+  it, such an address gets `553 5.6.7`. Domains in U-labels reach the
+  handler, and the transaction, converted to A-labels
+  (`Sovite.Validators.ascii_domain/1`), so every domain has one form.
+  The message may then have UTF-8 header fields (RFC 6532).
+
   ## Options
 
     * `:hostname` - name in the greeting and `EHLO` reply. Required.
@@ -122,6 +134,8 @@ defmodule Sovite.SMTP.Server.Session do
       `requiretls: true` in the mail parameters: the handler must then
       only relay the message over TLS that is verified with DANE or
       MTA-STS. Defaults to `false`.
+    * `:smtputf8` - offer `SMTPUTF8`, see "SMTPUTF8". Defaults to
+      `false`.
     * `:tarpit_after` - errors before the tarpit starts. Defaults to 3.
     * `:tarpit_delay` - milliseconds per error reply after that. Defaults
       to 0: no tarpit.
@@ -164,7 +178,8 @@ defmodule Sovite.SMTP.Server.Session do
   @type mail_params :: %{
           size: non_neg_integer() | nil,
           body: :"7bit" | :"8bitmime" | nil,
-          requiretls: boolean()
+          requiretls: boolean(),
+          smtputf8: boolean()
         }
 
   @typedoc """
@@ -212,6 +227,7 @@ defmodule Sovite.SMTP.Server.Session do
     max_auth_failures: 3,
     lmtp: false,
     requiretls: false,
+    smtputf8: false,
     tarpit_after: 3,
     tarpit_delay: 0,
     forbid_unauth_pipelining: false,
@@ -222,6 +238,8 @@ defmodule Sovite.SMTP.Server.Session do
   # RFC 2920 §3.1: these may only be the last command of a group. QUIT
   # closes anyway, and input after STARTTLS is dropped.
   @group_end ~w(EHLO HELO LHLO DATA VRFY NOOP AUTH XCLIENT)
+
+  @no_mail_params %{size: nil, body: nil, requiretls: false, smtputf8: false}
 
   @xclient_attributes ~w(NAME REVERSE_NAME ADDR PORT PROTO HELO LOGIN DESTADDR DESTPORT)
   @xforward_attributes ~w(NAME ADDR PORT PROTO HELO IDENT SOURCE)
@@ -622,63 +640,20 @@ defmodule Sovite.SMTP.Server.Session do
   end
 
   defp execute({:mail, sender, params}, session, out, started) do
-    case check_mail(params, session) do
-      {:ok, mail_params} ->
-        transaction = %{
-          sender: sender,
-          params: mail_params,
-          recipients: [],
-          xforward: session.xforward_attributes
-        }
-
-        accepted = Reply.new(250, "2.1.0", "Ok")
-
-        session.handler.handle_mail(sender, mail_params, session.handler_state)
-        |> accept(
-          session,
-          out,
-          "MAIL",
-          sender,
-          started,
-          accepted,
-          &%{&1 | transaction: transaction, xforward_attributes: %{}}
-        )
-
-      {:error, reply} ->
-        reply(session, out, "MAIL", sender, reply, started)
+    with {:ok, mail_params} <- check_mail(params, session),
+         {:ok, sender} <- envelope_address(sender, mail_params.smtputf8) do
+      execute_mail(sender, mail_params, session, out, started)
+    else
+      {:error, reply} -> reply(session, out, "MAIL", sender, reply, started)
     end
   end
 
   defp execute({:rcpt, recipient, params}, session, out, started) do
-    cond do
-      session.transaction == nil ->
-        reply(
-          session,
-          out,
-          "RCPT",
-          recipient,
-          Reply.new(503, "5.5.1", "Need MAIL command"),
-          started
-        )
+    smtputf8 = session.transaction != nil and session.transaction.params.smtputf8
 
-      params != [] ->
-        reply(session, out, "RCPT", recipient, unsupported_parameter(), started)
-
-      length(session.transaction.recipients) >= session.opts.max_recipients ->
-        reply(
-          session,
-          out,
-          "RCPT",
-          recipient,
-          Reply.new(452, "4.5.3", "Too many recipients"),
-          started
-        )
-
-      true ->
-        session.handler.handle_rcpt(recipient, session.handler_state)
-        |> accept(session, out, "RCPT", recipient, started, Reply.new(250, "2.1.5", "Ok"), fn s ->
-          update_in(s.transaction.recipients, &(&1 ++ [recipient]))
-        end)
+    case envelope_address(recipient, smtputf8) do
+      {:ok, recipient} -> execute_rcpt(recipient, params, session, out, started)
+      {:error, reply} -> reply(session, out, "RCPT", recipient, reply, started)
     end
   end
 
@@ -1087,6 +1062,7 @@ defmodule Sovite.SMTP.Server.Session do
   defp helo_reply(session, _ehlo_or_lhlo) do
     starttls = if session.opts.starttls and tls(session) == nil, do: ["STARTTLS"], else: []
     requiretls = if requiretls_offered?(session), do: ["REQUIRETLS"], else: []
+    smtputf8 = if session.opts.smtputf8, do: ["SMTPUTF8"], else: []
 
     xclient =
       if session.xclient, do: ["XCLIENT " <> Enum.join(@xclient_attributes, " ")], else: []
@@ -1110,12 +1086,83 @@ defmodule Sovite.SMTP.Server.Session do
         "SIZE #{session.opts.max_message_size}",
         "8BITMIME",
         "ENHANCEDSTATUSCODES"
-      ] ++ starttls ++ requiretls ++ auth ++ xclient ++ xforward
+      ] ++ starttls ++ requiretls ++ smtputf8 ++ auth ++ xclient ++ xforward
     )
   end
 
   # RFC 8689 §4: only offered once the connection is encrypted.
   defp requiretls_offered?(session), do: session.opts.requiretls and tls(session) != nil
+
+  defp execute_mail(sender, mail_params, session, out, started) do
+    transaction = %{
+      sender: sender,
+      params: mail_params,
+      recipients: [],
+      xforward: session.xforward_attributes
+    }
+
+    session.handler.handle_mail(sender, mail_params, session.handler_state)
+    |> accept(
+      session,
+      out,
+      "MAIL",
+      sender,
+      started,
+      Reply.new(250, "2.1.0", "Ok"),
+      &%{&1 | transaction: transaction, xforward_attributes: %{}}
+    )
+  end
+
+  defp execute_rcpt(recipient, params, session, out, started) do
+    cond do
+      session.transaction == nil ->
+        reply(
+          session,
+          out,
+          "RCPT",
+          recipient,
+          Reply.new(503, "5.5.1", "Need MAIL command"),
+          started
+        )
+
+      params != [] ->
+        reply(session, out, "RCPT", recipient, unsupported_parameter(), started)
+
+      length(session.transaction.recipients) >= session.opts.max_recipients ->
+        reply(
+          session,
+          out,
+          "RCPT",
+          recipient,
+          Reply.new(452, "4.5.3", "Too many recipients"),
+          started
+        )
+
+      true ->
+        session.handler.handle_rcpt(recipient, session.handler_state)
+        |> accept(session, out, "RCPT", recipient, started, Reply.new(250, "2.1.5", "Ok"), fn s ->
+          update_in(s.transaction.recipients, &(&1 ++ [recipient]))
+        end)
+    end
+  end
+
+  # RFC 6531 §3.4: internationalized addresses only in transactions
+  # with SMTPUTF8. Their domains go on in A-labels.
+  defp envelope_address(address, smtputf8) do
+    cond do
+      not Validators.international?(address) ->
+        {:ok, address}
+
+      not smtputf8 ->
+        {:error, Reply.new(553, "5.6.7", "Non-ASCII addresses need the SMTPUTF8 parameter")}
+
+      true ->
+        case Validators.ascii_domain(address) do
+          {:ok, address} -> {:ok, address}
+          {:error, _} -> {:ok, address}
+        end
+    end
+  end
 
   defp check_mail(_params, %{helo: nil, opts: %{lmtp: true}}),
     do: {:error, Reply.new(503, "5.5.1", "Send LHLO first")}
@@ -1129,7 +1176,7 @@ defmodule Sovite.SMTP.Server.Session do
   defp check_mail(_params, %{transaction: transaction}) when transaction != nil,
     do: {:error, Reply.new(503, "5.5.1", "Nested MAIL command")}
 
-  defp check_mail([], _session), do: {:ok, %{size: nil, body: nil, requiretls: false}}
+  defp check_mail([], _session), do: {:ok, @no_mail_params}
 
   defp check_mail(_params, %{esmtp: false}), do: {:error, unsupported_parameter()}
 
@@ -1141,7 +1188,7 @@ defmodule Sovite.SMTP.Server.Session do
       else:
         Enum.reduce_while(
           params,
-          {:ok, %{size: nil, body: nil, requiretls: false}},
+          {:ok, @no_mail_params},
           &add_mail_param(&1, &2, session)
         )
   end
@@ -1185,6 +1232,8 @@ defmodule Sovite.SMTP.Server.Session do
       do: {:ok, :requiretls, true},
       else: {:error, unsupported_parameter()}
   end
+
+  defp mail_param({"SMTPUTF8", nil}, %{opts: %{smtputf8: true}}), do: {:ok, :smtputf8, true}
 
   defp mail_param({key, _value}, _session) when key in ["SIZE", "BODY", "REQUIRETLS"],
     do: {:error, Reply.new(501, "5.5.4", "Invalid #{key} parameter")}

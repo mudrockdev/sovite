@@ -111,8 +111,20 @@ defmodule Sovite.SMTP.CommandTest do
   test "rejects control and non-ASCII characters" do
     assert parse("EHLO a\rb") == {:error, :ehlo, :invalid_characters}
     assert parse("MAIL FROM:<a@example.com>\0") == {:error, :mail, :invalid_characters}
-    assert parse("RCPT TO:<ü@example.com>") == {:error, :rcpt, :invalid_characters}
+    assert parse("RCPT TO:<ü@example.com>\u0085") == {:error, :rcpt, :invalid_characters}
+    assert parse("RCPT TO:<\xFF@example.com>") == {:error, :rcpt, :invalid_characters}
+    assert parse("EHLO bücher.example") == {:error, :ehlo, :invalid_characters}
     assert parse("X\tY") == {:error, nil, :invalid_characters}
+  end
+
+  test "accepts internationalized addresses (RFC 6531)" do
+    assert parse("MAIL FROM:<jürgen@bücher.example> SMTPUTF8") ==
+             {:ok, {:mail, "jürgen@bücher.example", [{"SMTPUTF8", nil}]}}
+
+    assert parse("RCPT TO:<用户@例子.广告>") == {:ok, {:rcpt, "用户@例子.广告", []}}
+    assert parse(~s(RCPT TO:<"ü ü"@example.com>)) == {:ok, {:rcpt, ~s("ü ü"@example.com), []}}
+    assert parse("RCPT TO:<a@☃.example>") == {:error, :rcpt, :invalid_recipient}
+    assert parse("MAIL FROM:<a@example.com> SIZE=ü") == {:error, :mail, :invalid_parameter}
   end
 
   property "never raises" do

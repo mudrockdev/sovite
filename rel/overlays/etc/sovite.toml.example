@@ -90,6 +90,8 @@ vrfy = false
 trusted_networks = []
 # Offer REQUIRETLS (RFC 8689) over TLS.
 requiretls = true
+# Offer SMTPUTF8 (RFC 6531): internationalized addresses and UTF-8 headers.
+smtputf8 = true
 # From the tarpit_after-th error reply on, send each one tarpit_delay later.
 tarpit_after = 3
 tarpit_delay = "1s"

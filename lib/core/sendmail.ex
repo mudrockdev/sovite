@@ -200,8 +200,9 @@ defmodule Sovite.Core.Sendmail do
       @ex_dataerr
     else
       fields = fix_header(fields, sender, user, options[:full_name], origin)
-      message = Stream.concat([[Headers.encode(fields), "\r\n"]], body)
-      submit(settings, sender, recipients, message)
+      header = Headers.encode(fields)
+      message = Stream.concat([[header, "\r\n"]], body)
+      submit(settings, sender, recipients, message, smtputf8?(sender, recipients, header))
     end
   end
 
@@ -336,14 +337,14 @@ defmodule Sovite.Core.Sendmail do
 
   ## Submission
 
-  defp submit(settings, sender, recipients, message) do
+  defp submit(settings, sender, recipients, message, smtputf8) do
     with {:ok, address} <- server_address(settings.server.host),
          {:ok, client} <-
            Client.connect(address, settings.server.port,
              helo: settings.hostname,
              connect_timeout: 30_000
            ) do
-      result = Client.deliver(client, sender, recipients, message)
+      result = Client.deliver(client, sender, recipients, message, smtputf8: smtputf8)
       Client.quit(client)
       report(result)
     else
@@ -356,6 +357,15 @@ defmodule Sovite.Core.Sendmail do
         @ex_tempfail
     end
   end
+
+  # RFC 6531: internationalized addresses and UTF-8 header fields need
+  # SMTPUTF8.
+  defp smtputf8?(sender, recipients, header),
+    do:
+      Enum.any?(
+        [sender, IO.iodata_to_binary(header) | recipients],
+        &Sovite.Validators.international?/1
+      )
 
   defp server_address("[" <> literal) do
     literal = literal |> String.trim_trailing("]") |> String.replace_prefix("IPv6:", "")

@@ -63,6 +63,17 @@ defmodule Sovite.Core.SendmailTest do
              ~r/\ASubject: report\r\nTo: someone@example.net\r\nFrom: <cron@example.com>\r\nDate: .+\r\nMessage-ID: <.+@example.com>\r\n\r\nAll good.\r\n\z/
   end
 
+  test "internationalized mail is sent with SMTPUTF8", context do
+    mta =
+      start_supervised!({FakeMTA, owner: self(), extensions: ["8BITMIME", "SMTPUTF8"]}, id: :utf8)
+
+    File.write!(context.config, ~s([sendmail]\nserver = "[127.0.0.1]:#{FakeMTA.port(mta)}"\n))
+
+    assert {0, ""} = sendmail(context, ["jürgen@bücher.example"], "Subject: Grüße\n\nHallo\n")
+    assert %{mail_args: "FROM:<" <> args} = message(mta)
+    assert String.ends_with?(args, "> SMTPUTF8")
+  end
+
   test "-t reads the recipients, -f sets the sender, -F the name, -i keeps dot lines", context do
     input =
       "From: me@example.org\r\nTo: Ann <ann@example.net>, bob\r\nCc: carol@example.net\r\n" <>

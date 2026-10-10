@@ -123,6 +123,62 @@ defmodule Sovite.DSNTest do
     assert message =~ "Content-Transfer-Encoding: 8bit\r\n\r\nSubject: café\r\n"
   end
 
+  test "builds an internationalized notification (RFC 6533)" do
+    report = %{
+      @report
+      | to: "jürgen@example.org",
+        recipients: [
+          %{recipient: "用户@example.net", status: "5.6.7", diagnostic: "553 5.6.7 Ünicode\u0007"}
+        ],
+        headers: "From: jürgen@example.org\r\nSubject: Grüße\r\n"
+    }
+
+    assert DSN.global?(report)
+    {message, :"8bitmime"} = DSN.build(report)
+    {headers, [text, status, original | _]} = parts(message)
+
+    assert headers =~ "To: <jürgen@example.org>\r\n"
+    assert headers =~ "report-type=global-delivery-status;"
+    assert text =~ "Content-Type: text/plain; charset=utf-8\r\n"
+    assert text =~ "<用户@example.net>: 553 5.6.7 Ünicode?\r\n"
+    assert status =~ "Content-Type: message/global-delivery-status\r\n"
+    assert status =~ "Final-Recipient: utf-8; 用户@example.net\r\n"
+    assert status =~ "Diagnostic-Code: smtp; 553 5.6.7 Ünicode?\r\n"
+    assert original =~ "Content-Type: message/global-headers\r\n"
+    assert original =~ "Content-Transfer-Encoding: 8bit\r\n"
+    assert original =~ "Subject: Grüße\r\n"
+  end
+
+  test "a notification is internationalized for UTF-8 headers only with SMTPUTF8" do
+    report = %{@report | headers: "Subject: Grüße\r\n"}
+    refute DSN.global?(report)
+    {message, :"8bitmime"} = DSN.build(report)
+    assert message =~ "Content-Type: text/rfc822-headers\r\n"
+    assert message =~ "Final-Recipient: rfc822; bob@example.net\r\n"
+
+    report = Map.put(report, :smtputf8, true)
+    assert DSN.global?(report)
+    assert report |> DSN.build() |> elem(0) =~ "Content-Type: message/global-headers\r\n"
+
+    refute DSN.global?(Map.put(@report, :smtputf8, true))
+  end
+
+  test "cuts long internationalized text" do
+    long = String.duplicate("ü", 1000)
+
+    report = %{
+      @report
+      | to: "jürgen@example.org",
+        recipients: [%{recipient: "b@example.net", status: "5.0.0", reason: long}]
+    }
+
+    {message, _} = DSN.build(report)
+    [line] = Regex.run(~r/<b@example.net>: [^\r]*/u, message)
+    assert byte_size(line) < 950
+    assert String.ends_with?(line, "...")
+    assert String.valid?(line)
+  end
+
   test "works without original headers and optional fields" do
     report = %{
       kind: :failure,

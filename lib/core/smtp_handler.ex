@@ -521,7 +521,7 @@ defmodule Sovite.Core.SMTPHandler do
   # A bounce to an SRS address this server made: back to the original
   # sender.
   defp srs_reverse(recipient, %{srs: %{enabled: true} = srs}) do
-    with {:ok, {_local, domain}} <- Sovite.Validators.split_mailbox(recipient),
+    with {:ok, {_local, domain}} <- Sovite.Validators.split_mailbox(recipient, utf8: true),
          true <- String.downcase(domain, :ascii) == srs.domain,
          true <- SRS.srs?(recipient) do
       SRS.reverse(recipient, secrets: srs.secrets, max_age: srs.max_age)
@@ -793,13 +793,15 @@ defmodule Sovite.Core.SMTPHandler do
   defp open_message(transaction, recipients, state) do
     queue_id = state.next_id || ID.generate()
     received_at = DateTime.utc_now()
+    smtputf8 = Map.get(transaction.params, :smtputf8, false)
 
     protocol =
       Received.protocol(
         lmtp: state.lmtp,
         esmtp: state.esmtp,
         tls: state.tls != nil,
-        auth: state.identity != nil
+        auth: state.identity != nil,
+        utf8: smtputf8
       )
 
     sender = state.envelope_sender || transaction.sender
@@ -819,7 +821,8 @@ defmodule Sovite.Core.SMTPHandler do
       body_type: transaction.params.body,
       auth_user: state.identity,
       content_filter: state.content_filter,
-      requiretls: Map.get(transaction.params, :requiretls, false)
+      requiretls: Map.get(transaction.params, :requiretls, false),
+      smtputf8: smtputf8
     }
 
     received =
@@ -858,7 +861,7 @@ defmodule Sovite.Core.SMTPHandler do
   defp srs_sender(_sender, _recipients, _state), do: nil
 
   defp remote?(address, state) do
-    case Sovite.Validators.split_mailbox(address) do
+    case Sovite.Validators.split_mailbox(address, utf8: true) do
       {:ok, {_local, domain}} ->
         Routing.class(state.routing, String.downcase(domain, :ascii)) == :remote
 
@@ -1252,7 +1255,7 @@ defmodule Sovite.Core.SMTPHandler do
   ## Recipient classification
 
   defp classify(recipient, state) do
-    case Sovite.Validators.split_mailbox(recipient) do
+    case Sovite.Validators.split_mailbox(recipient, utf8: true) do
       {:ok, {local_part, domain}} ->
         domain = String.downcase(domain, :ascii)
         class = Routing.class(state.routing, domain)

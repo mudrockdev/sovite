@@ -21,6 +21,7 @@ defmodule Sovite.Core.Repo.Schemas.AliasDestination do
     destination
     |> cast(attrs, [:address])
     |> update_change(:address, &String.trim/1)
+    |> Data.ascii_fields([:address])
     |> validate_required([:address])
     |> validate_length(:address, max: 320)
     |> Data.validate_pattern(:address, [:address], "is not a valid email address")

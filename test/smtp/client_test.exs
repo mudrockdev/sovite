@@ -360,6 +360,33 @@ defmodule Sovite.SMTP.ClientTest do
       assert_receive {:fake_mta, ^mta, {:message, %{mail_args: "FROM:<a@example.org>"}}}
     end
 
+    test "an internationalized message to a server without SMTPUTF8" do
+      mta = start_mta(extensions: ["PIPELINING", "8BITMIME"])
+      client = connect!(mta)
+
+      assert {:error, client, :smtputf8_not_supported} =
+               Client.deliver(client, "jürgen@example.org", ["b@example.net"], [@body],
+                 smtputf8: true
+               )
+
+      # Without smtputf8, internationalized addresses are invalid.
+      assert {:error, _client, {:invalid_address, "jürgen@example.org"}} =
+               Client.deliver(client, "jürgen@example.org", ["b@example.net"], [@body])
+    end
+
+    test "SMTPUTF8 is sent with MAIL" do
+      mta = start_mta(extensions: ["PIPELINING", "8BITMIME", "SMTPUTF8"])
+      client = connect!(mta)
+
+      assert {:ok, _, _} =
+               Client.deliver(client, "jürgen@example.org", ["用户@example.net"], [@body],
+                 smtputf8: true
+               )
+
+      assert_receive {:fake_mta, ^mta,
+                      {:message, %{mail_args: "FROM:<jürgen@example.org> SMTPUTF8"}}}
+    end
+
     test "addresses that could inject commands" do
       mta = start_mta()
       client = connect!(mta)

@@ -28,6 +28,7 @@ defmodule Sovite.Core.Repo.Schemas.AddressRewrite do
     |> cast(attrs, [:kind, :pattern, :replacement])
     |> Data.fold_fields([:pattern])
     |> update_change(:replacement, &String.trim/1)
+    |> Data.ascii_fields([:replacement])
     |> validate_required([:kind, :pattern, :replacement])
     |> validate_length(:pattern, max: 320)
     |> validate_length(:replacement, max: 320)

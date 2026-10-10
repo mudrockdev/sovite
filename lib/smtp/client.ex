@@ -12,8 +12,8 @@ defmodule Sovite.SMTP.Client do
 
   With `PIPELINING` (RFC 2920), `MAIL`, every `RCPT`, and `DATA` are sent
   in one batch. `SIZE` (RFC 1870) and `BODY=8BITMIME` (RFC 6152) are sent
-  when the server supports them, and `REQUIRETLS` (RFC 8689) when asked
-  for. The body is dot-stuffed while streaming
+  when the server supports them, and `REQUIRETLS` (RFC 8689) and
+  `SMTPUTF8` (RFC 6531) when asked for. The body is dot-stuffed while streaming
   with `Sovite.SMTP.DataEncoder`.
 
   Replies are parsed with `Sovite.SMTP.Reply.decode/2`, so a hostile
@@ -139,12 +139,15 @@ defmodule Sovite.SMTP.Client do
     * `:requiretls_not_supported` - `requiretls: true`, but the
       connection is not encrypted or the server does not offer
       `REQUIRETLS`.
+    * `:smtputf8_not_supported` - `smtputf8: true`, but the server does
+      not offer `SMTPUTF8`.
   """
   @type refusal ::
           {:message_too_large, pos_integer()}
           | :eight_bit_not_supported
           | {:invalid_address, String.t()}
           | :requiretls_not_supported
+          | :smtputf8_not_supported
 
   @typedoc """
   The outcome for one recipient: the reply that decided it, and the
@@ -351,6 +354,11 @@ defmodule Sovite.SMTP.Client do
     * `:body_type` - `:"7bit"`, `:"8bitmime"`, or `nil` (not declared).
     * `:requiretls` - send `REQUIRETLS`, so the server must relay the
       message only over verified TLS too (RFC 8689). Defaults to `false`.
+    * `:smtputf8` - the message needs `SMTPUTF8` (RFC 6531): its
+      addresses may be internationalized, or its header fields UTF-8.
+      Sent with `MAIL`; a server that does not offer it refuses the
+      transaction. Defaults to `false`, and then only ASCII addresses
+      are accepted.
     * `:xforward` - the original client of the message, in the shape of
       `t:Sovite.SMTP.Server.Session.xforward/0`, sent with Postfix's
       `XFORWARD` before `MAIL` when the server offers it (only the
@@ -363,15 +371,18 @@ defmodule Sovite.SMTP.Client do
     size = Keyword.get(opts, :size)
     body_type = Keyword.get(opts, :body_type)
     requiretls = Keyword.get(opts, :requiretls, false)
+    smtputf8 = Keyword.get(opts, :smtputf8, false)
+    checks = %{size: size, body_type: body_type, requiretls: requiretls, smtputf8: smtputf8}
 
-    with :ok <- check(client, sender, recipients, size, body_type, requiretls),
+    with :ok <- check(client, sender, recipients, checks),
          {:ok, client} <- xforward(client, Keyword.get(opts, :xforward)) do
       mail = [
         "MAIL FROM:<",
         sender,
         ">",
         mail_params(client, size, body_type),
-        if(requiretls, do: " REQUIRETLS", else: [])
+        if(requiretls, do: " REQUIRETLS", else: []),
+        if(smtputf8, do: " SMTPUTF8", else: [])
       ]
 
       run_transaction(client, mail, recipients, body)
@@ -464,15 +475,19 @@ defmodule Sovite.SMTP.Client do
 
   ## Transactions
 
-  defp check(client, _sender, _recipients, _size, _body_type, true)
+  defp check(client, _sender, _recipients, %{requiretls: true})
        when client.tls == nil or not is_map_key(client.extensions, "REQUIRETLS"),
        do: {:error, :requiretls_not_supported}
 
-  defp check(client, sender, recipients, size, body_type, _requiretls) do
+  defp check(client, _sender, _recipients, %{smtputf8: true})
+       when not is_map_key(client.extensions, "SMTPUTF8"),
+       do: {:error, :smtputf8_not_supported}
+
+  defp check(client, sender, recipients, %{size: size, body_type: body_type, smtputf8: utf8}) do
     limit = size_limit(client)
 
     cond do
-      invalid = Enum.find([sender | recipients], &invalid_address?/1) ->
+      invalid = Enum.find([sender | recipients], &invalid_address?(&1, utf8)) ->
         {:error, {:invalid_address, invalid}}
 
       limit && size && size > limit ->
@@ -486,8 +501,8 @@ defmodule Sovite.SMTP.Client do
     end
   end
 
-  defp invalid_address?(""), do: false
-  defp invalid_address?(address), do: not Validators.mailbox?(address)
+  defp invalid_address?("", _utf8), do: false
+  defp invalid_address?(address, utf8), do: not Validators.mailbox?(address, utf8: utf8)
 
   # A SIZE without a value, or SIZE 0, announces no fixed limit.
   defp size_limit(client) do

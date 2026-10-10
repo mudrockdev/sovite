@@ -180,6 +180,7 @@ Settings for all listeners. Limits apply per listener.
 | `trusted_networks` | array of networks | `[]` | Clients that may relay mail to any domain, such as your own servers. Addresses or CIDR networks: `["127.0.0.1", "192.0.2.0/24", "2001:db8::/32"]`. |
 | `max_hops` | integer | `50` | A message with more `Received:` fields than this is refused with `554 5.4.6 Too many hops`: it is most likely in a mail loop (RFC 5321 §6.3). |
 | `requiretls` | boolean | `true` | Offer `REQUIRETLS` (RFC 8689) on encrypted connections, except LMTP. A message sent with it is only relayed over TLS verified with DANE or MTA-STS, see [REQUIRETLS](#requiretls). |
+| `smtputf8` | boolean | `true` | Offer `SMTPUTF8` (RFC 6531): accept internationalized mail, see [Internationalized mail](#internationalized-mail). |
 | `tarpit_after` | integer | `3` | Error replies before the tarpit starts. |
 | `tarpit_delay` | duration | `1s` | From the `tarpit_after`th error reply on, each one is sent this much later, slowing down dictionary attacks and other clients that keep getting errors. |
 | `forbid_unauth_pipelining` | boolean | `true` | Disconnect a client with `554 5.5.0` when it sends more commands without waiting for the reply to one that must end a group (`EHLO`, `DATA`, `NOOP`, ..., RFC 2920 §3.1), or pipelines at all before `PIPELINING` was offered. Spam bots and SMTP smuggling attempts do this; real servers do not. Not on LMTP listeners. |
@@ -190,6 +191,17 @@ Settings for all listeners. Limits apply per listener.
 | `proxy_timeout` | duration | `10s` | How long to wait for the PROXY header. |
 
 HTTP requests and header lines (cross-protocol attacks) close the session with `421 4.7.0`.
+
+### Internationalized mail
+
+Sovite handles internationalized mail (RFC 6530–6533): addresses with UTF-8 local parts such as `jürgen@example.de`, internationalized domain names such as `bücher.example`, and UTF-8 header fields.
+
+- **Receiving.** A client that sends `MAIL FROM:<...> SMTPUTF8` may use internationalized addresses for the sender and recipients of that message, and UTF-8 header fields. Without the parameter, such an address gets `553 5.6.7`. The `Received:` field says `with UTF8SMTP` (or `UTF8SMTPS`, `UTF8SMTPSA`, ...).
+- **Domains.** Domain names are checked with IDNA2008 (RFC 5890–5893) and used in their A-label form (`xn--bcher-kva.example`) everywhere inside Sovite: in the queue, for routing, in DNS lookups, and in the database. Domains can be written either way in the config file and with `sovitectl`, so `hosted = ["bücher.example"]` and `sovitectl alias add info@bücher.example ...` work, and match mail sent to either form. Local parts are kept as they are written.
+- **Delivering.** A message is sent with `SMTPUTF8` when it needs it: when an address of the transaction is internationalized, or when it came with `SMTPUTF8` and has UTF-8 header fields. Otherwise it goes out as plain mail. An internationalized message cannot be converted for a next hop that does not support `SMTPUTF8` (RFC 6531 §3.2), so it is returned to the sender: `5.6.7` for internationalized addresses, `5.6.9` for UTF-8 header fields.
+- **Notifications.** Delivery status notifications about internationalized mail are internationalized ones (RFC 6533): a `message/global-delivery-status` report that names internationalized addresses with the `utf-8` type (`Final-Recipient: utf-8; jürgen@example.de`), the original header fields as `message/global-headers`, and a UTF-8 explanation.
+
+Domains in addresses can be written in U-labels in `From:` and other header fields (RFC 6532); DMARC looks up their A-labels.
 
 ## `[domains]`
 

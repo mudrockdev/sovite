@@ -8,6 +8,7 @@ defmodule Sovite.Core.Delivery.Transaction do
   alias Sovite.Queue.Spool
   alias Sovite.SMTP.{Client, Reply}
   alias Sovite.TLS
+  alias Sovite.Validators
 
   def transaction(job, client, remote) do
     body = Spool.stream_message(job.path, job.message_offset, job.message_size, job.prefix)
@@ -16,6 +17,7 @@ defmodule Sovite.Core.Delivery.Transaction do
       size: job.message_size,
       body_type: job.body_type,
       requiretls: Map.get(job, :requiretls, false),
+      smtputf8: smtputf8?(job),
       xforward: Map.get(job, :xforward)
     ]
 
@@ -29,7 +31,7 @@ defmodule Sovite.Core.Delivery.Transaction do
         {results, remote, {client, remote}}
 
       {:error, client, refusal} ->
-        {status, text} = refusal_error(refusal, remote)
+        {status, text} = refusal_error(refusal, remote, job)
         {all(job, status, text, remote), remote, {client, remote}}
 
       {:error, {:data_end, reason}} ->
@@ -66,16 +68,45 @@ defmodule Sovite.Core.Delivery.Transaction do
   def details(status, reply, remote, smtp),
     do: %{status: status, reply: reply, remote: remote, smtp: smtp, at: DateTime.utc_now()}
 
-  defp refusal_error({:message_too_large, limit}, remote),
+  # Whether the transaction needs SMTPUTF8 (RFC 6531): its addresses are
+  # internationalized, or it came with SMTPUTF8 and has UTF-8 header
+  # fields. Otherwise it is sent without, even if it came with it.
+  @doc false
+  def smtputf8?(job) do
+    international_addresses?(job) or
+      (Map.get(job, :smtputf8, false) and international_header?(job))
+  end
+
+  defp international_addresses?(job),
+    do: Enum.any?([job.sender | job.recipients], &Validators.international?/1)
+
+  defp international_header?(job) do
+    case Spool.read_headers(job.path, job.message_offset, job.message_size, prefix: job.prefix) do
+      {:ok, header} -> Validators.international?(header)
+      {:error, _} -> true
+    end
+  end
+
+  defp refusal_error({:message_too_large, limit}, remote, _job),
     do: {"5.3.4", "message size exceeds the limit of #{limit} bytes of #{remote}"}
 
-  defp refusal_error(:eight_bit_not_supported, remote),
+  defp refusal_error(:eight_bit_not_supported, remote, _job),
     do: {"5.6.3", "8-bit message, but #{remote} does not support 8BITMIME"}
 
-  defp refusal_error(:requiretls_not_supported, remote),
+  defp refusal_error(:requiretls_not_supported, remote, _job),
     do: {"5.7.30", "REQUIRETLS support required, but host #{remote} does not offer it"}
 
-  defp refusal_error({:invalid_address, address}, _remote),
+  # RFC 6531 §3.2 and RFC 6533: such a message cannot be downgraded, so
+  # it is returned.
+  defp refusal_error(:smtputf8_not_supported, remote, job) do
+    if international_addresses?(job),
+      do: {"5.6.7", "non-ASCII addresses need SMTPUTF8, but host #{remote} does not support it"},
+      else:
+        {"5.6.9",
+         "the message has UTF-8 header fields, which need SMTPUTF8, but host #{remote} does not support it"}
+  end
+
+  defp refusal_error({:invalid_address, address}, _remote, _job),
     do: {"5.1.3", "invalid address #{inspect(address)}"}
 
   # Port 0 is a Unix socket.

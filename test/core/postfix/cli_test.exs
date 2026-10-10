@@ -1,5 +1,6 @@
 defmodule Sovite.Core.CLI.MigrateTest do
-  use ExUnit.Case, async: true
+  # Not async: capture_io(:stderr) sees what other tests write to stderr.
+  use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
 

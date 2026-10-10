@@ -26,6 +26,7 @@ defmodule Sovite.Core.Repo.Schemas.BccRule do
     |> cast(attrs, [:kind, :pattern, :address])
     |> Data.fold_fields([:pattern])
     |> update_change(:address, &String.trim/1)
+    |> Data.ascii_fields([:address])
     |> validate_required([:kind, :pattern, :address])
     |> validate_length(:pattern, max: 320)
     |> validate_length(:address, max: 320)

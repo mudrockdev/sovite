@@ -7,11 +7,53 @@ defmodule Sovite.Core.Repo.Data do
   import Ecto.Changeset
 
   alias Sovite.Core.Repo
-  alias Sovite.Validators
+  alias Sovite.{IDNA, Validators}
 
-  @doc "Keys are stored and looked up trimmed and lower-cased."
+  @doc """
+  Keys are stored and looked up trimmed and lower-cased, with the domain
+  of an address, `@domain`, or `.domain` in A-labels (see `to_ascii/1`).
+  """
   @spec fold(String.t()) :: String.t()
-  def fold(value), do: value |> String.trim() |> String.downcase()
+  def fold(value), do: value |> String.trim() |> String.downcase() |> to_ascii()
+
+  @doc """
+  `fold/1` for keys that may be a bare domain, such as domain names and
+  transport patterns: a bare domain is converted to A-labels too.
+  """
+  @spec fold_domain(String.t()) :: String.t()
+  def fold_domain(value), do: value |> fold() |> ascii_domain("")
+
+  @doc """
+  Converts the domain of an address, `@domain`, or `.domain` from
+  U-labels to A-labels, so internationalized domains match however they
+  were written. Anything else, such as a local part, is returned as it
+  is.
+
+      iex> Sovite.Core.Repo.Data.to_ascii("info@bücher.example")
+      "info@xn--bcher-kva.example"
+  """
+  @spec to_ascii(String.t()) :: String.t()
+  def to_ascii(pattern) do
+    case :binary.split(pattern, "@") do
+      [local, domain] ->
+        ascii_domain(domain, local <> "@")
+
+      [_] when binary_part(pattern, 0, min(1, byte_size(pattern))) == "." ->
+        ascii_domain(binary_part(pattern, 1, byte_size(pattern) - 1), ".")
+
+      [_] ->
+        pattern
+    end
+  end
+
+  defp ascii_domain(domain, prefix) do
+    with true <- Validators.international?(domain),
+         {:ok, ascii} <- IDNA.to_ascii(domain) do
+      prefix <> ascii
+    else
+      _ -> prefix <> domain
+    end
+  end
 
   @typedoc "What an address pattern may be."
   @type form :: :address | :catchall | :local_part | :domain | :subdomains | :wildcard
@@ -21,13 +63,13 @@ defmodule Sovite.Core.Repo.Data do
   def form?(pattern, :wildcard), do: pattern == "*"
   def form?("@" <> domain, :catchall), do: Validators.domain?(domain)
   def form?("." <> domain, :subdomains), do: Validators.domain?(domain)
-  def form?(pattern, :address), do: Validators.mailbox?(pattern)
+  def form?(pattern, :address), do: Validators.mailbox?(pattern, utf8: true)
 
   def form?(pattern, :domain),
     do: not String.contains?(pattern, "@") and Validators.domain?(pattern)
 
   def form?(pattern, :local_part),
-    do: not String.contains?(pattern, "@") and Validators.local_part?(pattern)
+    do: not String.contains?(pattern, "@") and Validators.local_part?(pattern, utf8: true)
 
   def form?(_pattern, _form), do: false
 
@@ -39,10 +81,17 @@ defmodule Sovite.Core.Repo.Data do
     end)
   end
 
-  @doc "Normalizes `fields` with `fold/1`."
-  @spec fold_fields(Ecto.Changeset.t(), [atom()]) :: Ecto.Changeset.t()
-  def fold_fields(changeset, fields),
-    do: Enum.reduce(fields, changeset, &update_change(&2, &1, fn value -> fold(value) end))
+  @doc "Normalizes `fields` with `fold/1`, or `fold_domain/1` with `domain: true`."
+  @spec fold_fields(Ecto.Changeset.t(), [atom()], keyword()) :: Ecto.Changeset.t()
+  def fold_fields(changeset, fields, opts \\ []) do
+    fold = if opts[:domain], do: &fold_domain/1, else: &fold/1
+    Enum.reduce(fields, changeset, &update_change(&2, &1, fold))
+  end
+
+  @doc "Converts the domains of `fields` to A-labels with `to_ascii/1`."
+  @spec ascii_fields(Ecto.Changeset.t(), [atom()]) :: Ecto.Changeset.t()
+  def ascii_fields(changeset, fields),
+    do: Enum.reduce(fields, changeset, &update_change(&2, &1, fn value -> to_ascii(value) end))
 
   @doc """
   Inserts or updates the row of `schema` matching `clauses`, applying

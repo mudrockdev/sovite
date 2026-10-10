@@ -6,7 +6,8 @@ defmodule Sovite.Message.Received do
               by mx.example.com with ESMTP id 0Q7c3XbK2mA9fZ
               for <user@example.com>; Sun, 4 Oct 2026 12:00:00 +0000
 
-  The `with` value is an RFC 3848 transmission type, see `protocol/1`.
+  The `with` value is an RFC 3848 or RFC 6531 transmission type, see
+  `protocol/1`.
   Values are inserted as given, so they must already be validated: the
   `EHLO` name as a domain or address literal, the recipient as a mailbox.
   """
@@ -51,7 +52,8 @@ defmodule Sovite.Message.Received do
   end
 
   @doc """
-  Returns the RFC 3848 transmission type for a session.
+  Returns the transmission type for a session: RFC 3848's, or with
+  `utf8: true` (a transaction with `SMTPUTF8`) RFC 6531's.
 
       iex> Sovite.Message.Received.protocol(esmtp: true, tls: true)
       "ESMTPS"
@@ -59,6 +61,8 @@ defmodule Sovite.Message.Received do
       "SMTP"
       iex> Sovite.Message.Received.protocol(lmtp: true, auth: true)
       "LMTPA"
+      iex> Sovite.Message.Received.protocol(esmtp: true, tls: true, utf8: true)
+      "UTF8SMTPS"
   """
   @spec protocol(keyword()) :: String.t()
   def protocol(opts) do
@@ -69,11 +73,17 @@ defmodule Sovite.Message.Received do
         true -> "SMTP"
       end
 
-    # RFC 3848 types only exist for the extended protocols.
+    # RFC 3848 and RFC 6531 types only exist for the extended protocols.
     if base == "SMTP",
       do: base,
-      else: base <> if(opts[:tls], do: "S", else: "") <> if(opts[:auth], do: "A", else: "")
+      else:
+        utf8(base, opts[:utf8]) <>
+          if(opts[:tls], do: "S", else: "") <> if(opts[:auth], do: "A", else: "")
   end
+
+  defp utf8("ESMTP", true), do: "UTF8SMTP"
+  defp utf8("LMTP", true), do: "UTF8LMTP"
+  defp utf8(base, _utf8), do: base
 
   @doc """
   Formats an IP address as an RFC 5321 address literal.

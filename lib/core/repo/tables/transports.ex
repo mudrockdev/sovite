@@ -22,7 +22,7 @@ defmodule Sovite.Core.Repo.Tables.Transports do
     Data.upsert(
       repo,
       Transport,
-      [pattern: Data.fold(pattern)],
+      [pattern: Data.fold_domain(pattern)],
       &Transport.changeset(&1, %{pattern: pattern, transport: transport})
     )
   end
@@ -30,7 +30,7 @@ defmodule Sovite.Core.Repo.Tables.Transports do
   @doc "Deletes the entry for `pattern`."
   @spec delete(Repo.t(), String.t()) :: :ok | {:error, :not_found}
   def delete(repo, pattern),
-    do: Data.delete(repo, from(t in Transport, where: t.pattern == ^Data.fold(pattern)))
+    do: Data.delete(repo, from(t in Transport, where: t.pattern == ^Data.fold_domain(pattern)))
 
   @doc "Lists all entries, by pattern."
   @spec list(Repo.t()) :: [Transport.t()]

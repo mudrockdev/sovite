@@ -3,7 +3,7 @@ defmodule Sovite.SMTP.Server do
   An SMTP server: a `Sovite.Listener` whose connections run
   `Sovite.SMTP.Server.Session`.
 
-  Supports `PIPELINING`, `SIZE`, `8BITMIME`, `ENHANCEDSTATUSCODES`,
+  Supports `PIPELINING`, `SIZE`, `8BITMIME`, `SMTPUTF8`, `ENHANCEDSTATUSCODES`,
   `STARTTLS`, `AUTH`, `REQUIRETLS`, and Postfix's `XCLIENT` and
   `XFORWARD`. What happens to messages is decided by a
   `Sovite.SMTP.Server.Handler`:

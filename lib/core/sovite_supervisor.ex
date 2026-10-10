@@ -322,6 +322,7 @@ defmodule Sovite.Core.Supervisor do
      plaintext_auth: config.auth.plaintext,
      lmtp: mode == :lmtp,
      requiretls: smtp.requiretls and mode != :lmtp,
+     smtputf8: smtp.smtputf8,
      tarpit_after: smtp.tarpit_after,
      tarpit_delay: smtp.tarpit_delay,
      forbid_unauth_pipelining: smtp.forbid_unauth_pipelining and mode != :lmtp,

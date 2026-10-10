@@ -201,11 +201,11 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 10 — Internationalization
 
-- [ ] `SMTPUTF8` extension (UTF-8 local parts and domains)
-- [ ] IDNA2008 domain handling (U-label / A-label conversion)
-- [ ] UTF-8 header handling
-- [ ] Downgrade behavior when next hop lacks `SMTPUTF8` (bounce with clear DSN)
-- [ ] Internationalized DSNs
+- [x] `SMTPUTF8` extension (UTF-8 local parts and domains)
+- [x] IDNA2008 domain handling (U-label / A-label conversion)
+- [x] UTF-8 header handling
+- [x] Downgrade behavior when next hop lacks `SMTPUTF8` (bounce with clear DSN)
+- [x] Internationalized DSNs
 
 **Standards:** RFC 6530, RFC 6531, RFC 6532, RFC 6533, RFC 5890–5893
 

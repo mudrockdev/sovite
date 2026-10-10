@@ -352,9 +352,15 @@ defmodule Sovite.DMARC do
     end
   end
 
+  # RFC 6532 lets From: have a domain in U-labels; DNS needs A-labels.
   defp address_domain(address) do
     domain = address |> String.split("@") |> List.last() |> normalize()
-    if Sovite.Validators.domain?(domain), do: domain, else: :error
+
+    case Sovite.Validators.international?(domain) && Sovite.IDNA.to_ascii(domain) do
+      false -> if Sovite.Validators.domain?(domain), do: domain, else: :error
+      {:ok, ascii} -> ascii
+      {:error, _} -> :error
+    end
   end
 
   @doc """

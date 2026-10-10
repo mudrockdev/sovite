@@ -275,7 +275,8 @@ defmodule Sovite.Core.Routing do
 
   @doc "Whether `address` is a usable mailbox: `local@domain`, or `local@[literal]`."
   @spec valid_address?(String.t()) :: boolean()
-  def valid_address?(address), do: match?({:ok, _}, Sovite.Validators.split_mailbox(address))
+  def valid_address?(address),
+    do: match?({:ok, _}, Sovite.Validators.split_mailbox(address, utf8: true))
 
   @doc "The transport for domain class `class` (`:local`, `:hosted`, `:relay`, `:remote`)."
   @spec transport(t(), class()) :: Sovite.Core.Transport.t()

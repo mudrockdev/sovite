@@ -43,7 +43,7 @@ defmodule Sovite.Core.Repo.Tables.AccessRules do
   def delete(repo, kind, pattern) do
     Data.delete(
       repo,
-      from(r in AccessRule, where: r.kind == ^kind and r.pattern == ^Data.fold(pattern))
+      from(r in AccessRule, where: r.kind == ^kind and r.pattern == ^Data.fold_domain(pattern))
     )
   end
 

@@ -102,6 +102,7 @@ defmodule Sovite.MixProject do
       ],
       groups_for_modules: [
         Validators: [~r/^Sovite\.Validators/],
+        IDNA: [~r/^Sovite\.IDNA/],
         Net: [~r/^Sovite\.Net/],
         Message: [~r/^Sovite\.Message/],
         DNS: [~r/^Sovite\.DNS/],

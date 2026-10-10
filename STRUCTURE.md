@@ -30,7 +30,8 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `validators/` | `Sovite.Validators` | Syntax checks for addresses (RFC 5321/5322), domains, hostnames, IP literals, HELO names |
+| `validators/` | `Sovite.Validators` | Syntax checks for addresses (RFC 5321/5322, and internationalized ones per RFC 6531), domains, hostnames, IP literals, HELO names |
+| `idna/` | `Sovite.IDNA` | Internationalized domain names (IDNA2008, RFC 5890–5893): Punycode, U-label/A-label conversion, code point, contextual, and Bidi rules |
 | `net/` | `Sovite.Net` | IP address and CIDR network parsing and matching |
 
 ### Layer 1: Formats & Infrastructure
@@ -49,8 +50,8 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `smtp/` | `Sovite.SMTP` | Command/reply codec, enhanced status codes, server session state machine (with greeting delay, tarpit, pipelining checks, and Postfix's `XCLIENT` and `XFORWARD`), client state machine (with `XFORWARD`), xtext, LMTP (client over TCP and Unix sockets, and server mode), extensions |
-| `dsn/` | `Sovite.DSN` | Build and parse delivery status notifications (RFC 3464 / 6522) |
+| `smtp/` | `Sovite.SMTP` | Command/reply codec, enhanced status codes, server session state machine (with greeting delay, tarpit, pipelining checks, `SMTPUTF8`, and Postfix's `XCLIENT` and `XFORWARD`), client state machine (with `SMTPUTF8` and `XFORWARD`), xtext, LMTP (client over TCP and Unix sockets, and server mode), extensions |
+| `dsn/` | `Sovite.DSN` | Build and parse delivery status notifications (RFC 3464 / 6522), internationalized ones too (RFC 6533) |
 | `spf/` | `Sovite.SPF` | SPF evaluation (RFC 7208) |
 | `dkim/` | `Sovite.DKIM` | DKIM signing and verification (RFC 6376, 8301, 8463) |
 | `dmarc/` | `Sovite.DMARC` | DMARC record parsing, alignment, policy evaluation, aggregate reports |

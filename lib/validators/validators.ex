@@ -6,11 +6,16 @@ defmodule Sovite.Validators do
   Any term that is not a binary is treated as invalid.
 
   The grammar follows RFC 5321 §4.1.2 and §4.1.3, with the length limits
-  from RFC 5321 §4.5.3.1. Only ASCII is accepted for now. Internationalized
-  addresses (SMTPUTF8, RFC 6531) come later.
+  from RFC 5321 §4.5.3.1. Only ASCII is accepted by default. With the
+  `utf8: true` option, the functions for mailboxes and local parts accept
+  internationalized addresses as RFC 6531 §3.3 extends the grammar: local
+  parts may contain UTF-8 characters, and domains may be U-labels (see
+  `Sovite.IDNA`). Lengths are counted in octets either way.
   """
 
   import Bitwise, only: [band: 2]
+
+  alias Sovite.IDNA
 
   @max_domain 255
   @max_label 63
@@ -148,16 +153,21 @@ defmodule Sovite.Validators do
       iex> Sovite.Validators.local_part?("a..b")
       false
   """
-  @spec local_part?(term()) :: boolean()
-  def local_part?(local_part)
+  @spec local_part?(term(), keyword()) :: boolean()
+  def local_part?(local_part, opts \\ [])
+
+  def local_part?(local_part, opts)
       when is_binary(local_part) and byte_size(local_part) in 1..@max_local_part do
-    case local_part do
-      <<?", rest::binary>> -> match?({:ok, ""}, scan_quoted(rest))
-      _ -> dot_string?(local_part)
+    utf8 = Keyword.get(opts, :utf8, false)
+
+    cond do
+      not ascii?(local_part) and not (utf8 and utf8_text?(local_part)) -> false
+      String.starts_with?(local_part, "\"") -> quoted_string?(local_part)
+      true -> dot_string?(local_part)
     end
   end
 
-  def local_part?(_), do: false
+  def local_part?(_local_part, _opts), do: false
 
   @doc """
   Returns `true` if `mailbox` is a valid RFC 5321 `Mailbox`
@@ -166,8 +176,8 @@ defmodule Sovite.Validators do
   The angle brackets of a reverse-path or forward-path are not part of the
   mailbox and must be removed before calling this.
   """
-  @spec mailbox?(term()) :: boolean()
-  def mailbox?(mailbox), do: match?({:ok, _}, split_mailbox(mailbox))
+  @spec mailbox?(term(), keyword()) :: boolean()
+  def mailbox?(mailbox, opts \\ []), do: match?({:ok, _}, split_mailbox(mailbox, opts))
 
   @doc """
   Validates `mailbox` and splits it into its local part and domain.
@@ -181,20 +191,61 @@ defmodule Sovite.Validators do
       {:ok, {~s("a@b"), "example.com"}}
       iex> Sovite.Validators.split_mailbox("user@-example.com")
       {:error, :invalid_domain}
+      iex> Sovite.Validators.split_mailbox("jürgen@bücher.example", utf8: true)
+      {:ok, {"jürgen", "bücher.example"}}
   """
-  @spec split_mailbox(term()) :: {:ok, {String.t(), String.t()}} | {:error, mailbox_error()}
-  def split_mailbox(mailbox) when is_binary(mailbox) and byte_size(mailbox) > @max_mailbox,
+  @spec split_mailbox(term(), keyword()) ::
+          {:ok, {String.t(), String.t()}} | {:error, mailbox_error()}
+  def split_mailbox(mailbox, opts \\ [])
+
+  def split_mailbox(mailbox, _opts) when is_binary(mailbox) and byte_size(mailbox) > @max_mailbox,
     do: {:error, :too_long}
 
-  def split_mailbox(mailbox) when is_binary(mailbox) do
+  def split_mailbox(mailbox, opts) when is_binary(mailbox) do
+    utf8 = Keyword.get(opts, :utf8, false)
+
     with {:ok, local, domain} <- split_at(mailbox),
-         :ok <- check_local_part(local),
-         :ok <- check_domain(domain) do
+         :ok <- check_local_part(local, utf8),
+         :ok <- check_domain(domain, utf8) do
       {:ok, {local, domain}}
     end
   end
 
-  def split_mailbox(_), do: {:error, :missing_at}
+  def split_mailbox(_mailbox, _opts), do: {:error, :missing_at}
+
+  @doc """
+  Whether `string` has non-ASCII characters, such as an internationalized
+  address (RFC 6531).
+
+      iex> Sovite.Validators.international?("jürgen@example.com")
+      true
+  """
+  @spec international?(String.t()) :: boolean()
+  def international?(string) when is_binary(string), do: not ascii?(string)
+
+  @doc """
+  Converts the domain of a mailbox to A-labels (`Sovite.IDNA.to_ascii/1`),
+  keeping the local part. Mailboxes with an ASCII domain, or an address
+  literal, are returned as they are. RFC 6531 §3.2 lets an SMTP client
+  convert U-labels to A-labels at any time, since they name the same
+  domain.
+
+      iex> Sovite.Validators.ascii_domain("jürgen@Bücher.example")
+      {:ok, "jürgen@xn--bcher-kva.example"}
+      iex> Sovite.Validators.ascii_domain("user@Example.com")
+      {:ok, "user@Example.com"}
+  """
+  @spec ascii_domain(String.t()) :: {:ok, String.t()} | {:error, mailbox_error()}
+  def ascii_domain(mailbox) do
+    with {:ok, {local, domain}} <- split_mailbox(mailbox, utf8: true) do
+      if ascii?(domain) do
+        {:ok, mailbox}
+      else
+        {:ok, ascii} = IDNA.to_ascii(domain)
+        {:ok, local <> "@" <> ascii}
+      end
+    end
+  end
 
   ## Domains
 
@@ -274,13 +325,17 @@ defmodule Sovite.Validators do
   defp dot_string?(string), do: string |> :binary.split(".", [:global]) |> Enum.all?(&atom?/1)
 
   defp atom?(<<>>), do: false
-  defp atom?(atom), do: for(<<c <- atom>>, reduce: true, do: (acc -> acc and is_atext(c)))
+  # Non-ASCII bytes are only here after utf8_text?/1 accepted them.
+  defp atom?(atom),
+    do: for(<<c <- atom>>, reduce: true, do: (acc -> acc and (is_atext(c) or c >= 0x80)))
+
+  defp quoted_string?(<<?", rest::binary>>), do: match?({:ok, ""}, scan_quoted(rest))
 
   # Scans the rest of a quoted string after the opening quote. Returns what
   # follows the closing quote.
   defp scan_quoted(<<?", rest::binary>>), do: {:ok, rest}
   defp scan_quoted(<<?\\, c, rest::binary>>) when c in 32..126, do: scan_quoted(rest)
-  defp scan_quoted(<<c, rest::binary>>) when is_qtext(c), do: scan_quoted(rest)
+  defp scan_quoted(<<c, rest::binary>>) when is_qtext(c) or c >= 0x80, do: scan_quoted(rest)
   defp scan_quoted(_), do: :error
 
   ## Mailboxes
@@ -306,13 +361,27 @@ defmodule Sovite.Validators do
     end
   end
 
-  defp check_local_part(local) when byte_size(local) > @max_local_part,
+  defp check_local_part(local, _utf8) when byte_size(local) > @max_local_part,
     do: {:error, :local_part_too_long}
 
-  defp check_local_part(local),
-    do: if(local_part?(local), do: :ok, else: {:error, :invalid_local_part})
+  defp check_local_part(local, utf8),
+    do: if(local_part?(local, utf8: utf8), do: :ok, else: {:error, :invalid_local_part})
 
-  defp check_domain(domain) do
-    if domain?(domain) or address_literal?(domain), do: :ok, else: {:error, :invalid_domain}
+  defp check_domain(domain, utf8) do
+    cond do
+      domain?(domain) or address_literal?(domain) -> :ok
+      utf8 and not ascii?(domain) and IDNA.valid?(domain) -> :ok
+      true -> {:error, :invalid_domain}
+    end
+  end
+
+  ## UTF-8
+
+  defp ascii?(binary), do: for(<<c <- binary>>, reduce: true, do: (acc -> acc and c < 0x80))
+
+  # RFC 6532 §3.1 UTF8-non-ascii, without the C1 controls.
+  defp utf8_text?(string) do
+    String.valid?(string) and
+      for(<<c::utf8 <- string>>, reduce: true, do: (acc -> acc and c not in 0x80..0x9F))
   end
 end

@@ -116,6 +116,7 @@ defmodule Sovite.Core.Delivery do
           message_size: non_neg_integer(),
           prefix: binary(),
           requiretls: boolean(),
+          smtputf8: boolean(),
           xforward: Sovite.SMTP.Server.Session.xforward() | nil
         }
 

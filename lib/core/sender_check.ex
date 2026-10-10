@@ -15,7 +15,7 @@ defmodule Sovite.Core.SenderCheck do
   @spec valid_pattern?(String.t()) :: boolean()
   def valid_pattern?("*"), do: true
   def valid_pattern?("@" <> domain), do: Sovite.Validators.domain?(domain)
-  def valid_pattern?(address), do: Sovite.Validators.mailbox?(address)
+  def valid_pattern?(address), do: Sovite.Validators.mailbox?(address, utf8: true)
 
   @doc "Returns whether `login` may send as `sender`, given its `patterns`."
   @spec allowed?(String.t(), String.t(), [String.t()]) :: boolean()

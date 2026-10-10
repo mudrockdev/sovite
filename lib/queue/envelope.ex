@@ -11,6 +11,11 @@ defmodule Sovite.Queue.Envelope do
   message may only be relayed over TLS verified with DANE or MTA-STS,
   to servers that support `REQUIRETLS` too.
 
+  `smtputf8` is set when the client sent `SMTPUTF8` (RFC 6531): the
+  message may have internationalized addresses and UTF-8 header fields
+  (RFC 6532), and needs a next hop that supports `SMTPUTF8` too when it
+  does.
+
   `auth_user` is the login of the client that submitted the message, if
   it authenticated, so delivery failures can be traced back to it.
 
@@ -40,7 +45,8 @@ defmodule Sovite.Queue.Envelope do
     :notification,
     :auth_user,
     :content_filter,
-    requiretls: false
+    requiretls: false,
+    smtputf8: false
   ]
 
   @type t :: %__MODULE__{
@@ -57,7 +63,8 @@ defmodule Sovite.Queue.Envelope do
           notification: :failure | :delay | :double_bounce | nil,
           auth_user: String.t() | nil,
           content_filter: String.t() | nil,
-          requiretls: boolean()
+          requiretls: boolean(),
+          smtputf8: boolean()
         }
 
   @doc false
@@ -77,7 +84,8 @@ defmodule Sovite.Queue.Envelope do
       "notification" => envelope.notification && Atom.to_string(envelope.notification),
       "auth_user" => envelope.auth_user,
       "content_filter" => envelope.content_filter,
-      "requiretls" => envelope.requiretls
+      "requiretls" => envelope.requiretls,
+      "smtputf8" => envelope.smtputf8
     }
   end
 
@@ -88,6 +96,7 @@ defmodule Sovite.Queue.Envelope do
     with true <- Enum.all?(rcpts, &is_binary/1),
          true <- is_nil(map["srs_sender"]) or is_binary(map["srs_sender"]),
          true <- map["requiretls"] in [nil, true, false],
+         true <- map["smtputf8"] in [nil, true, false],
          true <- is_nil(map["auth_user"]) or is_binary(map["auth_user"]),
          true <- is_nil(map["content_filter"]) or is_binary(map["content_filter"]),
          {:ok, received_at} <- optional(map["received_at"], &parse_time/1),
@@ -109,7 +118,8 @@ defmodule Sovite.Queue.Envelope do
          notification: notification,
          auth_user: map["auth_user"],
          content_filter: map["content_filter"],
-         requiretls: map["requiretls"] == true
+         requiretls: map["requiretls"] == true,
+         smtputf8: map["smtputf8"] == true
        }}
     else
       _ -> {:error, :invalid_envelope}

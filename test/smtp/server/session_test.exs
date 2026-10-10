@@ -647,6 +647,79 @@ defmodule Sovite.SMTP.Server.SessionTest do
     end
   end
 
+  describe "SMTPUTF8" do
+    test "is offered on request, and allows internationalized addresses" do
+      session = started([], smtputf8: true)
+
+      {:continue, out, session} =
+        input(
+          session,
+          "EHLO c.test\r\nMAIL FROM:<jürgen@Bücher.example> SMTPUTF8\r\nRCPT TO:<用户@例子.广告>\r\nRCPT TO:<b@y.test>\r\n"
+        )
+
+      assert out =~ "250-SMTPUTF8\r\n" or out =~ "250 SMTPUTF8\r\n"
+      assert codes(out) == [250, 250, 250, 250]
+      assert_received {:mail, {"jürgen@xn--bcher-kva.example", %{smtputf8: true}}}
+      assert_received {:rcpt, "用户@xn--fsqu00a.xn--4rr70v"}
+
+      {:continue, _, _} = input(session, "DATA\r\n")
+
+      assert_received {:data,
+                       %{
+                         sender: "jürgen@xn--bcher-kva.example",
+                         recipients: ["用户@xn--fsqu00a.xn--4rr70v", "b@y.test"]
+                       }}
+    end
+
+    test "internationalized addresses need the SMTPUTF8 parameter" do
+      session = started([], smtputf8: true)
+
+      {:continue, out, session} =
+        input(
+          session,
+          "EHLO c.test\r\nMAIL FROM:<jürgen@example.com>\r\nMAIL FROM:<a@x.test>\r\nRCPT TO:<b@bücher.example>\r\n"
+        )
+
+      assert replies(out) |> tl() == [
+               "553 5.6.7 Non-ASCII addresses need the SMTPUTF8 parameter",
+               "250 2.1.0 Ok",
+               "553 5.6.7 Non-ASCII addresses need the SMTPUTF8 parameter"
+             ]
+
+      assert_received {:mail, {"a@x.test", %{smtputf8: false}}}
+
+      {:continue, out, _} = input(session, "RCPT TO:<a@y.test>\r\n")
+      assert codes(out) == [250]
+    end
+
+    test "is not offered by default" do
+      {:continue, out, _} =
+        input(
+          started(),
+          "EHLO c.test\r\nMAIL FROM:<a@x.test> SMTPUTF8\r\nMAIL FROM:<ü@x.test>\r\n"
+        )
+
+      refute out =~ "250-SMTPUTF8"
+
+      assert replies(out) |> tl() == [
+               "555 5.5.4 Unsupported parameter",
+               "553 5.6.7 Non-ASCII addresses need the SMTPUTF8 parameter"
+             ]
+    end
+
+    test "not on HELO, and not with a value" do
+      {:continue, out, _} =
+        input(started([], smtputf8: true), "HELO c.test\r\nMAIL FROM:<a@x.test> SMTPUTF8\r\n")
+
+      assert replies(out) |> List.last() == "555 5.5.4 Unsupported parameter"
+
+      {:continue, out, _} =
+        input(started([], smtputf8: true), "EHLO c.test\r\nMAIL FROM:<a@x.test> SMTPUTF8=yes\r\n")
+
+      assert replies(out) |> List.last() == "555 5.5.4 Unsupported parameter"
+    end
+  end
+
   describe "AUTH" do
     defp auth_session(handler_opts \\ [], opts \\ []) do
       opts = Keyword.merge([auth: true, plaintext_auth: true], opts)

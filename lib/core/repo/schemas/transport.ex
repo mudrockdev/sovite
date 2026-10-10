@@ -24,7 +24,7 @@ defmodule Sovite.Core.Repo.Schemas.Transport do
   def changeset(entry, attrs) do
     entry
     |> cast(attrs, [:pattern, :transport])
-    |> Data.fold_fields([:pattern])
+    |> Data.fold_fields([:pattern], domain: true)
     |> update_change(:transport, &String.trim/1)
     |> validate_required([:pattern, :transport])
     |> validate_length(:pattern, max: 320)

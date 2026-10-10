@@ -6,8 +6,10 @@ defmodule Sovite.SMTP.Server.Handler do
   `Sovite.SMTP.Server.Session` handles the protocol (syntax, command
   order, limits, dot-stuffing) and calls the handler only with
   well-formed input. Addresses have been checked with
-  `Sovite.Validators.split_mailbox/1`, except that a recipient may be
-  `"Postmaster"` without a domain (RFC 5321 §4.5.1, any case).
+  `Sovite.Validators.split_mailbox/2`, except that a recipient may be
+  `"Postmaster"` without a domain (RFC 5321 §4.5.1, any case). They are
+  only internationalized in transactions with `SMTPUTF8`, and their
+  domains are in A-labels.
 
   Most callbacks return one of:
 

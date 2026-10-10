@@ -30,7 +30,7 @@ defmodule Sovite.Core.Repo.Schemas.Domain do
   def changeset(domain, attrs) do
     domain
     |> cast(attrs, [:name, :kind, :enabled])
-    |> Data.fold_fields([:name])
+    |> Data.fold_fields([:name], domain: true)
     |> validate_required([:name, :kind])
     |> validate_length(:name, max: 253)
     |> Data.validate_pattern(:name, [:domain], "is not a valid domain")

@@ -27,6 +27,16 @@ defmodule Sovite.DSN do
   Text from remote servers (diagnostics) is untrusted: control and
   non-ASCII characters are replaced with `?`, and long values are cut,
   so it cannot inject header fields or MIME boundaries.
+
+  ## Internationalized notifications
+
+  A notification about internationalized mail is an RFC 6533 one (see
+  `global?/1`): the report is `message/global-delivery-status`, the
+  headers are `message/global-headers`, the explanation is UTF-8, and
+  internationalized addresses are given with the `utf-8` address type
+  (`Final-Recipient: utf-8; jürgen@example.com`). Untrusted text keeps
+  its UTF-8 characters then, but never control characters. Such a
+  notification must be sent with `SMTPUTF8`.
   """
 
   alias Sovite.Message.{Date, MessageID}
@@ -63,6 +73,8 @@ defmodule Sovite.DSN do
     * `:recipients` - at least one. Required.
     * `:headers` - the original message's header section.
     * `:queue_id` - the original message's queue ID.
+    * `:smtputf8` - the original message was sent with `SMTPUTF8`, so
+      its header fields may be UTF-8 (RFC 6532).
     * `:arrival_date` - when the original message was received.
     * `:will_retry_until` - for `:delay`, when delivery will be given up.
     * `:date`, `:message_id`, `:boundary` - default to now, a new ID, and
@@ -76,6 +88,7 @@ defmodule Sovite.DSN do
           required(:recipients) => [recipient(), ...],
           optional(:headers) => binary() | nil,
           optional(:queue_id) => String.t() | nil,
+          optional(:smtputf8) => boolean(),
           optional(:arrival_date) => DateTime.t() | nil,
           optional(:will_retry_until) => DateTime.t() | nil,
           optional(:date) => DateTime.t(),
@@ -86,33 +99,54 @@ defmodule Sovite.DSN do
   @max_value 900
 
   @doc """
+  Whether the notification for `report` is an internationalized one
+  (RFC 6533): an address in it is internationalized, or the original
+  message was sent with `SMTPUTF8` and has UTF-8 header fields.
+  """
+  @spec global?(report()) :: boolean()
+  def global?(report) do
+    addresses = [report.to | Enum.map(report.recipients, & &1.recipient)]
+
+    Enum.any?(addresses, &(not ascii?(&1))) or
+      (Map.get(report, :smtputf8, false) and not ascii?(Map.get(report, :headers) || ""))
+  end
+
+  @doc """
   Builds the notification message. Returns the message and its body type:
-  `:"8bitmime"` if the original headers contain 8-bit bytes, otherwise
-  `:"7bit"`.
+  `:"8bitmime"` if it contains 8-bit bytes (the original headers, or an
+  internationalized notification), otherwise `:"7bit"`.
   """
   @spec build(report()) :: {binary(), :"7bit" | :"8bitmime"}
   def build(%{kind: kind, recipients: [_ | _]} = report) when kind in [:failure, :delay] do
     boundary = Map.get_lazy(report, :boundary, &boundary/0)
     headers = report |> Map.get(:headers) |> Kernel.||("") |> ensure_crlf()
-    eight_bit = not ascii?(headers)
+    global = global?(report)
+    report = Map.put(report, :global, global)
+
+    {text_type, status_type, headers_type} =
+      if global,
+        do:
+          {"text/plain; charset=utf-8", "message/global-delivery-status",
+           "message/global-headers"},
+        else: {"text/plain; charset=us-ascii", "message/delivery-status", "text/rfc822-headers"}
 
     message =
       IO.iodata_to_binary([
         header_fields(report, boundary),
         "\r\n",
         "This is a MIME-encapsulated message.\r\n\r\n",
-        part(boundary, "text/plain; charset=us-ascii", "Notification"),
+        part(boundary, text_type, "Notification", if(global, do: "8bit")),
         text(report),
-        part(boundary, "message/delivery-status", "Delivery report"),
+        part(boundary, status_type, "Delivery report", if(global, do: "8bit")),
         status_fields(report),
         part(
           boundary,
-          "text/rfc822-headers",
+          headers_type,
           if(kind == :failure,
             do: "Undelivered Message Headers",
             else: "Delayed Message Headers"
           ),
-          if(eight_bit, do: "8bit")
+          if(not ascii?(headers), do: "8bit")
         ),
         headers,
         "\r\n--",
@@ -120,7 +154,7 @@ defmodule Sovite.DSN do
         "--\r\n"
       ])
 
-    {message, if(eight_bit, do: :"8bitmime", else: :"7bit")}
+    {message, if(ascii?(message), do: :"7bit", else: :"8bitmime")}
   end
 
   defp header_fields(report, boundary) do
@@ -140,7 +174,7 @@ defmodule Sovite.DSN do
       report.from,
       ">\r\n",
       "To: <",
-      report.to,
+      clean(report.to, report.global),
       ">\r\n",
       "Subject: ",
       subject,
@@ -154,14 +188,16 @@ defmodule Sovite.DSN do
       # RFC 3834 §5: notifications are automatic replies.
       "Auto-Submitted: auto-replied\r\n",
       "MIME-Version: 1.0\r\n",
-      "Content-Type: multipart/report; report-type=delivery-status;\r\n",
+      "Content-Type: multipart/report; report-type=",
+      if(report.global, do: "global-delivery-status", else: "delivery-status"),
+      ";\r\n",
       "\tboundary=\"",
       boundary,
       "\"\r\n"
     ]
   end
 
-  defp part(boundary, type, description, encoding \\ nil) do
+  defp part(boundary, type, description, encoding) do
     [
       "\r\n--",
       boundary,
@@ -197,6 +233,8 @@ defmodule Sovite.DSN do
           ]
       end
 
+    global = report.global
+
     [
       "This is the mail system at host ",
       clean(report.reporting_mta),
@@ -204,7 +242,7 @@ defmodule Sovite.DSN do
       intro,
       "\r\n",
       Enum.map(report.recipients, fn rcpt ->
-        ["<", clean(rcpt.recipient), ">: ", clean(explanation(rcpt)), "\r\n"]
+        ["<", clean(rcpt.recipient, global), ">: ", clean(explanation(rcpt), global), "\r\n"]
       end)
     ]
   end
@@ -222,6 +260,7 @@ defmodule Sovite.DSN do
 
   defp status_fields(report) do
     action = if report.kind == :failure, do: "failed", else: "delayed"
+    global = report.global
 
     message_fields = [
       field("Reporting-MTA", "dns; " <> report.reporting_mta),
@@ -233,11 +272,11 @@ defmodule Sovite.DSN do
       Enum.map(report.recipients, fn rcpt ->
         [
           "\r\n",
-          field("Final-Recipient", "rfc822; " <> rcpt.recipient),
+          field("Final-Recipient", address_type(rcpt.recipient), global),
           field("Action", action),
           field("Status", rcpt.status),
           field("Remote-MTA", rcpt[:remote_mta] && "dns; " <> rcpt.remote_mta),
-          field("Diagnostic-Code", rcpt[:diagnostic] && "smtp; " <> rcpt.diagnostic),
+          field("Diagnostic-Code", rcpt[:diagnostic] && "smtp; " <> rcpt.diagnostic, global),
           field("Last-Attempt-Date", rcpt[:last_attempt] && Date.format(rcpt.last_attempt)),
           field(
             "Will-Retry-Until",
@@ -250,17 +289,44 @@ defmodule Sovite.DSN do
     [message_fields, recipient_fields]
   end
 
-  defp field(_name, value) when value in [nil, false], do: []
-  defp field(name, value), do: [name, ": ", clean(value), "\r\n"]
+  # RFC 6533 §3: the utf-8 address type for internationalized addresses.
+  defp address_type(address) do
+    if ascii?(address), do: "rfc822; " <> address, else: "utf-8; " <> address
+  end
 
-  # Untrusted text in a header-like field: printable ASCII only, bounded.
-  defp clean(value) do
+  defp field(name, value, global \\ false)
+  defp field(_name, value, _global) when value in [nil, false], do: []
+  defp field(name, value, global), do: [name, ": ", clean(value, global), "\r\n"]
+
+  # Untrusted text in a header-like field: printable ASCII only, or in an
+  # internationalized notification UTF-8 without control characters;
+  # bounded.
+  defp clean(value, global \\ false)
+
+  defp clean(value, false) do
     value =
       for <<c <- value>>, into: "" do
         if c in 32..126, do: <<c>>, else: "?"
       end
 
     if byte_size(value) > @max_value, do: binary_part(value, 0, @max_value) <> "...", else: value
+  end
+
+  defp clean(value, true) do
+    {kept, _bytes} =
+      value
+      |> String.replace_invalid("?")
+      |> String.to_charlist()
+      |> Enum.reduce_while({[], 0}, fn c, {acc, bytes} ->
+        c = if c in 32..126 or c > 0x9F, do: c, else: ??
+        size = byte_size(<<c::utf8>>)
+
+        if bytes + size > @max_value,
+          do: {:halt, {["..." | acc], bytes}},
+          else: {:cont, {[<<c::utf8>> | acc], bytes + size}}
+      end)
+
+    kept |> Enum.reverse() |> IO.iodata_to_binary()
   end
 
   defp ensure_crlf(""), do: ""

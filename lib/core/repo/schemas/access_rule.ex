@@ -29,7 +29,7 @@ defmodule Sovite.Core.Repo.Schemas.AccessRule do
   def changeset(rule, attrs) do
     rule
     |> cast(attrs, [:kind, :pattern, :action, :text])
-    |> Data.fold_fields([:pattern])
+    |> Data.fold_fields([:pattern], domain: true)
     |> update_change(:action, &String.upcase(String.trim(&1)))
     |> validate_required([:kind, :pattern, :action])
     |> validate_length(:pattern, max: 320)

@@ -32,13 +32,13 @@ defmodule Sovite.Core.Repo.Tables.Domains do
   @doc "Deletes a domain."
   @spec delete(Repo.t(), String.t()) :: :ok | {:error, :not_found}
   def delete(repo, name),
-    do: Data.delete(repo, from(d in Domain, where: d.name == ^Data.fold(name)))
+    do: Data.delete(repo, from(d in Domain, where: d.name == ^Data.fold_domain(name)))
 
   @doc "Enables or disables a domain. Disabled domains are ignored."
   @spec set_enabled(Repo.t(), String.t(), boolean()) ::
           {:ok, Domain.t()} | {:error, :not_found | Ecto.Changeset.t()}
   def set_enabled(repo, name, enabled),
-    do: Data.set_enabled(repo, Domain, [name: Data.fold(name)], enabled)
+    do: Data.set_enabled(repo, Domain, [name: Data.fold_domain(name)], enabled)
 
   @doc "Lists all domains, by name."
   @spec list(Repo.t()) :: [Domain.t()]

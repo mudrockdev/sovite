@@ -128,7 +128,7 @@ defmodule Sovite.Policy.Action do
   end
 
   defp argument(kind, address) when kind in [:redirect, :bcc] do
-    if Sovite.Validators.mailbox?(address), do: {:ok, {kind, address}}, else: :error
+    if Sovite.Validators.mailbox?(address, utf8: true), do: {:ok, {kind, address}}, else: :error
   end
 
   defp argument(:filter, destination) do

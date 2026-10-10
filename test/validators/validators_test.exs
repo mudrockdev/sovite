@@ -154,6 +154,49 @@ defmodule Sovite.ValidatorsTest do
     end
   end
 
+  describe "internationalized addresses (RFC 6531)" do
+    test "are accepted with utf8: true" do
+      for mailbox <- [
+            "jürgen@bücher.example",
+            "用户@例子.广告",
+            ~s("ü ü"@example.com),
+            "a@xn--bcher-kva.example",
+            "δοκιμή@παράδειγμα.δοκιμή"
+          ] do
+        assert mailbox?(mailbox, utf8: true), mailbox
+      end
+
+      refute mailbox?("jürgen@example.com")
+      refute mailbox?("a@bücher.example")
+      refute local_part?("jürgen")
+      assert local_part?("jürgen", utf8: true)
+    end
+
+    test "invalid UTF-8, controls, and invalid domains" do
+      for mailbox <- [
+            <<"a", 0xFF, "@example.com">>,
+            "a\u0085@example.com",
+            "a@☃.example",
+            "a@-ü.example",
+            "ü..ü@example.com"
+          ] do
+        refute mailbox?(mailbox, utf8: true), inspect(mailbox)
+      end
+
+      # Lengths count octets: 22 two-octet characters exceed 64.
+      assert split_mailbox(String.duplicate("ü", 33) <> "@example.com", utf8: true) ==
+               {:error, :local_part_too_long}
+    end
+
+    test "domains in A-labels" do
+      assert ascii_domain("jürgen@Bücher.example") == {:ok, "jürgen@xn--bcher-kva.example"}
+      assert ascii_domain("a@[192.0.2.1]") == {:ok, "a@[192.0.2.1]"}
+      assert ascii_domain("a@☃.example") == {:error, :invalid_domain}
+      assert international?("jürgen@example.com")
+      refute international?("a@example.com")
+    end
+  end
+
   describe "properties" do
     property "generated domains are valid" do
       check all(domain <- domain_gen()) do

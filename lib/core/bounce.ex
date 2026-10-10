@@ -16,6 +16,10 @@ defmodule Sovite.Core.Bounce do
     * Notifications about a `REQUIRETLS` message are sent with
       `REQUIRETLS` too (RFC 8689 §4.3). Like every notification, they
       only include the message's header section.
+    * Notifications about internationalized mail (internationalized
+      addresses, or UTF-8 header fields in a message sent with
+      `SMTPUTF8`) are RFC 6533 ones, sent with `SMTPUTF8`, see
+      `Sovite.DSN`.
   """
 
   alias Sovite.DSN
@@ -89,18 +93,20 @@ defmodule Sovite.Core.Bounce do
            Spool.read_headers(source.path, source.message_offset, source.message_size,
              prefix: source.prefix
            ) do
-      {message, body_type} =
-        DSN.build(%{
-          kind: kind,
-          reporting_mta: opts.hostname,
-          from: "MAILER-DAEMON@" <> opts.hostname,
-          to: to,
-          recipients: Enum.map(recipients, &dsn_recipient/1),
-          headers: headers,
-          queue_id: envelope.queue_id,
-          arrival_date: envelope.received_at,
-          will_retry_until: if(kind == :delay, do: retry_until(envelope, opts))
-        })
+      report = %{
+        kind: kind,
+        reporting_mta: opts.hostname,
+        from: "MAILER-DAEMON@" <> opts.hostname,
+        to: to,
+        recipients: Enum.map(recipients, &dsn_recipient/1),
+        headers: headers,
+        queue_id: envelope.queue_id,
+        smtputf8: envelope.smtputf8,
+        arrival_date: envelope.received_at,
+        will_retry_until: if(kind == :delay, do: retry_until(envelope, opts))
+      }
+
+      {message, body_type} = DSN.build(report)
 
       notification_envelope = %Envelope{
         queue_id: ID.generate(),
@@ -110,7 +116,8 @@ defmodule Sovite.Core.Bounce do
         protocol: "local",
         body_type: body_type,
         notification: notification,
-        requiretls: envelope.requiretls
+        requiretls: envelope.requiretls,
+        smtputf8: DSN.global?(report)
       }
 
       with {:ok, writer} <- Spool.open(opts.directory, notification_envelope),

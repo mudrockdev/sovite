@@ -3,8 +3,12 @@ defmodule Sovite.SMTP.Command do
   Parses SMTP command lines (RFC 5321 §4.1).
 
   The line is given without its CRLF. Verbs and parameter keywords are
-  case-insensitive. Only printable ASCII is accepted. Verbs map to atoms
-  from a fixed table; parameter keywords stay strings, upper-cased.
+  case-insensitive. Only printable ASCII is accepted, apart from UTF-8
+  characters in the arguments of `MAIL`, `RCPT`, and `VRFY`, for
+  internationalized addresses (SMTPUTF8, RFC 6531): whether they are
+  allowed depends on the transaction, so the session checks that. Verbs
+  map to atoms from a fixed table; parameter keywords stay strings,
+  upper-cased.
 
       iex> Sovite.SMTP.Command.parse("MAIL FROM:<a@example.com> SIZE=1024")
       {:ok, {:mail, "a@example.com", [{"SIZE", "1024"}]}}
@@ -16,7 +20,7 @@ defmodule Sovite.SMTP.Command do
   Paths must be in angle brackets. Whitespace after `FROM:` and `TO:` is
   tolerated, since common clients send it. Source routes are accepted and
   ignored (RFC 5321 §4.1.1.3 and Appendix C). The mailbox is checked with
-  `Sovite.Validators.split_mailbox/1`.
+  `Sovite.Validators.split_mailbox/2`, accepting UTF-8.
   """
 
   alias Sovite.SMTP.XText
@@ -54,7 +58,9 @@ defmodule Sovite.SMTP.Command do
     * `:not_implemented` - a known SMTP verb this server does not support
     * `:non_smtp` - an HTTP request or header line, as in cross-protocol
       attacks
-    * `:invalid_characters` - control or non-ASCII characters
+    * `:invalid_characters` - control characters, invalid UTF-8, or
+      non-ASCII characters outside the arguments of `MAIL`, `RCPT`, and
+      `VRFY`
     * `:syntax` - wrong arguments for the verb
     * `:invalid_sender` / `:invalid_recipient` - bad path or mailbox
     * `:invalid_parameter` - malformed `KEYWORD=value` parameter
@@ -96,11 +102,20 @@ defmodule Sovite.SMTP.Command do
     {verb, argument} = split_verb(line)
 
     cond do
-      not printable?(line) -> {:error, Map.get(@verbs, verb), :invalid_characters}
-      Map.has_key?(@verbs, verb) -> parse_verb(Map.fetch!(@verbs, verb), argument)
-      verb in @not_implemented -> {:error, nil, :not_implemented}
-      verb in @http or header_line?(verb) -> {:error, nil, :non_smtp}
-      true -> {:error, nil, :unrecognized}
+      not characters?(Map.get(@verbs, verb), line) ->
+        {:error, Map.get(@verbs, verb), :invalid_characters}
+
+      Map.has_key?(@verbs, verb) ->
+        parse_verb(Map.fetch!(@verbs, verb), argument)
+
+      verb in @not_implemented ->
+        {:error, nil, :not_implemented}
+
+      verb in @http or header_line?(verb) ->
+        {:error, nil, :non_smtp}
+
+      true ->
+        {:error, nil, :unrecognized}
     end
   end
 
@@ -114,7 +129,13 @@ defmodule Sovite.SMTP.Command do
     end
   end
 
-  defp printable?(line), do: for(<<c <- line>>, reduce: true, do: (acc -> acc and c in 32..126))
+  defp characters?(verb, line) when verb in [:mail, :rcpt, :vrfy] do
+    String.valid?(line) and
+      for(<<c::utf8 <- line>>, reduce: true, do: (acc -> acc and (c in 32..126 or c > 0x9F)))
+  end
+
+  defp characters?(_verb, line),
+    do: for(<<c <- line>>, reduce: true, do: (acc -> acc and c in 32..126))
 
   defp parse_verb(verb, argument) when verb in [:ehlo, :helo, :lhlo] do
     case String.trim(argument) do
@@ -244,7 +265,7 @@ defmodule Sovite.SMTP.Command do
   defp route_hop?(_), do: false
 
   defp checked(mailbox) do
-    case Validators.split_mailbox(mailbox) do
+    case Validators.split_mailbox(mailbox, utf8: true) do
       {:ok, _} -> {:ok, mailbox}
       {:error, _} -> {:error, :mailbox}
     end
