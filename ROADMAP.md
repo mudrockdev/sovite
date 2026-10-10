@@ -195,7 +195,7 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 - [x] PROXY protocol v1/v2 (behind HAProxy / load balancers)
 - [x] XCLIENT / XFORWARD (optional, for proxies and content filters)
 - [x] Content filter re-injection (after-queue filtering via SMTP/LMTP)
-- [ ] Postfix config migration tool: read `main.cf` / `master.cf` and produce a Sovite config plus a report of unsupported settings
+- [x] Postfix config migration tool: read `main.cf` / `master.cf` and produce a Sovite config plus a report of unsupported settings
 
 **Done when:** a stock Postfix + Rspamd + Dovecot setup can be migrated to Sovite + Rspamd + Dovecot with the migration tool.
 

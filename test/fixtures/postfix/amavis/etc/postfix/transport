@@ -1,0 +1,4 @@
+example.org            smtp:[mail.example.org]:2525
+lists.example.net      procmail:
+.internal.example.net  relay:[10.0.0.5]
+uucp.example.net       uucp:host

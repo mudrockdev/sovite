@@ -1,0 +1,4 @@
+[smtp.provider.example]:587  secure match=nexthop
+example.org                  verify
+.example.com                 encrypt
+broken.example               fingerprint match=AB:CD

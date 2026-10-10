@@ -1,0 +1,6 @@
+# See man 5 aliases for format
+postmaster:    root
+abuse:         postmaster
+root:          alice@example.com
+webmaster:     alice@example.com, bob@example.org
+backup:        "|/usr/local/bin/backup-mail"

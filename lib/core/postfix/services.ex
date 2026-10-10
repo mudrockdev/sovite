@@ -613,6 +613,9 @@ defmodule Sovite.Core.Postfix.Services do
       "" ->
         {:ok, "lmtp", state}
 
+      "inet:" <> address ->
+        {:ok, "lmtp:" <> bracket_ip(address), state}
+
       nexthop ->
         {:ok, "lmtp:" <> nexthop, state}
     end
@@ -635,6 +638,20 @@ defmodule Sovite.Core.Postfix.Services do
   defp convert(state, {kind, _service}, _name, nexthop, _setting) do
     name = Atom.to_string(kind)
     {:ok, if(nexthop == "", do: name, else: name <> ":" <> nexthop), state}
+  end
+
+  # Postfix's lmtp:inet:192.0.2.1:24; Sovite writes IP addresses in brackets.
+  defp bracket_ip(address) do
+    case MasterCf.inet_address(address) do
+      {:ok, host, port} when is_binary(host) ->
+        case Sovite.Net.parse_ip(host) do
+          {:ok, _ip} -> "[#{host}]:#{port}"
+          {:error, _} -> "inet:" <> address
+        end
+
+      _ ->
+        "inet:" <> address
+    end
   end
 
   defp queue_socket_note(state, setting, path) do

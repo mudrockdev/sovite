@@ -16,6 +16,7 @@ defmodule Sovite.Core.CLI do
       sovitectl hash-password                     # for auth.backend = "file"
       sovitectl dkim generate example.com s2026 /etc/sovite/dkim/example.com.pem
       sovitectl dns records example.com
+      sovitectl migrate postfix /etc/postfix --output /root/sovite
 
   Commands that use the database read the config file given with
   `--config PATH`, or the default one.
@@ -30,6 +31,7 @@ defmodule Sovite.Core.CLI do
   @version Mix.Project.config()[:version]
   @data_commands CLI.Data.commands()
   @dns_commands CLI.DNS.commands()
+  @migrate_commands CLI.Migrate.commands()
 
   @usage """
   Usage: sovitectl [--config PATH] COMMAND
@@ -46,6 +48,7 @@ defmodule Sovite.Core.CLI do
     user sender remove NAME PATTERN  Take that permission away
   #{String.trim_trailing(CLI.Data.usage())}
   #{String.trim_trailing(CLI.DNS.usage())}
+  #{String.trim_trailing(CLI.Migrate.usage())}
     hash-password [SCHEME]           Hash a password from standard input for an auth.file users file.
                                      SCHEME: scram-sha-256 (default), sha512-crypt, sha256-crypt
     version                          Print the Sovite version
@@ -113,6 +116,13 @@ defmodule Sovite.Core.CLI do
 
   defp run([command | _] = argv, path) when command in @dns_commands do
     case CLI.DNS.run(argv, path) do
+      :usage -> usage_error()
+      status -> status
+    end
+  end
+
+  defp run([command | _] = argv, path) when command in @migrate_commands do
+    case CLI.Migrate.run(argv, path) do
       :usage -> usage_error()
       status -> status
     end

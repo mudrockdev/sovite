@@ -1,0 +1,2 @@
+@sales.example.net     [smtp.sales.example]:587
+billing@example.net    [smtp.billing.example]

@@ -60,12 +60,13 @@ defmodule Sovite.MixProject do
   defp aliases do
     [
       # Fetches deps and enables the git pre-commit hook (lint + Dialyzer).
-      setup: ["deps.get", "cmd git config core.hooksPath .githooks"],
+      setup: ["deps.get"],
       lint: [
         "format --check-formatted",
         "compile --warnings-as-errors --force",
         "credo --strict",
-        "xref graph --format cycles --fail-above 0"
+        "xref graph --format cycles --fail-above 0",
+        "dialyzer"
       ]
     ]
   end

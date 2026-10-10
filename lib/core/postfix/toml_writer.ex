@@ -17,9 +17,10 @@ defmodule Sovite.Core.Postfix.TomlWriter do
   @typedoc "A key and its value, optionally with a comment written above it."
   @type entry :: {String.t(), value()} | {String.t(), value(), String.t() | nil}
 
-  @typedoc "A part of the document."
+  @typedoc "A part of the document. Top-level `:entries` must come before the tables."
   @type part ::
           {:comment, String.t()}
+          | {:entries, [entry()]}
           | {:table, String.t(), [entry()]}
           | {:table, String.t(), [entry()], String.t() | nil}
           | {:array_table, String.t(), [entry()]}
@@ -39,6 +40,7 @@ defmodule Sovite.Core.Postfix.TomlWriter do
   end
 
   defp part({:comment, text}), do: comment_lines(text, "")
+  defp part({:entries, entries}), do: ["" | Enum.flat_map(entries, &entry/1)]
   defp part({:table, name, entries}), do: part({:table, name, entries, nil})
   defp part({:table, _name, [], _comment}), do: []
   defp part({:table, name, entries, comment}), do: section("[#{name}]", entries, comment)

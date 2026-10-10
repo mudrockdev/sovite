@@ -1,0 +1,4 @@
+192.0.2.66        REJECT Spammer
+198.51.100        OK
+spammer.example   REJECT
+203.0.113.5       PREPEND X-Bad: yes

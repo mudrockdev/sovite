@@ -1,0 +1,3 @@
+[smtp.provider.example]:587   relayuser:s3cret'pass
+@sales.example.net            salesuser:other pass
+[backup.provider.example]:587 unused:nope

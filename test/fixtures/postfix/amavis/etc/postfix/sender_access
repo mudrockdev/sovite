@@ -1,0 +1,3 @@
+spam@example.com  REJECT
+<>                DUNNO
+example.com       550 No mail from you

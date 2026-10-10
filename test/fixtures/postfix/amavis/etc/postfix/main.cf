@@ -1,0 +1,63 @@
+# A relay host with a login, amavis as an after-queue content filter,
+# postscreen with DNS lists, and lookup tables of most kinds.
+compatibility_level = 3.6
+myhostname = mx.example.net
+mydomain = example.net
+myorigin = $mydomain
+mydestination = $myhostname, localhost, hash:/etc/postfix/local_domains
+relay_domains = backup.example.com
+mynetworks = 127.0.0.0/8, [::1]/128, 192.0.2.0/24, 10.1.2.3/16
+inet_interfaces = 192.0.2.10, 127.0.0.1
+inet_protocols = ipv4
+
+relayhost = [smtp.provider.example]:587
+smtp_sasl_auth_enable = yes
+smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+smtp_sasl_security_options = noanonymous
+smtp_sender_dependent_authentication = yes
+sender_dependent_relayhost_maps = hash:/etc/postfix/sender_relay
+smtp_tls_security_level = encrypt
+smtp_tls_policy_maps = hash:/etc/postfix/tls_policy
+
+smtpd_tls_chain_files = /etc/postfix/tls/ec.pem, /etc/postfix/tls/rsa-key.pem, /etc/postfix/tls/rsa-cert.pem
+smtpd_tls_security_level = may
+
+content_filter = smtp-amavis:[127.0.0.1]:10024
+
+canonical_maps = hash:/etc/postfix/canonical
+sender_canonical_maps = hash:/etc/postfix/sender_canonical
+sender_bcc_maps = hash:/etc/postfix/sender_bcc
+relocated_maps = hash:/etc/postfix/relocated
+transport_maps = hash:/etc/postfix/transport
+alias_maps = hash:/etc/aliases
+
+postscreen_dnsbl_sites = zen.spamhaus.org=127.0.0.[2..11]*3, bl.spamcop.net*2, list.dnswl.org=127.0.[0..255].[1..3]*-2
+postscreen_dnsbl_threshold = 3
+postscreen_dnsbl_action = enforce
+postscreen_greet_action = enforce
+postscreen_cache_map = btree:$data_directory/postscreen_cache
+
+smtpd_client_restrictions = check_client_access hash:/etc/postfix/client_access
+smtpd_helo_restrictions = permit_mynetworks, reject_invalid_helo_hostname, reject_non_fqdn_helo_hostname
+smtpd_sender_restrictions = reject_non_fqdn_sender, check_sender_access hash:/etc/postfix/sender_access, reject_unknown_sender_domain
+smtpd_recipient_restrictions =
+    permit_mynetworks,
+    reject_unauth_destination,
+    reject_rbl_client b.barracudacentral.org,
+    reject_rhsbl_sender dbl.spamhaus.org,
+    check_policy_service inet:127.0.0.1:10023,
+    warn_if_reject reject_unverified_recipient,
+    permit
+smtpd_data_restrictions = reject_unauth_pipelining
+
+maximal_queue_lifetime = 3d
+delay_warning_time = 4h
+smtpd_recipient_limit = 500
+smtpd_client_connection_count_limit = 10
+smtpd_client_message_rate_limit = 100
+smtpd_timeout = 60s
+disable_vrfy_command = yes
+masquerade_domains = example.net, !mx.example.net
+smtp-amavis_destination_recipient_limit = 1
+header_checks = regexp:/etc/postfix/header_checks
+smtpd_proxy_filter = 127.0.0.1:10030

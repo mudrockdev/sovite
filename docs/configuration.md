@@ -626,7 +626,32 @@ The settings are read from the config file when the user running `sendmail` can 
 
 ### Migrating from Postfix
 
-MIGRATION_PLACEHOLDER
+`sovitectl migrate postfix` reads a Postfix configuration and writes what Sovite needs to replace it. It changes nothing on the system: it only reads the Postfix files, and writes three files to the output directory.
+
+```sh
+sovitectl migrate postfix /etc/postfix --output /root/sovite
+```
+
+| File | Contents |
+|---|---|
+| `sovite.toml` | The configuration. It passes `sovitectl config check`; values that need a look have a `# check:` comment. Mode `0600`, since it can hold the relay host's password. |
+| `import.sh` | `sovitectl` commands that load the lookup tables into the database: aliases (`alias_maps`, `virtual_alias_maps`), mailboxes (`virtual_mailbox_maps`), transports, access rules (`check_*_access`), address rewrites (`canonical_maps`), BCC rules, moved users (`relocated_maps`), sender-dependent relays with their logins, and domains kept in tables. Run it once with `sh import.sh`, after installing `sovite.toml`. Mode `0600`: relay passwords go to `sovitectl` on standard input. |
+| `report.txt` | What was migrated, what was ignored because Sovite does it anyway or it does not apply, and what **needs attention**: settings Sovite has no equivalent for, with their values and what to do instead, and steps to take by hand. It is printed too. |
+
+The directory defaults to `/etc/postfix`, and the output to the current directory. Existing files are not overwritten without `--force`. `--root DIR` reads the files the configuration names, such as `/etc/aliases`, under `DIR`: use it on a copy of another server's `/etc`.
+
+What it converts:
+
+- **main.cf**: the host name and origin; the domain classes (`mydestination`, `virtual_mailbox_domains`, `virtual_alias_domains`, `relay_domains`) and `mynetworks`; certificates and TLS versions; Dovecot SASL; outbound TLS levels and policies; the relay host with its login; transports (`virtual_transport`, `mailbox_transport`, and services of master.cf they name, including `pipe(8)` commands, which become `[pipe.NAME]` sections); milters with their timeouts and default actions; `smtpd_*_restrictions` (merged into Sovite's stages, with `reject_rbl_client` and the like becoming `[screen]` lists); policy servers, including programs master.cf runs with `spawn(8)`; postscreen's DNS lists, threshold, and greeting delay; the content filter; `XFORWARD`, `XCLIENT`, and PROXY protocol settings; queue lifetimes, size and rate limits, and other limits and timers.
+- **master.cf**: one `[[listener]]` per `inet` smtpd or postscreen service and address of `inet_interfaces`, with its mode (`submission`, `submissions` for `smtps` or `smtpd_tls_wrappermode`), and the `-o` overrides that have listener keys: `smtpd_sasl_auth_enable`, `smtpd_tls_security_level=encrypt`, `permit_sasl_authenticated, reject` lists (`require_auth`), `smtpd_milters`, `content_filter` (an empty one makes the `reinjection` listener of an after-queue filter), and the PROXY protocol.
+
+Lookup tables are read from their text source files (`hash:/etc/postfix/virtual` reads `/etc/postfix/virtual`, so run `postmap` sources only), as are `inline:` and `static:` tables. SQL, LDAP, regexp, PCRE, CIDR, and other tables are reported, for their entries to be added by hand.
+
+A typical Postfix with Dovecot and Rspamd migrates to a config that works as it is, apart from steps in the report such as these:
+
+- Postfix's sockets for Dovecot (`private/auth`, `private/dovecot-lmtp`) are in its queue directory, which goes away with Postfix: give Sovite its own listeners in Dovecot's `10-master.conf`, such as `/run/dovecot/auth-client` and `/run/dovecot/lmtp`, and change `auth.dovecot.socket` and the LMTP transport.
+- Sovite reads the TLS key as its own user, not as root.
+- Programs master.cf ran as another user (`user=`) run as the Sovite user, unless a `[pipe.NAME]` has a `sandbox`. For policyd-spf, Sovite's own SPF check (`[spf] reject_fail = true`) can replace it.
 
 ## `[auth]`
 

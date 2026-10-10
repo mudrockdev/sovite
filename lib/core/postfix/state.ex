@@ -150,6 +150,21 @@ defmodule Sovite.Core.Postfix.State do
     )
   end
 
+  @doc """
+  The problems of a setting, as `{item, message}`, for the end of a
+  report message: `" Not migrated: item: message; ..."`, or `""`.
+  """
+  def not_migrated([]), do: ""
+
+  def not_migrated(problems),
+    do:
+      " Not migrated: " <>
+        Enum.map_join(problems, "; ", fn {item, message} -> "#{item}: #{message}" end) <> "."
+
+  @doc "The report level for a setting with these problems."
+  def level([]), do: :migrated
+  def level(_problems), do: :attention
+
   defp problem_text([]), do: ""
 
   defp problem_text(problems) do

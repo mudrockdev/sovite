@@ -323,7 +323,7 @@ defmodule Sovite.Core.Postfix.Imports do
     commands =
       for {sender, {username, password}} <- passwords,
           Convert.form?(sender, [:address, :catchall]),
-          not State.flag(state, {:relay_sender, sender}),
+          State.flag(state, {:relay_sender, sender}) != true,
           do: {sender, {:stdin, password, ["sender-relay", "set", sender, "login", username]}}
 
     state =
@@ -360,7 +360,7 @@ defmodule Sovite.Core.Postfix.Imports do
 
   defp unused_passwords(state, passwords) do
     state = State.handle(state, "smtp_sasl_password_maps")
-    unused = for {key, _} <- passwords, not State.flag(state, {:password_used, key}), do: key
+    unused = for {key, _} <- passwords, State.flag(state, {:password_used, key}) != true, do: key
 
     cond do
       not State.set?(state, "smtp_sasl_password_maps") ->

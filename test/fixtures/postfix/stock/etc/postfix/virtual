@@ -1,0 +1,4 @@
+# Virtual aliases
+info@example.com       alice@example.com
+sales@example.com      alice@example.com, bob@example.org
+@example.org           bob@example.org
