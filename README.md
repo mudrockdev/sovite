@@ -11,13 +11,13 @@ Sovite is also a library: its components (address validators, DNS and MX resolut
 Requires Erlang/OTP 29 and Elixir 1.20 (see `mise.toml`).
 
 ```sh
-mix setup           # deps.get, and enables the git pre-commit hook
+mix setup           # deps.get
 mix test            # tests, including property tests
 mix lint            # format check, warnings as errors, credo, xref cycles
 mix dialyzer
 ```
 
-The pre-commit hook (`.githooks/pre-commit`) runs `mix lint` and `mix dialyzer` and refuses the commit if either fails. The first Dialyzer run builds its PLT and takes a few minutes; later runs are incremental.
+The first Dialyzer run builds its PLT and takes a few minutes; later runs are incremental.
 
 Manage routing data (stored in Sovite's database):
 
