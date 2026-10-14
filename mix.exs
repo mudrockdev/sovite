@@ -62,7 +62,7 @@ defmodule Sovite.MixProject do
       # Fetches deps and enables the git pre-commit hook (lint + Dialyzer).
       setup: ["deps.get"],
       lint: [
-        "format --check-formatted",
+        "format",
         "compile --warnings-as-errors --force",
         "credo --strict",
         "xref graph --format cycles --fail-above 0",
