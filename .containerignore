@@ -1,0 +1,11 @@
+_build
+deps
+cover
+doc
+tmp
+dist
+priv/plts
+.claude
+*.tar
+**/node_modules
+lib/core/sovite_web/.svelte-kit

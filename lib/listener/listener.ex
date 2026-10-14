@@ -31,10 +31,23 @@ defmodule Sovite.Listener do
   `:connection` telemetry events see the peer: the proxy's address, not
   the client's, since they apply before the header is read.
 
+  ## Draining and updating
+
+  `drain/1` stops accepting connections and asks the open ones to finish:
+  each connection process gets a `{:sovite_listener, :drain}` message,
+  and should close once it is idle. `connection_count/1` tells when they
+  are gone. `update/2` changes the handler options and the PROXY
+  protocol and per-IP limits for new connections, without closing the
+  listen socket.
+
   ## Options
 
     * `:port` - TCP port, `0` for any free port. Required.
     * `:ip` - address to listen on. Defaults to `{0, 0, 0, 0}`.
+    * `:fd` - a listening socket inherited from the parent process, such
+      as one from systemd socket activation (`Sovite.Systemd.listen_fds/1`),
+      used instead of opening one on `:ip` and `:port`. `:ip` must then be
+      an IPv6 address if the socket is an IPv6 one. Defaults to `nil`.
     * `:handler` - a `Sovite.Listener.Handler` module. Required.
     * `:handler_opts` - passed to the handler. Defaults to `[]`.
     * `:id` - label in telemetry metadata and connection info. Defaults
@@ -68,6 +81,7 @@ defmodule Sovite.Listener do
 
   use Supervisor
 
+  alias Sovite.Listener.Server
   alias Sovite.Net
   alias Sovite.ProxyProtocol
   alias Sovite.ProxyProtocol.Header
@@ -101,6 +115,7 @@ defmodule Sovite.Listener do
 
   @defaults [
     ip: {0, 0, 0, 0},
+    fd: nil,
     handler_opts: [],
     id: nil,
     name: nil,
@@ -194,6 +209,30 @@ defmodule Sovite.Listener do
 
   # LOCAL (health checks), UNKNOWN, and other transports.
   defp proxied_addresses(_header), do: %{}
+
+  @doc """
+  Stops accepting connections, and sends `{:sovite_listener, :drain}` to
+  every open connection's process. The listener keeps running until it
+  is stopped, so its connections are not cut off.
+  """
+  @spec drain(Supervisor.supervisor()) :: :ok
+  def drain(listener), do: listener |> child(:server) |> GenServer.call(:drain)
+
+  @doc """
+  Changes options for the connections accepted from now on:
+  `:handler_opts`, `:max_connections_per_ip`, `:proxy_protocol`,
+  `:proxy_networks`, and `:proxy_timeout`. Open connections keep the
+  options they started with.
+  """
+  @spec update(Supervisor.supervisor(), keyword()) :: :ok
+  def update(listener, opts) do
+    live = Server.live_keys()
+
+    case Keyword.keys(opts) -- live do
+      [] -> listener |> child(:server) |> GenServer.call({:update, opts})
+      keys -> raise ArgumentError, "cannot update #{inspect(keys)}, only #{inspect(live)}"
+    end
+  end
 
   @doc "Returns the address and port the listener is bound to."
   @spec sockname(Supervisor.supervisor()) ::

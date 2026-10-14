@@ -16,7 +16,9 @@ defmodule Sovite.SMTP.Server.Connection do
   meanwhile.
 
   On server shutdown, open sessions get `421 4.3.2` before the socket is
-  closed.
+  closed. When the listener is drained (`Sovite.Listener.drain/1`), idle
+  sessions get it at once, and the others when their transaction ends
+  (`Sovite.SMTP.Server.Session.idle?/1`).
 
   ## Telemetry
 
@@ -65,7 +67,8 @@ defmodule Sovite.SMTP.Server.Connection do
       ssl_opts: nil,
       session: nil,
       started_at: nil,
-      tarpit: false
+      tarpit: false,
+      draining: false
     }
 
     {:ok, state, {:continue, :handshake}}
@@ -140,6 +143,8 @@ defmodule Sovite.SMTP.Server.Connection do
   def handle_info({:tarpit, result, output}, state),
     do: send_output(result, output, %{state | tarpit: false})
 
+  def handle_info({:sovite_listener, :drain}, state), do: drain(%{state | draining: true})
+
   def handle_info(:timeout, state) do
     {result, output, session} = Session.handle_timeout(state.session)
     respond(result, output, %{state | session: session})
@@ -196,9 +201,19 @@ defmodule Sovite.SMTP.Server.Connection do
         {:stop, :normal, state}
 
       true ->
-        {:noreply, state, timeout(state)}
+        drain(state)
     end
   end
+
+  # Shutting down: close the session once it is idle. terminate/2 sends
+  # the 421.
+  defp drain(%{draining: true, tarpit: false, session: session} = state) when session != nil do
+    if Session.idle?(session),
+      do: {:stop, {:shutdown, :drain}, state},
+      else: {:noreply, state, timeout(state)}
+  end
+
+  defp drain(state), do: {:noreply, state, timeout(state)}
 
   defp starttls(state) do
     case upgrade(state, state.ssl_opts) do

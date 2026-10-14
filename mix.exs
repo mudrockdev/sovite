@@ -75,7 +75,9 @@ defmodule Sovite.MixProject do
     [
       sovite: [
         include_executables_for: [:unix],
-        applications: [sovite: :permanent]
+        applications: [sovite: :permanent],
+        # Also _build/prod/sovite-VERSION.tar.gz, for scripts/package.sh.
+        steps: [:assemble, :tar]
       ]
     ]
   end
@@ -97,6 +99,7 @@ defmodule Sovite.MixProject do
         "STRUCTURE.md",
         "docs/configuration.md",
         "docs/logging.md",
+        "docs/operations.md",
         "docs/security.md",
         "SECURITY.md"
       ],
@@ -126,6 +129,10 @@ defmodule Sovite.MixProject do
         ],
         "Local delivery": [~r/^Sovite\.Maildir/, ~r/^Sovite\.Pipe/],
         DSN: [~r/^Sovite\.DSN/],
+        HTTP: [~r/^Sovite\.HTTP/],
+        Metrics: [~r/^Sovite\.Metrics/],
+        Tracing: [~r/^Sovite\.Tracing/],
+        Systemd: [~r/^Sovite\.Systemd/],
         Core: [~r/^Sovite\.Core/, Sovite]
       ]
     ]

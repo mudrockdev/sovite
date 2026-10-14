@@ -1300,6 +1300,7 @@ defmodule Sovite.Core.SMTPHandler do
   defp finish(action, state) do
     case Spool.commit(state.writer, state.prefix) do
       {:ok, _path, _size} ->
+        accepted_event(state)
         state = %{state | writer: nil, action: nil, prefix: []}
         Logger.metadata(queue_id: nil)
         Outbound.sent(state.screen.outbound, state.identity, length(state.expansions))
@@ -1329,6 +1330,25 @@ defmodule Sovite.Core.SMTPHandler do
 
   defp notify(state) do
     if state.queue_manager, do: QueueManager.notify(state.queue_manager, state.queue_id)
+  end
+
+  # Links the queue ID to the client and the Message-ID, for tracing.
+  defp accepted_event(state) do
+    {envelope, _size} = Spool.info(state.writer)
+
+    :telemetry.execute(
+      [:sovite, :smtp, :message, :accepted],
+      %{recipients: length(envelope.recipients)},
+      %{
+        session_id: state.connection.session_id,
+        queue_id: state.queue_id,
+        message_id: state.header_fields && Headers.get(state.header_fields, "message-id"),
+        sender: envelope.sender,
+        remote_ip: state.connection.remote_ip,
+        helo: state.helo,
+        user: state.identity
+      }
+    )
   end
 
   defp message_event(event, state, queue_id, reason) do

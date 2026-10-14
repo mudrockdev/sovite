@@ -8,6 +8,9 @@
 # Fully qualified name used in the SMTP greeting, EHLO, and Received: headers.
 # Defaults to the system hostname, which is often not fully qualified.
 # hostname = "mail.example.com"
+# When stopping, wait this long for SMTP sessions to finish their
+# transaction and for running deliveries to end.
+shutdown_timeout = "30s"
 
 [database]
 # Where users and other data are kept: "sqlite" (default), "postgres", or "mysql".
@@ -365,3 +368,41 @@ rotation = "daily"
 max_files = 14
 # Symlink in the directory that always points to the current file.
 # symlink = "current.log"
+
+# Also send logs to a syslog daemon, instead of standard output: a local
+# socket, or "host:port" over UDP.
+syslog = false
+syslog_address = "/dev/log"
+syslog_facility = "mail"
+# "rfc3164" (classic BSD format) or "rfc5424"
+syslog_format = "rfc3164"
+
+[admin]
+# The admin HTTP API, for sovitectl (queue changes, reloads, status) and
+# the Prometheus metrics. Every request needs the token in token_file,
+# created if missing; sovitectl reads it, so run it as root or as the
+# user Sovite runs as.
+enabled = true
+address = "127.0.0.1"
+port = 9025
+token_file = "/var/lib/sovite/admin.token"
+allowed_networks = ["127.0.0.0/8", "::1"]
+# HTTPS with the [tls] certificates.
+tls = false
+# Serve /metrics without the token.
+public_metrics = false
+# Serve a status UI built as static files from this directory.
+# web_root = "/opt/sovite/web"
+
+[metrics]
+# Prometheus metrics at /metrics on the admin API.
+enabled = true
+
+[tracing]
+# OpenTelemetry traces of SMTP sessions and deliveries, over OTLP/HTTP.
+enabled = false
+endpoint = "http://127.0.0.1:4318/v1/traces"
+# headers = { authorization = "Bearer ..." }
+# Share of traces sent, from 0 to 1.
+sample_ratio = 1.0
+service_name = "sovite"

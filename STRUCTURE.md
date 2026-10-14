@@ -45,6 +45,8 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | `proxy_protocol/` | `Sovite.ProxyProtocol` | HAProxy PROXY protocol v1/v2: header parser (TLVs, CRC32C check), encoder, and a socket reader that never reads past the header |
 | `maildir/` | `Sovite.Maildir` | Crash-safe Maildir delivery (`tmp/` then `new/`) |
 | `pipe/` | `Sovite.Pipe` | Run an external command with a file on standard input: no shell, clean environment, timeout, output limit |
+| `metrics/` | `Sovite.Metrics` | Counters, sums, gauges, and histograms computed from `:telemetry` events, with bounded label sets, and the Prometheus text format |
+| `systemd/` | `Sovite.Systemd` | The systemd protocol without libsystemd: `sd_notify` (ready, reloading, stopping, status), the watchdog, socket activation |
 
 ### Layer 2: Protocols & Mail Authentication
 
@@ -63,13 +65,15 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | `policy/` | `Sovite.Policy` | Postfix policy delegation protocol: a client (TCP, Unix socket, or a program on standard input and output, as for policyd-spf), access(5) action parsing, and a server, so policy servers can be written in Elixir |
 | `abuse/` | `Sovite.Abuse` | Failed-login penalties, DNSBL/DNSWL/RHSBL scoring, reverse DNS (FCrDNS) checks, greylisting decisions, rate limiting, an expiring cache |
 | `queue/` | `Sovite.Queue` | Durable mail spool with storage behaviour, crash recovery, retry scheduler |
-| `listener/` | `Sovite.Listener` | TCP/TLS listener with connection limits and PROXY protocol support |
+| `listener/` | `Sovite.Listener` | TCP/TLS listener with connection limits, PROXY protocol support, draining, live option updates, and inherited sockets |
+| `http/` | `Sovite.HTTP` | A small HTTP/1.1 server on `Sovite.Listener`, for admin APIs and metrics endpoints |
+| `tracing/` | `Sovite.Tracing` | OpenTelemetry traces from `:telemetry` events, sampled, batched, and exported with OTLP/HTTP (JSON) |
 
 ### Layer 3: Sovite Only
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), email authentication of received and sent mail (SPF, DKIM, ARC, DMARC, SRS) and DMARC reports, transport security policies (DANE, MTA-STS cache, REQUIRETLS) and TLS-RPT reports, anti-abuse (postscreen-like client screen, greylisting, rate limits, suspension of compromised accounts), milters, policy servers, after-queue content filters, bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration |
+| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), email authentication of received and sent mail (SPF, DKIM, ARC, DMARC, SRS) and DMARC reports, transport security policies (DANE, MTA-STS cache, REQUIRETLS) and TLS-RPT reports, anti-abuse (postscreen-like client screen, greylisting, rate limits, suspension of compromised accounts), milters, policy servers, after-queue content filters, bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration, operations (admin API, metrics and trace definitions, config reload, graceful drain, systemd, queue inspection, message traces and reports from the logs) |
 
 New components are added as new folders, placed in the lowest layer their dependencies allow.
 
@@ -97,6 +101,13 @@ lib/core/
   milters.ex         # Sovite.Core.Milters: the milters of an SMTP session
   policy_service.ex  # Sovite.Core.PolicyService: check_policy_service in the restriction chains
   sendmail.ex        # Sovite.Core.Sendmail: sendmail(1), mailq(1), newaliases(1)
+  control.ex         # Sovite.Core.Control: config reload, graceful drain, systemd notifications, status
+  admin.ex           # Sovite.Core.Admin: the admin HTTP API
+  metrics.ex         # Sovite.Core.Metrics: the Prometheus metrics
+  tracing.ex         # Sovite.Core.Tracing: the OpenTelemetry spans
+  queue_info.ex      # Sovite.Core.QueueInfo: reading the queue for sovitectl and the API
+  route_info.ex      # Sovite.Core.RouteInfo: how an address is routed, for sovitectl route
+  log_reader.ex      # Sovite.Core.LogReader: reading Sovite's logs back, for trace.ex and log_report.ex
   postfix/           # reading Postfix's main.cf, master.cf, and tables, for sovitectl migrate postfix
   ...                # routing, rewriting, restrictions, queue manager
 ```

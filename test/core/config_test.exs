@@ -19,9 +19,27 @@ defmodule Sovite.Core.ConfigTest do
              max_size: 100 * 1024 * 1024,
              rotation: :daily,
              max_files: 14,
-             symlink: nil
+             symlink: nil,
+             syslog: false,
+             syslog_address: {:unix, "/dev/log"},
+             syslog_facility: :mail,
+             syslog_format: :rfc3164
            }
 
+    assert config.admin == %{
+             enabled: true,
+             address: {127, 0, 0, 1},
+             port: 9025,
+             token_file: "/var/lib/sovite/admin.token",
+             allowed_networks: [{{127, 0, 0, 0}, 8}, {{0, 0, 0, 0, 0, 0, 0, 1}, 128}],
+             tls: false,
+             public_metrics: false,
+             web_root: nil
+           }
+
+    assert config.metrics == %{enabled: true}
+    assert %{enabled: false, sample_ratio: 1.0, headers: %{}} = config.tracing
+    assert config.server.shutdown_timeout == 30_000
     assert is_binary(config.server.hostname)
   end
 
@@ -43,12 +61,20 @@ defmodule Sovite.Core.ConfigTest do
     rotation = "hourly"
     max_files = 0
     symlink = "current.log"
+    syslog = true
+    syslog_address = "[2001:db8::1]:1514"
+    syslog_facility = "local3"
+    syslog_format = "rfc5424"
     """
 
     assert {:ok, config} = Config.parse(toml)
 
     assert Map.take(config, [:server, :queue, :log]) == %{
-             server: %{hostname: "mail.example.com", authserv_id: "mail.example.com"},
+             server: %{
+               hostname: "mail.example.com",
+               authserv_id: "mail.example.com",
+               shutdown_timeout: 30_000
+             },
              queue: %{
                directory: "/srv/sovite/queue",
                max_lifetime: 5 * 86_400_000,
@@ -65,9 +91,54 @@ defmodule Sovite.Core.ConfigTest do
                max_size: 512 * 1024 * 1024,
                rotation: :hourly,
                max_files: 0,
-               symlink: "current.log"
+               symlink: "current.log",
+               syslog: true,
+               syslog_address: {:udp, {8193, 3512, 0, 0, 0, 0, 0, 1}, 1514},
+               syslog_facility: :local3,
+               syslog_format: :rfc5424
              }
            }
+  end
+
+  test "syslog addresses, admin, metrics, and tracing" do
+    for {value, expected} <- [
+          {"/run/systemd/journal/dev-log", {:unix, "/run/systemd/journal/dev-log"}},
+          {"logs.example.com", {:udp, "logs.example.com", 514}},
+          {"192.0.2.1:5514", {:udp, {192, 0, 2, 1}, 5514}}
+        ] do
+      assert {:ok, config} = Config.parse(~s([log]\nsyslog_address = "#{value}"))
+      assert config.log.syslog_address == expected
+    end
+
+    for bad <- ["host:0", "host:99999", "[::1", "a b:25", ""] do
+      assert {:error, [%{path: ["log", "syslog_address"]}]} =
+               Config.parse(~s([log]\nsyslog_address = "#{bad}"))
+    end
+
+    assert {:ok, config} =
+             Config.parse("""
+             [admin]
+             address = "::1"
+             port = 9999
+             allowed_networks = ["::1", "192.0.2.0/24"]
+             web_root = "/usr/share/sovite/web"
+             [tracing]
+             enabled = true
+             endpoint = "https://otel.example.com/v1/traces"
+             headers = { authorization = "Bearer x" }
+             sample_ratio = 0
+             """)
+
+    assert config.admin.address == {0, 0, 0, 0, 0, 0, 0, 1}
+    assert config.admin.web_root == "/usr/share/sovite/web"
+    assert config.tracing.sample_ratio == 0.0
+    assert config.tracing.headers == %{"authorization" => "Bearer x"}
+
+    assert {:error, [%{path: ["tracing", "sample_ratio"]}]} =
+             Config.parse("[tracing]\nsample_ratio = 2")
+
+    assert {:error, [%{path: ["tracing", "endpoint"]}]} =
+             Config.parse(~s([tracing]\nendpoint = "ftp://x"))
   end
 
   test "defaults to one SMTP listener and no relaying" do

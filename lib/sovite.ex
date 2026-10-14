@@ -14,6 +14,8 @@ defmodule Sovite do
 
   use Application
 
+  alias Sovite.Core.Control
+
   @impl true
   def start(_type, _args) do
     children =
@@ -22,5 +24,15 @@ defmodule Sovite do
         else: []
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Sovite.Supervisor)
+  end
+
+  # Before the tree stops: drain the MTA while all of it still runs (see
+  # Sovite.Core.Control).
+  @impl true
+  def prep_stop(state) do
+    if Process.whereis(Control), do: Control.drain(Control)
+    state
+  catch
+    :exit, _reason -> state
   end
 end

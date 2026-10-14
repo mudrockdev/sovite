@@ -7,6 +7,13 @@ defmodule Sovite.Core.CLI do
   work whether or not the MTA is running.
 
       sovitectl config check [PATH]
+      sovitectl config show -n
+      sovitectl queue list deferred
+      sovitectl queue requeue 8CboABCDEFGHIJ
+      sovitectl route alice@example.com
+      sovitectl status
+      sovitectl trace '<message-id@example.com>'
+      sovitectl report --date yesterday
       sovitectl user list
       sovitectl user add alice@example.com        # reads the password from stdin
       sovitectl user sender add alice@example.com @example.org
@@ -19,7 +26,11 @@ defmodule Sovite.Core.CLI do
       sovitectl migrate postfix /etc/postfix --output /root/sovite
 
   Commands that use the database read the config file given with
-  `--config PATH`, or the default one.
+  `--config PATH`, or the default one. Commands that act on the running
+  server (`queue flush`, `hold`, `release`, `delete`, `requeue`, `config
+  reload`, `config diff`, and `status`) use the admin API
+  (`Sovite.Core.Admin`) at the address and with the token the config file
+  names, so they must run as a user that can read the token file.
   """
 
   import Sovite.Core.CLI.Helpers
@@ -32,6 +43,7 @@ defmodule Sovite.Core.CLI do
   @data_commands CLI.Data.commands()
   @dns_commands CLI.DNS.commands()
   @migrate_commands CLI.Migrate.commands()
+  @ops_commands CLI.Ops.commands()
 
   @usage """
   Usage: sovitectl [--config PATH] COMMAND
@@ -48,6 +60,7 @@ defmodule Sovite.Core.CLI do
     user sender remove NAME PATTERN  Take that permission away
   #{String.trim_trailing(CLI.Data.usage())}
   #{String.trim_trailing(CLI.DNS.usage())}
+  #{String.trim_trailing(CLI.Ops.usage())}
   #{String.trim_trailing(CLI.Migrate.usage())}
     hash-password [SCHEME]           Hash a password from standard input for an auth.file users file.
                                      SCHEME: scram-sha-256 (default), sha512-crypt, sha256-crypt
@@ -116,6 +129,13 @@ defmodule Sovite.Core.CLI do
 
   defp run([command | _] = argv, path) when command in @dns_commands do
     case CLI.DNS.run(argv, path) do
+      :usage -> usage_error()
+      status -> status
+    end
+  end
+
+  defp run([command | _] = argv, path) when command in @ops_commands do
+    case CLI.Ops.run(argv, path) do
       :usage -> usage_error()
       status -> status
     end

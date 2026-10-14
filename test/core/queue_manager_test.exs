@@ -821,4 +821,176 @@ defmodule Sovite.Core.QueueManagerTest do
       assert queue_empty?(context.dir)
     end
   end
+
+  describe "administration" do
+    # A deferred message whose next attempt is an hour away.
+    defp deferred(context, recipients \\ ["bob@example.net"]) do
+      id = spool(context, "alice@sender.example", recipients, [], :deferred)
+      path = Spool.path(context.dir, :deferred, id)
+      {:ok, loaded} = Spool.load(path)
+      later = DateTime.add(DateTime.utc_now(), 3600)
+      {:ok, _} = Spool.append(path, loaded.end_offset, [{:retry, 1, later}])
+      id
+    end
+
+    defp in_queue?(context, queue, id), do: File.exists?(Spool.path(context.dir, queue, id))
+
+    # The fake MTA waits at MAIL until the test sends :go, then replies.
+    defp stalling_mta(context, reply) do
+      test = self()
+
+      mail = fn _arg ->
+        send(test, {:stalled, self()})
+
+        receive do
+          :go -> reply
+        end
+      end
+
+      start_mta(context, responses: %{mail: mail})
+    end
+
+    # Deferred messages are read when the manager starts.
+    test "hold, release, and requeue a deferred message", context do
+      context = start_mta(context)
+      id = deferred(context)
+      context = start_manager(context)
+      wait_for(fn -> QueueManager.stats(context.manager).deferred == 1 end)
+
+      assert QueueManager.hold(context.manager, id) == :ok
+      assert in_queue?(context, :hold, id)
+      assert QueueManager.stats(context.manager).deferred == 0
+      assert QueueManager.hold(context.manager, id) == :ok
+
+      assert QueueManager.release(context.manager, id) == :ok
+      assert in_queue?(context, :deferred, id)
+      assert QueueManager.stats(context.manager).deferred == 1
+      assert QueueManager.release(context.manager, id) == {:error, :not_found}
+
+      assert QueueManager.requeue(context.manager, id) == :ok
+      assert_removed(id, :delivered)
+      assert %{rcpt_to: ["bob@example.net"]} = assert_message(context.mta)
+    end
+
+    test "retry delivers a deferred message now", context do
+      context = start_mta(context)
+      id = deferred(context)
+      context = start_manager(context)
+      wait_for(fn -> QueueManager.stats(context.manager).deferred == 1 end)
+
+      assert QueueManager.retry(context.manager, id) == :ok
+      assert_removed(id, :delivered)
+      assert QueueManager.retry(context.manager, id) == {:error, :not_found}
+    end
+
+    test "delete removes a message from any queue, without notifications", context do
+      context = start_mta(context)
+      held = spool(context, "alice@sender.example", ["bob@example.net"], [], :hold)
+      waiting = deferred(context)
+      context = start_manager(context)
+      wait_for(fn -> QueueManager.stats(context.manager).deferred == 1 end)
+
+      for id <- [held, waiting] do
+        assert QueueManager.delete(context.manager, id) == :ok
+        assert_removed(id, :deleted)
+      end
+
+      assert QueueManager.stats(context.manager).deferred == 0
+      assert queue_empty?(context.dir)
+      assert QueueManager.delete(context.manager, held) == {:error, :not_found}
+      assert QueueManager.delete(context.manager, "../etc") == {:error, :not_found}
+
+      refute_receive {:telemetry, [:sovite, :queue, :notification, :sent], _, %{queue_id: ^held}}
+
+      refute_received {:telemetry, [:sovite, :queue, :notification, :sent], _,
+                       %{queue_id: ^waiting}}
+    end
+
+    test "requeue takes a message out of hold/", context do
+      context = context |> start_mta() |> start_manager()
+      id = spool(context, "alice@sender.example", ["bob@example.net"], [], :hold)
+
+      assert QueueManager.requeue(context.manager, id) == :ok
+      assert_removed(id, :delivered)
+      assert QueueManager.requeue(context.manager, id) == {:error, :not_found}
+    end
+
+    test "an active message is held once its delivery ends", context do
+      context = context |> stalling_mta("451 4.3.0 later") |> start_manager()
+      id = enqueue(context, "alice@sender.example", ["bob@example.net"])
+      assert_receive {:stalled, mta_conn}, @timeout
+
+      assert QueueManager.hold(context.manager, id) == :ok
+      refute in_queue?(context, :hold, id)
+      send(mta_conn, :go)
+
+      wait_for(fn -> in_queue?(context, :hold, id) end)
+
+      assert QueueManager.stats(context.manager) |> Map.take([:active, :deferred]) == %{
+               active: 0,
+               deferred: 0
+             }
+    end
+
+    test "an active message is deleted once its delivery ends", context do
+      context = context |> stalling_mta("451 4.3.0 later") |> start_manager()
+      id = enqueue(context, "alice@sender.example", ["bob@example.net"])
+      assert_receive {:stalled, mta_conn}, @timeout
+
+      assert QueueManager.delete(context.manager, id) == :ok
+      send(mta_conn, :go)
+      assert_removed(id, :deleted)
+      assert queue_empty?(context.dir)
+    end
+
+    test "drain stops starting deliveries and waits for the running ones", context do
+      context = context |> stalling_mta("250 2.1.0 OK") |> start_manager()
+      id = enqueue(context, "alice@sender.example", ["bob@example.net"])
+      assert_receive {:stalled, mta_conn}, @timeout
+
+      assert QueueManager.drain(context.manager, 100) == {:error, :timeout}
+      assert QueueManager.stats(context.manager).draining
+
+      task = Task.async(fn -> QueueManager.drain(context.manager, @timeout) end)
+      send(mta_conn, :go)
+      assert Task.await(task, @timeout) == :ok
+      assert_removed(id, :delivered)
+
+      # New messages are not delivered any more.
+      other = enqueue(context, "alice@sender.example", ["carol@example.net"])
+      refute_receive {:stalled, _}, 200
+      assert QueueManager.stats(context.manager).ready == 1
+      assert in_queue?(context, :active, other)
+    end
+
+    test "reconfigure applies new options to new deliveries", context do
+      context = context |> start_mta() |> start_manager()
+
+      {:ok, config} =
+        Config.parse(
+          ~s([server]\nhostname = "mx2.example.org"\n[queue]\ndirectory = "/elsewhere")
+        )
+
+      opts =
+        QueueManager.opts(config) ++
+          [
+            resolver: FakeDNS.resolver(@dns),
+            port: FakeMTA.port(context.mta)
+          ]
+
+      assert QueueManager.reconfigure(context.manager, opts) == :ok
+      id = enqueue(context, "alice@sender.example", ["bob@example.net"])
+      assert %{helo: "mx2.example.org"} = assert_message(context.mta)
+      # The queue directory stays.
+      assert_removed(id, :delivered)
+    end
+  end
+
+  defp wait_for(fun, attempts \\ 200) do
+    cond do
+      fun.() -> :ok
+      attempts > 0 -> Process.sleep(10) && wait_for(fun, attempts - 1)
+      true -> flunk("condition not met in time")
+    end
+  end
 end

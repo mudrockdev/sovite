@@ -37,6 +37,30 @@ defmodule Sovite.Core.Supervisor do
 
   When DANE is used, a task checks once at startup that the DNS resolver
   validates DNSSEC, and logs a warning if not: DANE then never applies.
+
+  Then, when enabled: the metrics (`Sovite.Core.Metrics`), the trace
+  exporter (`Sovite.Core.Tracing`), the admin API listener
+  (`Sovite.Core.Admin`), the systemd watchdog, and last
+  `Sovite.Core.Control`, which reloads the configuration on `SIGHUP` and
+  drains the server when it stops.
+
+  ## Reloading
+
+  `Sovite.Core.Control.reload/1` reads the config file again. Children
+  whose options did not change keep running. Listeners take new options
+  for new connections without closing their socket, when only their
+  handler, PROXY protocol, or per-IP limit options changed; otherwise
+  they are drained first. The queue manager takes its new options in
+  place. Other children are restarted with theirs. Every child starts
+  from the current configuration, so one that crashes after a reload
+  comes back with the new options. Database and queue directory changes
+  need a restart.
+
+  ## Socket activation
+
+  Under systemd socket activation (`Sovite.Systemd.listen_fds/1`), a
+  listener whose address and port match an inherited socket uses it
+  instead of opening its own.
   """
 
   use Supervisor
@@ -48,18 +72,22 @@ defmodule Sovite.Core.Supervisor do
 
   alias Sovite.Core.{
     ACME,
+    Admin,
     Config,
+    Control,
     DMARCReports,
     Greylist,
     Logging,
     MailAuth,
+    Metrics,
     MTASTS,
     Outbound,
     QueueManager,
     Repo,
     SMTPHandler,
     Telemetry,
-    TLSReports
+    TLSReports,
+    Tracing
   }
 
   alias Sovite.Queue.Spool
@@ -76,13 +104,22 @@ defmodule Sovite.Core.Supervisor do
           Supervisor.on_start()
           | {:error, {:invalid_config, list()} | {:queue_directory, File.posix()}}
   def start_link(opts \\ []) do
+    name = Keyword.get(opts, :name, __MODULE__)
+
     with {:ok, config} <- fetch_config(opts),
          :ok <- init_queue(config.queue.directory),
          {:ok, pid} <-
            Supervisor.start_link(
              __MODULE__,
-             {config, Keyword.get(opts, :queue_manager, [])},
-             name: Keyword.get(opts, :name, __MODULE__)
+             %{
+               config: config,
+               manager_opts: Keyword.get(opts, :queue_manager, []),
+               config_path: if(Keyword.has_key?(opts, :config), do: nil, else: config_path(opts)),
+               name: name,
+               instance: make_ref(),
+               module: __MODULE__
+             },
+             name: name
            ) do
       # Logged here, not in init/1, so it reaches the log file.
       Logger.info("sovite started on #{config.server.hostname}")
@@ -91,45 +128,171 @@ defmodule Sovite.Core.Supervisor do
   end
 
   @impl true
-  def init({%Config{} = config, manager_opts}) do
+  def init(%{config: config} = args) do
     Config.put(config)
     Logging.configure(config.log)
     Telemetry.attach_logger()
 
-    manager_opts = Keyword.put_new(manager_opts, :name, QueueManager)
-    runtime = runtime(config, manager_opts)
+    args =
+      args
+      |> Map.put_new_lazy(:started_at, fn -> System.os_time(:second) end)
+      |> Map.put_new_lazy(:names, fn ->
+        %{
+          control: name(args.name, Control),
+          metrics: name(args.name, Metrics),
+          tracing: name(args.name, Tracing)
+        }
+      end)
 
-    manager_opts =
-      [resolver: runtime.resolver, mta_sts: runtime.mta_sts, outbound: runtime.outbound] ++
-        Keyword.drop(manager_opts, [:resolver])
-
-    # Children stop in reverse order: listeners first, so no new mail
-    # arrives, then the queue manager, and the log file handler last.
-    children =
-      Logging.child_specs(config.log) ++
-        [
-          {Repo, {config.database, elem(runtime.repo, 1)}},
-          {DomainCache, repo: runtime.repo}
-        ] ++
-        security_specs(config, runtime) ++
-        [{QueueManager, QueueManager.opts(config, runtime.repo) ++ manager_opts}] ++
-        report_specs(config, runtime) ++
-        Enum.map(config.listener, &listener(&1, config, runtime)) ++
-        policy_specs(config, runtime)
-
-    Supervisor.init(children, strategy: :one_for_one)
+    runtime = runtime(config, Map.put(args, :supervisor, self()))
+    specs = children(config, runtime)
+    put_specs(runtime.instance, specs)
+    Supervisor.init(Enum.map(specs, &indirect(&1, runtime.instance)), strategy: :one_for_one)
   end
 
-  defp runtime(config, manager_opts) do
+  @doc false
+  # The runtime values the child specs are built from. `args` are those
+  # of init/1, or Control's on reload.
+  def runtime(config, args) do
+    manager_opts = Keyword.put_new(args.manager_opts, :name, QueueManager)
+
     %{
+      args: args,
+      supervisor: args.supervisor,
+      instance: args.instance,
+      config_path: args.config_path,
+      manager_opts: manager_opts,
       queue_manager: manager_opts[:name],
       resolver: manager_opts[:resolver] || Config.resolver(config),
       repo: Repo.ref(config.database),
       penalty: if(Config.auth_enabled?(config), do: @penalty),
       cert_store: if(Config.tls_enabled?(config), do: @cert_store),
       mta_sts: if(config.mta_sts.enabled, do: @mta_sts),
-      outbound: Outbound.opts(config, @rate_limit, @suspensions)
+      outbound: Outbound.opts(config, @rate_limit, @suspensions),
+      control: args.names.control,
+      metrics: if(config.metrics.enabled and config.admin.enabled, do: args.names.metrics),
+      tracing: if(config.tracing.enabled, do: args.names.tracing),
+      started_at: args.started_at,
+      inherited: inherited_sockets()
     }
+  end
+
+  # Per instance, so supervisors started with `name: nil` (tests) do not
+  # share process names.
+  defp name(nil, module), do: :"#{module}.#{System.unique_integer([:positive])}"
+  defp name(__MODULE__, module), do: module
+  defp name(supervisor, module), do: Module.concat(supervisor, module)
+
+  @doc false
+  # The child specs for `config`, in start order. Children stop in
+  # reverse order: Control first, which drains the listeners and the
+  # queue manager, then the listeners, so no new mail arrives, then the
+  # queue manager, and the log file handler last.
+  def children(config, runtime) do
+    manager_opts =
+      [resolver: runtime.resolver, mta_sts: runtime.mta_sts, outbound: runtime.outbound] ++
+        Keyword.drop(runtime.manager_opts, [:resolver])
+
+    (Logging.child_specs(config.log) ++
+       [
+         {Repo, {config.database, elem(runtime.repo, 1)}},
+         {DomainCache, repo: runtime.repo}
+       ] ++
+       security_specs(config, runtime) ++
+       [{QueueManager, QueueManager.opts(config, runtime.repo) ++ manager_opts}] ++
+       report_specs(config, runtime) ++
+       Enum.map(config.listener, &listener(&1, config, runtime)) ++
+       policy_specs(config, runtime) ++
+       operations_specs(config, runtime) ++
+       [{Control, runtime: runtime, config: config}])
+    |> Enum.map(&Supervisor.child_spec(&1, []))
+  end
+
+  ## Indirect starts
+
+  # Each child starts through start_child/2, which looks its spec up by
+  # ID, so a child restarted after a reload gets the reloaded spec.
+  defp indirect(spec, instance) do
+    {module, _function, _args} = spec.start
+
+    spec
+    |> Map.put(:start, {__MODULE__, :start_child, [instance, spec.id]})
+    |> Map.put_new(:modules, [module])
+  end
+
+  @doc false
+  def start_child(instance, id) do
+    {module, function, args} = instance |> specs() |> Map.fetch!(id) |> Map.fetch!(:start)
+    apply(module, function, args)
+  end
+
+  @doc false
+  # The current child specs of a supervisor instance, by ID.
+  def specs(instance), do: :persistent_term.get({__MODULE__, instance}, %{})
+
+  @doc false
+  def put_specs(instance, specs),
+    do: :persistent_term.put({__MODULE__, instance}, Map.new(specs, &{&1.id, &1}))
+
+  @doc false
+  def erase_specs(instance), do: :persistent_term.erase({__MODULE__, instance})
+
+  @doc false
+  def indirect_spec(spec, instance), do: indirect(spec, instance)
+
+  # Metrics, traces, the admin API, and the systemd watchdog.
+  defp operations_specs(config, runtime) do
+    manager = runtime.queue_manager
+
+    metrics = %{
+      name: runtime.metrics,
+      queue_manager: manager,
+      directory: config.queue.directory,
+      supervisor: runtime.supervisor,
+      started_at: runtime.started_at
+    }
+
+    if(runtime.metrics, do: [Metrics.child_spec(metrics)], else: []) ++
+      if(runtime.tracing,
+        do: [Tracing.child_spec(config.tracing, runtime.tracing, config.server.hostname)],
+        else: []
+      ) ++
+      admin_specs(config, runtime) ++
+      [{Sovite.Systemd.Watchdog, check: fn -> is_map(QueueManager.stats(manager)) end}]
+  end
+
+  defp admin_specs(%{admin: %{enabled: false}}, _runtime), do: []
+
+  defp admin_specs(config, runtime) do
+    admin = config.admin
+
+    case Admin.token(admin.token_file) do
+      {:ok, token} ->
+        listener_opts = [
+          id: "admin/#{:inet.ntoa(admin.address)}:#{admin.port}",
+          ip: admin.address,
+          port: admin.port,
+          max_connections: 100,
+          max_connections_per_ip: 20,
+          handler: Sovite.HTTP.Server,
+          handler_opts: [
+            handler: Admin.handler(Admin.opts(config, runtime, token)),
+            tls:
+              if(admin.tls and runtime.cert_store,
+                do: fn -> CertStore.server_options(@cert_store) end
+              )
+          ]
+        ]
+
+        [
+          {Sovite.Listener,
+           Keyword.merge(listener_opts, inherited(runtime, admin.address, admin.port))}
+        ]
+
+      {:error, reason} ->
+        Logger.error("admin API disabled: cannot use #{admin.token_file}: #{reason}")
+        []
+    end
   end
 
   # The failed-login counter, the anti-abuse processes, the certificate
@@ -298,50 +461,83 @@ defmodule Sovite.Core.Supervisor do
 
     {
       Sovite.SMTP.Server,
-      # RFC 4865 §3: only on submission ports.
-      id: "#{mode}/#{:inet.ntoa(address)}:#{port}",
-      ip: address,
-      port: port,
-      max_connections: smtp.max_connections,
-      max_connections_per_ip: smtp.max_connections_per_ip,
-      proxy_protocol: listener.proxy_protocol,
-      proxy_networks: smtp.proxy_networks,
-      proxy_timeout: smtp.proxy_timeout,
-      hostname: config.server.hostname,
-      handler: {SMTPHandler, handler},
-      max_message_size: smtp.max_message_size,
-      max_recipients: smtp.max_recipients,
-      max_errors: smtp.max_errors,
-      command_timeout: smtp.command_timeout,
-      data_timeout: smtp.data_timeout,
-      vrfy: smtp.vrfy,
-      bare_line_endings: smtp.bare_line_endings,
-      tls: tls_options(runtime.cert_store, listener),
-      implicit_tls: mode == :submissions,
-      require_tls: listener.require_tls and mode != :submissions,
-      auth: listener.auth,
-      auth_required: listener.require_auth,
-      plaintext_auth: config.auth.plaintext,
-      lmtp: mode == :lmtp,
-      requiretls: smtp.requiretls and mode != :lmtp,
-      smtputf8: smtp.smtputf8,
-      chunking: smtp.chunking,
-      binarymime: smtp.binarymime,
-      dsn: smtp.dsn,
-      etrn: smtp.etrn and mode == :smtp,
-      mt_priority: smtp.mt_priority,
-      deliverby: smtp.deliverby,
-      rrvs: smtp.rrvs,
-      future_release:
-        if(config.submission.future_release and mode in [:submission, :submissions],
-          do: div(config.submission.max_future_release, 1000)
-        ),
-      tarpit_after: smtp.tarpit_after,
-      tarpit_delay: smtp.tarpit_delay,
-      forbid_unauth_pipelining: smtp.forbid_unauth_pipelining and mode != :lmtp,
-      xclient_networks: smtp.xclient_networks,
-      xforward_networks: smtp.xforward_networks
+      [
+        id: "#{mode}/#{:inet.ntoa(address)}:#{port}",
+        ip: address,
+        port: port
+      ] ++
+        inherited(runtime, address, port) ++
+        [
+          max_connections: smtp.max_connections,
+          max_connections_per_ip: smtp.max_connections_per_ip,
+          proxy_protocol: listener.proxy_protocol,
+          proxy_networks: smtp.proxy_networks,
+          proxy_timeout: smtp.proxy_timeout,
+          hostname: config.server.hostname,
+          handler: {SMTPHandler, handler},
+          max_message_size: smtp.max_message_size,
+          max_recipients: smtp.max_recipients,
+          max_errors: smtp.max_errors,
+          command_timeout: smtp.command_timeout,
+          data_timeout: smtp.data_timeout,
+          vrfy: smtp.vrfy,
+          bare_line_endings: smtp.bare_line_endings,
+          tls: tls_options(runtime.cert_store, listener),
+          implicit_tls: mode == :submissions,
+          require_tls: listener.require_tls and mode != :submissions,
+          auth: listener.auth,
+          auth_required: listener.require_auth,
+          plaintext_auth: config.auth.plaintext,
+          lmtp: mode == :lmtp,
+          requiretls: smtp.requiretls and mode != :lmtp,
+          smtputf8: smtp.smtputf8,
+          chunking: smtp.chunking,
+          binarymime: smtp.binarymime,
+          dsn: smtp.dsn,
+          etrn: smtp.etrn and mode == :smtp,
+          mt_priority: smtp.mt_priority,
+          deliverby: smtp.deliverby,
+          rrvs: smtp.rrvs,
+          # RFC 4865 §3: only on submission ports.
+          future_release:
+            if(config.submission.future_release and mode in [:submission, :submissions],
+              do: div(config.submission.max_future_release, 1000)
+            ),
+          tarpit_after: smtp.tarpit_after,
+          tarpit_delay: smtp.tarpit_delay,
+          forbid_unauth_pipelining: smtp.forbid_unauth_pipelining and mode != :lmtp,
+          xclient_networks: smtp.xclient_networks,
+          xforward_networks: smtp.xforward_networks
+        ]
     }
+  end
+
+  ## Socket activation
+
+  # The sockets systemd passed, by address. Read once: the environment
+  # variables are removed, so programs Sovite runs do not see them.
+  defp inherited_sockets do
+    case :persistent_term.get({__MODULE__, :inherited}, nil) do
+      nil ->
+        sockets =
+          for {_name, fd} <- Sovite.Systemd.listen_fds(unset: true),
+              {:ok, {ip, port}} <- [Sovite.Systemd.socket_address(fd)],
+              into: %{},
+              do: {{Sovite.Net.normalize(ip), port}, fd}
+
+        :persistent_term.put({__MODULE__, :inherited}, sockets)
+        sockets
+
+      sockets ->
+        sockets
+    end
+  end
+
+  defp inherited(runtime, address, port) do
+    case Map.fetch(runtime.inherited, {address, port}) do
+      {:ok, fd} -> [fd: fd]
+      :error -> []
+    end
   end
 
   defp tls_options(nil, _listener), do: nil
@@ -376,9 +572,11 @@ defmodule Sovite.Core.Supervisor do
   defp fetch_config(opts) do
     case Keyword.fetch(opts, :config) do
       {:ok, %Config{} = config} -> {:ok, config}
-      :error -> opts |> Keyword.get_lazy(:config_path, &Config.default_path/0) |> load_config()
+      :error -> opts |> config_path() |> load_config()
     end
   end
+
+  defp config_path(opts), do: Keyword.get_lazy(opts, :config_path, &Config.default_path/0)
 
   defp load_config(path) do
     with {:error, errors} <- Config.load(path) do

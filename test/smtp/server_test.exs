@@ -196,27 +196,63 @@ defmodule Sovite.SMTP.ServerTest do
 
   test "emits session telemetry" do
     ref = make_ref()
-    id = {__MODULE__, ref}
+    handler_id = {__MODULE__, ref}
 
     events = [
       [:sovite, :smtp, :server, :session, :start],
       [:sovite, :smtp, :server, :session, :stop]
     ]
 
-    :telemetry.attach_many(id, events, &__MODULE__.forward_event/4, {self(), ref})
-    on_exit(fn -> :telemetry.detach(id) end)
+    :telemetry.attach_many(handler_id, events, &__MODULE__.forward_event/4, {self(), ref})
+    on_exit(fn -> :telemetry.detach(handler_id) end)
 
     {_server, port} = start_server()
     client = connect(port)
     {:ok, {220, _}} = SMTPClient.read_reply(client)
     {:ok, {221, _}} = SMTPClient.command(client, "QUIT")
 
-    assert_receive {^ref, [_, _, _, _, :start], %{system_time: _},
-                    %{session_id: id, remote_ip: {127, 0, 0, 1}}}
+    # Events are global: match this session's ID, which the handler saw.
+    assert_receive {:terminate, :normal, %{session_id: session_id}}
 
-    assert_receive {^ref, [_, _, _, _, :stop], %{duration: _}, %{session_id: ^id}}
+    assert_receive {^ref, [_, _, _, _, :start], %{system_time: _},
+                    %{session_id: ^session_id, remote_ip: {127, 0, 0, 1}}}
+
+    assert_receive {^ref, [_, _, _, _, :stop], %{duration: _}, %{session_id: ^session_id}}
   end
 
   def forward_event(event, measurements, metadata, {pid, ref}),
     do: send(pid, {ref, event, measurements, metadata})
+
+  describe "draining" do
+    test "an idle session is closed with 421 at once" do
+      {server, port} = start_server()
+      client = connect(port)
+      {:ok, {220, _}} = SMTPClient.read_reply(client)
+      {:ok, {250, _}} = SMTPClient.command(client, "EHLO c.test")
+
+      Sovite.Listener.drain(server)
+      assert {:ok, {421, ["4.3.2 mx.test Service shutting down"]}} = SMTPClient.read_reply(client)
+      assert_receive {:terminate, {:shutdown, :drain}, _connection}
+    end
+
+    test "a session in a transaction finishes it first" do
+      {server, port} = start_server()
+      client = connect(port)
+      {:ok, {220, _}} = SMTPClient.read_reply(client)
+      {:ok, {250, _}} = SMTPClient.command(client, "EHLO c.test")
+      {:ok, {250, _}} = SMTPClient.command(client, "MAIL FROM:<a@x.test>")
+
+      Sovite.Listener.drain(server)
+      refute_receive {:terminate, _reason, _connection}, 100
+
+      {:ok, {250, _}} = SMTPClient.command(client, "RCPT TO:<b@y.test>")
+      {:ok, {354, _}} = SMTPClient.command(client, "DATA")
+      :ok = SMTPClient.send_raw(client, "Subject: t\r\n\r\nbody\r\n.\r\n")
+      assert {:ok, {250, _}} = SMTPClient.read_reply(client)
+      assert_receive {:message, _transaction, _data}
+
+      assert {:ok, {421, _}} = SMTPClient.read_reply(client)
+      assert_receive {:terminate, {:shutdown, :drain}, _connection}
+    end
+  end
 end

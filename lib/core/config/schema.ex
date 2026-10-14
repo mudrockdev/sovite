@@ -40,6 +40,9 @@ defmodule Sovite.Core.Config.Schema do
   #   {:list, type}            - an array; errors name the index, as in "key[0]"
   #   {:map, key_type, value_type} - a table with arbitrary keys; errors name the key
   #   {:integer, min, max}
+  #   {:float, min, max}       - a number, integers too, kept as a float
+  #   :syslog_address          - {:unix, path} from an absolute path, or {:udp, host, port}
+  #                              from "host", "host:port", or "[ipv6]:port"
   #   {:enum, [atom]}          - the input string must equal one of the atom names
   #   {:section, [field]}      - a nested table
   #
@@ -167,6 +170,30 @@ defmodule Sovite.Core.Config.Schema do
 
   defp cast({:integer, min, max}, value),
     do: type_error("an integer from #{min} to #{max}", value)
+
+  defp cast({:float, min, max}, value) when is_number(value) and value >= min and value <= max,
+    do: {:ok, value / 1}
+
+  defp cast({:float, min, max}, value), do: type_error("a number from #{min} to #{max}", value)
+
+  defp cast(:syslog_address, "/" <> _ = path), do: {:ok, {:unix, path}}
+
+  defp cast(:syslog_address, value) when is_binary(value) do
+    # Captures left unmatched at the end are left out: pad them.
+    captures = Regex.run(~r/\A(?:\[([^\]]+)\]|([^:\[\]]+))(?::([0-9]{1,5}))?\z/, value) || []
+
+    with [_, v6, host, port] <- captures ++ List.duplicate("", 4 - length(captures)),
+         port = if(port == "", do: 514, else: String.to_integer(port)),
+         true <- port in 1..65_535,
+         {:ok, host} <- syslog_host(if(v6 == "", do: host, else: v6)) do
+      {:ok, {:udp, host, port}}
+    else
+      _ ->
+        {:error, "#{inspect(value)} is not a syslog address, expected a socket path or host:port"}
+    end
+  end
+
+  defp cast(:syslog_address, value), do: type_error("a syslog address", value)
 
   # Defaults are written as atoms in the schema, so accept those as well.
   defp cast({:enum, allowed}, value) when is_atom(value) do
@@ -605,6 +632,18 @@ defmodule Sovite.Core.Config.Schema do
     case Sovite.Validators.ascii_domain(value) do
       {:ok, mailbox} -> mailbox
       {:error, _} -> value
+    end
+  end
+
+  defp syslog_host(host) do
+    case Sovite.Net.parse_ip(host) do
+      {:ok, ip} ->
+        {:ok, ip}
+
+      {:error, _} ->
+        if Sovite.Validators.hostname?(host),
+          do: {:ok, String.downcase(host, :ascii)},
+          else: :error
     end
   end
 

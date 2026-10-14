@@ -1,0 +1,53 @@
+# .deb and .rpm packages of a Sovite release, built by scripts/package.sh
+# with nfpm (https://nfpm.goreleaser.com). The release bundles the Erlang
+# runtime, so the package only needs OpenSSL and ncurses from the system,
+# and is built on (and for) the distribution release it runs on.
+name: sovite
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: mail
+priority: optional
+# Set to a real "Name <email>" before publishing packages.
+maintainer: Sovite maintainers
+description: |
+  A modern, secure mail transfer agent written in Elixir/OTP.
+vendor: Sovite
+homepage: https://github.com/mudrockdev/sovite
+license: AGPL-3.0
+
+contents:
+  - src: ${RELEASE_DIR}/
+    dst: /opt/sovite/
+  - src: rel/overlays/share/systemd/sovite.service
+    dst: /usr/lib/systemd/system/sovite.service
+  - src: rel/overlays/share/systemd/sovite.socket
+    dst: /usr/lib/systemd/system/sovite.socket
+  - src: rel/overlays/share/systemd/sovite-sysusers.conf
+    dst: /usr/lib/sysusers.d/sovite.conf
+  - src: rel/overlays/share/systemd/sovite-tmpfiles.conf
+    dst: /usr/lib/tmpfiles.d/sovite.conf
+  - src: rel/overlays/etc/sovite.toml.example
+    dst: /etc/sovite/sovite.toml
+    type: config|noreplace
+    file_info:
+      mode: 0640
+  - src: /opt/sovite/bin/sovitectl
+    dst: /usr/bin/sovitectl
+    type: symlink
+
+scripts:
+  postinstall: packaging/postinstall.sh
+  preremove: packaging/preremove.sh
+
+overrides:
+  deb:
+    depends:
+      - libssl3 | libssl3t64
+      - libtinfo6
+      - ca-certificates
+  rpm:
+    depends:
+      - openssl-libs
+      - ncurses-libs
+      - ca-certificates

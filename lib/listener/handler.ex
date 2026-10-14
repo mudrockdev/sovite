@@ -5,6 +5,10 @@ defmodule Sovite.Listener.Handler do
   The listener starts it with `start_link/2` under its connection
   supervisor, then hands over the socket. The process must call
   `Sovite.Listener.handshake/1` before using the socket.
+
+  When the listener is drained (`Sovite.Listener.drain/1`), the process
+  gets a `{:sovite_listener, :drain}` message: it should finish what it
+  is doing and close the connection.
   """
 
   @doc "Starts the connection process. `opts` is the listener's `:handler_opts`."

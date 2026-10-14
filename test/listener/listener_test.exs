@@ -43,6 +43,23 @@ defmodule Sovite.ListenerTest do
     end
   end
 
+  defmodule DrainHandler do
+    @moduledoc false
+    # Tells the test process when the listener asks it to drain.
+    def start_link(info, opts) do
+      Task.start_link(fn ->
+        {:ok, info} = Listener.handshake(info)
+        send(Keyword.fetch!(opts, :test), {:connected, self(), info})
+
+        receive do
+          {:sovite_listener, :drain} ->
+            send(Keyword.fetch!(opts, :test), {:drain, self(), Keyword.get(opts, :tag)})
+            :gen_tcp.close(info.socket)
+        end
+      end)
+    end
+  end
+
   defmodule SilentHandler do
     @moduledoc false
     # No reject/3: refused connections are just closed.
@@ -413,6 +430,95 @@ defmodule Sovite.ListenerTest do
       {_socket, info} = connect_proxied!(port, @v1)
       assert info.remote_ip == {192, 0, 2, 1}
       assert_rejected(port, :max_connections_per_ip)
+    end
+  end
+
+  describe "drain/1 and update/2" do
+    test "drain stops accepting and tells the open connections" do
+      %{listener: listener, port: port} = start_listener(handler: DrainHandler)
+      {socket, _info} = connect!(port)
+
+      assert Listener.drain(listener) == :ok
+      assert_receive {:drain, _pid, nil}
+      assert :gen_tcp.recv(socket, 0, 1_000) == {:error, :closed}
+      assert {:error, :econnrefused} = :gen_tcp.connect(@localhost, port, [], 1_000)
+      assert Listener.sockname(listener) == {:error, :closed}
+      wait_until(fn -> Listener.connection_count(listener) == 0 end)
+
+      # Draining twice is fine.
+      assert Listener.drain(listener) == :ok
+    end
+
+    test "update changes the handler options of new connections only" do
+      %{listener: listener, port: port} =
+        start_listener(handler: DrainHandler, handler_opts: [test: self(), tag: :old])
+
+      {_old, _info} = connect!(port)
+      :ok = Listener.update(listener, handler_opts: [test: self(), tag: :new])
+      {_new, _info} = connect!(port)
+
+      Listener.drain(listener)
+      assert_receive {:drain, _, :old}
+      assert_receive {:drain, _, :new}
+    end
+
+    test "a per-IP limit set by update never releases counts it did not take" do
+      %{listener: listener, port: port} = start_listener([])
+      {before, _info} = connect!(port)
+
+      :ok = Listener.update(listener, max_connections_per_ip: 1)
+      {_counted, _info} = connect!(port)
+      assert_rejected(port, :max_connections_per_ip)
+
+      # The connection from before the limit closes: still one counted.
+      :gen_tcp.close(before)
+      wait_until(fn -> Listener.connection_count(listener) == 1 end)
+      assert_rejected(port, :max_connections_per_ip)
+    end
+
+    test "update refuses options that need a new listener" do
+      %{listener: listener} = start_listener([])
+      assert_raise ArgumentError, fn -> Listener.update(listener, port: 1) end
+    end
+  end
+
+  describe ":fd" do
+    # A socket inherited from a parent is owned by no port: passing its fd
+    # to ourselves over SCM_RIGHTS makes such a duplicate.
+    defp inherited_fd(socket) do
+      path = Path.join(System.tmp_dir!(), "sovite-fd-#{System.unique_integer([:positive])}")
+      {:ok, receiver} = :socket.open(:local, :dgram, :default)
+      :ok = :socket.bind(receiver, %{family: :local, path: path})
+      {:ok, sender} = :socket.open(:local, :dgram, :default)
+      {:ok, fd} = :socket.getopt(socket, {:otp, :fd})
+
+      :ok =
+        :socket.sendmsg(sender, %{
+          addr: %{family: :local, path: path},
+          iov: ["fd"],
+          ctrl: [%{level: :socket, type: :rights, data: <<fd::native-32>>}]
+        })
+
+      {:ok, %{ctrl: [%{data: <<passed::native-32>>}]}} = :socket.recvmsg(receiver, 0, 0, [], 1000)
+      Enum.each([sender, receiver, socket], &:socket.close/1)
+      File.rm(path)
+      passed
+    end
+
+    test "listens on an inherited socket" do
+      {:ok, socket} = :socket.open(:inet, :stream, :default)
+      :ok = :socket.bind(socket, %{family: :inet, addr: @localhost, port: 0})
+      :ok = :socket.listen(socket)
+      {:ok, %{port: port}} = :socket.sockname(socket)
+      fd = inherited_fd(socket)
+
+      assert {:ok, {@localhost, ^port}} = Sovite.Systemd.socket_address(fd)
+      %{listener: listener} = start_listener(fd: fd, port: 0)
+      assert {:ok, {@localhost, ^port}} = Listener.sockname(listener)
+
+      socket = connect(port)
+      :ok = :gen_tcp.send(socket, "ping\n")
+      assert :gen_tcp.recv(socket, 0, 1_000) == {:ok, "ping\n"}
     end
   end
 end

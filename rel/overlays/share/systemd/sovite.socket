@@ -1,0 +1,27 @@
+# Socket activation for Sovite: systemd opens the SMTP ports, so the
+# server needs no privileges to bind them, and connections that arrive
+# while it restarts wait instead of being refused.
+#
+# Each ListenStream= must match a [[listener]] in sovite.toml, address
+# and port both: 0.0.0.0:25 here is the default listener. Listeners
+# without a matching socket open their own.
+#
+# systemctl disable sovite.service; systemctl enable --now sovite.socket
+[Unit]
+Description=Sovite mail transfer agent sockets
+Documentation=https://github.com/mudrockdev/sovite
+
+[Socket]
+ListenStream=0.0.0.0:25
+# ListenStream=0.0.0.0:465
+# ListenStream=0.0.0.0:587
+# For IPv6 listeners ("::"), with BindIPv6Only=ipv6-only:
+# ListenStream=[::]:25
+BindIPv6Only=ipv6-only
+NoDelay=yes
+KeepAlive=yes
+Backlog=1024
+Service=sovite.service
+
+[Install]
+WantedBy=sockets.target

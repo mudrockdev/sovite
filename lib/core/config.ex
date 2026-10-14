@@ -28,7 +28,8 @@ defmodule Sovite.Core.Config do
      {:section,
       [
         {:hostname, :hostname, default: &__MODULE__.system_hostname/0},
-        {:authserv_id, :hostname, []}
+        {:authserv_id, :hostname, []},
+        {:shutdown_timeout, :duration, default: "30s"}
       ]}, []},
     {:database,
      {:section,
@@ -386,10 +387,42 @@ defmodule Sovite.Core.Config do
         {:max_size, :byte_size, default: "100M"},
         {:rotation, {:enum, [:never, :hourly, :daily, :weekly, :monthly]}, default: :daily},
         {:max_files, {:integer, 0, 100_000}, default: 14},
-        {:symlink, :file_name, []}
+        {:symlink, :file_name, []},
+        {:syslog, :boolean, default: false},
+        {:syslog_address, :syslog_address, default: "/dev/log"},
+        {:syslog_facility,
+         {:enum,
+          [:mail, :daemon, :user, :local0, :local1, :local2, :local3] ++
+            [:local4, :local5, :local6, :local7]}, default: :mail},
+        {:syslog_format, {:enum, [:rfc3164, :rfc5424]}, default: :rfc3164}
+      ]}, []},
+    {:admin,
+     {:section,
+      [
+        {:enabled, :boolean, default: true},
+        {:address, :ip_address, default: "127.0.0.1"},
+        {:port, {:integer, 0, 65_535}, default: 9025},
+        {:token_file, :absolute_path, default: "/var/lib/sovite/admin.token"},
+        {:allowed_networks, {:list, :cidr}, default: ["127.0.0.0/8", "::1"]},
+        {:tls, :boolean, default: false},
+        {:public_metrics, :boolean, default: false},
+        {:web_root, :absolute_path, []}
+      ]}, []},
+    {:metrics, {:section, [{:enabled, :boolean, default: true}]}, []},
+    {:tracing,
+     {:section,
+      [
+        {:enabled, :boolean, default: false},
+        {:endpoint, {:url, ["http", "https"]}, default: "http://127.0.0.1:4318/v1/traces"},
+        {:headers, {:map, :string, :string}, default: %{}},
+        {:sample_ratio, {:float, 0, 1}, default: 1.0},
+        {:service_name, :string, default: "sovite"}
       ]}, []}
   ]
 
+  # One field per top-level section of the file, so more than a small
+  # map holds. The struct is read rarely, outside hot paths.
+  # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
   defstruct [
     :server,
     :database,
@@ -421,7 +454,12 @@ defmodule Sovite.Core.Config do
     :policy,
     :sendmail,
     :bounce,
-    :log
+    :log,
+    :admin,
+    :metrics,
+    :tracing,
+    # The decoded file, for `sovitectl config show` and `diff`.
+    raw: %{}
   ]
 
   @type tls_level :: :none | :may | :encrypt | :verify | :dane
@@ -433,7 +471,11 @@ defmodule Sovite.Core.Config do
   @type dns_list :: %{zone: String.t(), weight: integer(), codes: list()}
 
   @type t :: %__MODULE__{
-          server: %{hostname: String.t(), authserv_id: String.t()},
+          server: %{
+            hostname: String.t(),
+            authserv_id: String.t(),
+            shutdown_timeout: pos_integer()
+          },
           database: %{
             adapter: :sqlite | :postgres | :mysql,
             path: Path.t(),
@@ -655,7 +697,26 @@ defmodule Sovite.Core.Config do
           policy: %{timeout: pos_integer(), default_action: String.t()},
           sendmail: %{server: Sovite.Core.Transport.host(), origin: String.t() | nil},
           bounce: %{double_bounce_recipient: String.t() | nil, size_limit: pos_integer()},
-          log: Sovite.Core.Logging.config()
+          log: Sovite.Core.Logging.config(),
+          admin: %{
+            enabled: boolean(),
+            address: :inet.ip_address(),
+            port: :inet.port_number(),
+            token_file: Path.t(),
+            allowed_networks: [Sovite.Net.network()],
+            tls: boolean(),
+            public_metrics: boolean(),
+            web_root: Path.t() | nil
+          },
+          metrics: %{enabled: boolean()},
+          tracing: %{
+            enabled: boolean(),
+            endpoint: String.t(),
+            headers: %{optional(String.t()) => String.t()},
+            sample_ratio: float(),
+            service_name: String.t()
+          },
+          raw: map()
         }
 
   @doc """
@@ -708,9 +769,13 @@ defmodule Sovite.Core.Config do
            |> AbuseRules.defaults(),
          {values, key_errors} = AuthRules.load_keys(values),
          :ok <- check(values, key_errors) do
-      {:ok, struct!(__MODULE__, values)}
+      {:ok, struct!(__MODULE__, Map.put(values, :raw, map))}
     end
   end
+
+  @doc false
+  # For Sovite.Core.Config.Settings.
+  def schema, do: @schema
 
   # Like Postfix's mydestination, the server is its own final destination
   # unless told otherwise.

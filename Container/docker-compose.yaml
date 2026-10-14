@@ -1,0 +1,26 @@
+# Sovite with Docker Compose or podman-compose, from the repository root:
+#
+#   cp rel/overlays/etc/sovite.toml.example Container/sovite.toml   # then edit it
+#   docker compose -f Container/docker-compose.yaml up -d
+#   docker compose -f Container/docker-compose.yaml exec sovite sovitectl status
+services:
+  sovite:
+    build:
+      context: ..
+      dockerfile: Containerfile
+    image: sovite
+    restart: unless-stopped
+    # Longer than server.shutdown_timeout, so the server can drain.
+    stop_grace_period: 40s
+    ports:
+      - "25:25"
+      - "465:465"
+      - "587:587"
+    volumes:
+      - ./sovite.toml:/etc/sovite/sovite.toml:ro
+      - sovite-data:/var/lib/sovite
+      - sovite-queue:/var/spool/sovite
+
+volumes:
+  sovite-data:
+  sovite-queue:

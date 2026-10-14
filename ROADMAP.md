@@ -223,16 +223,16 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 12 — Operations & Observability
 
-- [ ] CLI: `sovite queue list|show|flush|hold|release|delete|requeue`, `sovite config check|show|diff`, `sovite route ADDRESS` (show how the routing tables resolve an address), `sovite status`
-- [ ] Message tracing: follow a message from connection to final delivery by queue ID or Message-ID
-- [ ] Prometheus metrics endpoint; OpenTelemetry traces
-- [ ] Structured JSON logs + classic syslog-style output
-- [ ] Admin HTTP API (authenticated, local-only by default)
-- [ ] Optional LiveDashboard-based status UI
-- [ ] Graceful shutdown and drain; zero-downtime config reload
-- [ ] systemd integration: socket activation, `sd_notify`, hardening directives
-- [ ] Packaging: container image, `.deb` / `.rpm`, release tarballs
-- [ ] Log-based tooling compatibility (pflogsumm-style summary report)
+- [x] CLI: `sovite queue list|show|flush|hold|release|delete|requeue`, `sovite config check|show|diff`, `sovite route ADDRESS` (show how the routing tables resolve an address), `sovite status`
+- [x] Message tracing: follow a message from connection to final delivery by queue ID or Message-ID
+- [x] Prometheus metrics endpoint; OpenTelemetry traces
+- [x] Structured JSON logs + classic syslog-style output
+- [x] Admin HTTP API (authenticated, local-only by default)
+- [ ] Optional LiveDashboard-based status UI (the admin API serves the API and a static UI from `admin.web_root`; the UI itself is `lib/core/sovite_web`)
+- [x] Graceful shutdown and drain; zero-downtime config reload
+- [x] systemd integration: socket activation, `sd_notify`, hardening directives
+- [x] Packaging: container image, `.deb` / `.rpm`, release tarballs
+- [x] Log-based tooling compatibility (pflogsumm-style summary report)
 
 ### Phase 13 — Scale & Clustering (differentiator)
 

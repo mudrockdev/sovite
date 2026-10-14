@@ -60,6 +60,16 @@ defmodule Sovite.Core.QueueManager do
   in that domain now, for `ETRN` (RFC 1985). The same domain is flushed
   at most once a minute.
 
+  ## Administration
+
+  `hold/2`, `release/2`, `delete/2`, `requeue/2`, and `retry/2` act on
+  one message, like Postfix's `postsuper` and `postqueue -i`. A message
+  being delivered is held or deleted once its running deliveries end;
+  the deliveries that have not started are dropped. `reconfigure/2`
+  takes new options from a reloaded configuration, for the messages
+  picked up from then on. `drain/2` stops starting deliveries, for a
+  graceful shutdown.
+
   ## Limits
 
     * `delivery.max_deliveries` workers run at once.
@@ -76,7 +86,7 @@ defmodule Sovite.Core.QueueManager do
   require Logger
 
   alias Sovite.Core.{Bounce, Config, Delivery, Outbound, Recipients, Router, Routing}
-  alias Sovite.Queue.{Backoff, Entry, Envelope, Spool}
+  alias Sovite.Queue.{Backoff, Entry, Envelope, ID, Spool}
   alias Sovite.SMTP.Client
 
   # The shortest time between two ETRN flushes of the same domain.
@@ -98,7 +108,9 @@ defmodule Sovite.Core.QueueManager do
     workers: %{},
     destination_running: %{},
     destination_last: %{},
-    backlog: false
+    backlog: false,
+    draining: false,
+    drain_waiters: []
   ]
 
   ## API
@@ -168,11 +180,70 @@ defmodule Sovite.Core.QueueManager do
       when kind in [:domain, :subdomains] and is_binary(domain),
       do: GenServer.call(server, {:flush, node})
 
+  @doc """
+  Retries message `queue_id` now, if it is deferred or waiting in
+  `incoming/`. A message on hold for `FUTURERELEASE` stays on hold.
+  """
+  @spec retry(GenServer.server(), String.t()) :: :ok | {:error, :not_found}
+  def retry(server, queue_id), do: GenServer.call(server, {:retry, queue_id})
+
+  @doc """
+  Puts message `queue_id` on hold (in `hold/`): it is not delivered until
+  `release/2` or `requeue/2`.
+  """
+  @spec hold(GenServer.server(), String.t()) :: :ok | {:error, :not_found}
+  def hold(server, queue_id), do: GenServer.call(server, {:hold, queue_id})
+
+  @doc """
+  Releases a message from `hold/` to `deferred/`. It is retried when its
+  next attempt is due, at once if that has passed.
+  """
+  @spec release(GenServer.server(), String.t()) :: :ok | {:error, :not_found}
+  def release(server, queue_id), do: GenServer.call(server, {:release, queue_id})
+
+  @doc """
+  Deletes message `queue_id` from any queue, without notifying anyone.
+  """
+  @spec delete(GenServer.server(), String.t()) :: :ok | {:error, :not_found}
+  def delete(server, queue_id), do: GenServer.call(server, {:delete, queue_id})
+
+  @doc """
+  Queues message `queue_id` again and retries it now, from `deferred/`,
+  `hold/`, or `corrupt/` (where it goes back if it still fails
+  verification). Its pending recipients are routed again, with the
+  current aliases and routing tables.
+  """
+  @spec requeue(GenServer.server(), String.t()) :: :ok | {:error, :not_found}
+  def requeue(server, queue_id), do: GenServer.call(server, {:requeue, queue_id})
+
+  @doc """
+  Replaces the options with `opts` (from `opts/2`, after a config
+  reload). The queue directory cannot change. Deliveries already planned
+  keep the options they were planned with.
+  """
+  @spec reconfigure(GenServer.server(), keyword()) :: :ok
+  def reconfigure(server, opts), do: GenServer.call(server, {:reconfigure, opts})
+
+  @doc """
+  Stops starting deliveries, and waits up to `timeout` milliseconds for
+  the running ones to end. Messages left in `active/` are picked up again
+  at the next start. Returns `{:error, :timeout}` if deliveries were
+  still running.
+  """
+  @spec drain(GenServer.server(), timeout()) :: :ok | {:error, :timeout}
+  def drain(server, timeout) do
+    GenServer.call(server, :drain, timeout)
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+  end
+
   @doc "Counts of messages and deliveries, for status output and tests."
   @spec stats(GenServer.server()) :: %{
           active: non_neg_integer(),
           deferred: non_neg_integer(),
-          deliveries: non_neg_integer()
+          deliveries: non_neg_integer(),
+          ready: non_neg_integer(),
+          draining: boolean()
         }
   def stats(server), do: GenServer.call(server, :stats)
 
@@ -180,6 +251,12 @@ defmodule Sovite.Core.QueueManager do
 
   @impl true
   def init(opts) do
+    {:ok, task_supervisor} = Task.Supervisor.start_link()
+    state = %__MODULE__{opts: build_opts(opts), task_supervisor: task_supervisor}
+    {:ok, state, {:continue, :recover}}
+  end
+
+  defp build_opts(opts) do
     hostname = Keyword.fetch!(opts, :hostname)
 
     families =
@@ -223,14 +300,7 @@ defmodule Sovite.Core.QueueManager do
       tmp_dir: Path.join(opts.directory, "tmp")
     }
 
-    {:ok, task_supervisor} = Task.Supervisor.start_link()
-
-    state = %__MODULE__{
-      opts: Map.put(opts, :delivery, delivery),
-      task_supervisor: task_supervisor
-    }
-
-    {:ok, state, {:continue, :recover}}
+    Map.put(opts, :delivery, delivery)
   end
 
   @impl true
@@ -270,7 +340,7 @@ defmodule Sovite.Core.QueueManager do
     state = job_finished(state, worker.job, results)
     now = now_ms()
 
-    case reusable && next_job(state, worker.destination, now) do
+    case reusable && not state.draining && next_job(state, worker.destination, now) do
       {job, state} ->
         state = put_in(state.running[ref].job, job)
         state = put_in(state.destination_last[worker.destination], now)
@@ -320,10 +390,106 @@ defmodule Sovite.Core.QueueManager do
     stats = %{
       active: map_size(state.messages),
       deferred: map_size(state.deferred_due),
-      deliveries: map_size(state.running)
+      deliveries: map_size(state.running),
+      ready: state.ready |> Map.values() |> Enum.map(&:gb_sets.size/1) |> Enum.sum(),
+      draining: state.draining
     }
 
     {:reply, stats, state}
+  end
+
+  def handle_call({:retry, id}, _from, state) do
+    cond do
+      Map.has_key?(state.deferred_due, id) ->
+        state = reschedule(state, id, 0)
+        {:reply, :ok, state |> activate_due() |> schedule_wake() |> dispatch()}
+
+      Map.has_key?(state.messages, id) ->
+        {:reply, :ok, state}
+
+      File.exists?(Spool.path(state.opts.directory, :incoming, id)) ->
+        {:reply, :ok, state |> activate(id, :incoming) |> dispatch()}
+
+      true ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:hold, id}, _from, state) do
+    case locate(state, id) do
+      :active -> {:reply, :ok, finish_early(state, id, :hold)}
+      :hold -> {:reply, :ok, state}
+      :corrupt -> {:reply, {:error, :not_found}, state}
+      nil -> {:reply, {:error, :not_found}, state}
+      queue -> {:reply, move_out(state, id, queue, :hold, :held), unindex(state, id)}
+    end
+  end
+
+  def handle_call({:release, id}, _from, state) do
+    dir = state.opts.directory
+
+    case Spool.move(dir, id, :hold, :deferred) do
+      :ok ->
+        admin_event(:released, id)
+        state = index_deferred(state, id)
+        {:reply, :ok, state |> activate_due() |> schedule_wake() |> dispatch()}
+
+      {:error, _reason} ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:delete, id}, _from, state) do
+    case locate(state, id) do
+      :active ->
+        {:reply, :ok, finish_early(state, id, :delete)}
+
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      queue ->
+        result =
+          case Spool.remove(state.opts.directory, queue, id, :deleted) do
+            :ok -> :ok
+            {:error, _reason} -> {:error, :not_found}
+          end
+
+        {:reply, result, unindex(state, id)}
+    end
+  end
+
+  def handle_call({:requeue, id}, _from, state) do
+    case locate(state, id) do
+      :active ->
+        admin_event(:requeued, id)
+        {:reply, :ok, put_in(state.messages[id].after, :requeue)}
+
+      :incoming ->
+        admin_event(:requeued, id)
+        {:reply, :ok, state |> activate(id, :incoming) |> dispatch()}
+
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      queue ->
+        case move_out(state, id, queue, :incoming, :requeued) do
+          :ok -> {:reply, :ok, state |> unindex(id) |> activate(id, :incoming) |> dispatch()}
+          error -> {:reply, error, state}
+        end
+    end
+  end
+
+  def handle_call({:reconfigure, opts}, _from, state) do
+    opts = build_opts(opts)
+    {:reply, :ok, dispatch(%{state | opts: %{opts | directory: state.opts.directory}})}
+  end
+
+  def handle_call(:drain, from, state) do
+    state = %{state | draining: true}
+
+    if map_size(state.running) == 0,
+      do: {:reply, :ok, state},
+      else: {:noreply, %{state | drain_waiters: [from | state.drain_waiters]}}
   end
 
   @impl true
@@ -391,6 +557,79 @@ defmodule Sovite.Core.QueueManager do
         if connection, do: connection |> elem(0) |> Client.quit()
         :ok
     end
+  end
+
+  ## Administration
+
+  # Which queue message `id` is in. Messages the manager has in memory
+  # are active or deferred; the others are found by their file.
+  defp locate(state, id) do
+    cond do
+      not ID.valid?(id) -> nil
+      Map.has_key?(state.messages, id) -> :active
+      Map.has_key?(state.deferred_due, id) -> :deferred
+      true -> Enum.find([:incoming, :hold, :corrupt], &File.exists?(file(state, &1, id)))
+    end
+  end
+
+  defp file(state, queue, id), do: Spool.path(state.opts.directory, queue, id)
+
+  defp move_out(state, id, from, to, event) do
+    case Spool.move(state.opts.directory, id, from, to) do
+      :ok -> admin_event(event, id)
+      {:error, _reason} -> {:error, :not_found}
+    end
+  end
+
+  defp admin_event(event, id),
+    do: :telemetry.execute([:sovite, :queue, :message, event], %{}, %{queue_id: id})
+
+  defp unindex(state, id) do
+    case Map.pop(state.deferred_due, id) do
+      {nil, _} ->
+        state
+
+      {due, deferred_due} ->
+        %{
+          state
+          | deferred: :gb_sets.delete({due, id}, state.deferred),
+            deferred_due: deferred_due,
+            deferred_domains: Map.delete(state.deferred_domains, id)
+        }
+    end
+  end
+
+  defp reschedule(state, id, due) do
+    old = Map.fetch!(state.deferred_due, id)
+
+    %{
+      state
+      | deferred: :gb_sets.add({due, id}, :gb_sets.delete({old, id}, state.deferred)),
+        deferred_due: Map.put(state.deferred_due, id, due)
+    }
+  end
+
+  # Holds or deletes an active message: its jobs that have not started
+  # are dropped, and it is finished when the running ones end.
+  defp finish_early(state, id, action) do
+    {state, dropped} = drop_ready_jobs(state, id)
+    message = %{state.messages[id] | after: action}
+    message = %{message | jobs: message.jobs - dropped}
+
+    if message.jobs == 0,
+      do: finalize(state, id, message),
+      else: put_in(state.messages[id], message)
+  end
+
+  defp drop_ready_jobs(state, id) do
+    Enum.reduce(state.ready, {%{state | ready: %{}}, 0}, fn {destination, jobs}, {state, n} ->
+      kept = :gb_sets.filter(fn {_priority, _seq, job} -> job.queue_id != id end, jobs)
+      n = n + :gb_sets.size(jobs) - :gb_sets.size(kept)
+
+      if :gb_sets.is_empty(kept),
+        do: {state, n},
+        else: {put_in(state.ready[destination], kept), n}
+    end)
   end
 
   defp in_node?(domain, {:domain, node}), do: domain == node
@@ -552,7 +791,9 @@ defmodule Sovite.Core.QueueManager do
       prefix: loaded.prefix,
       end_offset: loaded.end_offset,
       jobs: 0,
-      expired: false
+      expired: false,
+      # :hold, :delete, or :requeue, asked for while it was active.
+      after: nil
     }
 
     release = Envelope.release_time(loaded.envelope)
@@ -745,6 +986,7 @@ defmodule Sovite.Core.QueueManager do
 
   # Starts workers while there are free slots, serving the destination
   # that started a delivery least recently first.
+  defp dispatch(%{draining: true} = state), do: state
   defp dispatch(state) when map_size(state.running) >= state.opts.max_deliveries, do: state
 
   defp dispatch(state) do
@@ -841,11 +1083,14 @@ defmodule Sovite.Core.QueueManager do
         count -> Map.put(state.destination_running, worker.destination, count - 1)
       end
 
+    if running == %{}, do: Enum.each(state.drain_waiters, &GenServer.reply(&1, :ok))
+
     %{
       state
       | running: running,
         workers: Map.delete(state.workers, worker.pid),
-        destination_running: destination_running
+        destination_running: destination_running,
+        drain_waiters: if(running == %{}, do: [], else: state.drain_waiters)
     }
   end
 
@@ -896,6 +1141,9 @@ defmodule Sovite.Core.QueueManager do
   end
 
   ## Finishing an attempt
+
+  defp finalize(state, id, %{after: :delete} = message),
+    do: remove(state, id, message, :deleted)
 
   defp finalize(state, id, message) do
     {failures_notified, message} = notify_failures(state, message)
@@ -1032,9 +1280,10 @@ defmodule Sovite.Core.QueueManager do
     %{append(message, records) | expired: true}
   end
 
-  defp remove(state, id, message) do
+  defp remove(state, id, message, reason \\ nil) do
     reason =
       cond do
+        reason != nil -> reason
         message.expired -> :expired
         Entry.with_status(message.entry, :failed) != [] -> :bounced
         true -> :delivered
@@ -1058,8 +1307,13 @@ defmodule Sovite.Core.QueueManager do
     next_attempt = next_attempt(message.entry.envelope, delay)
     message = append(message, [{:retry, attempts, next_attempt}])
     state = %{state | messages: Map.delete(state.messages, id)}
+    queue = if message.after == :hold, do: :hold, else: :deferred
 
-    case Spool.move(state.opts.directory, id, :active, :deferred) do
+    case Spool.move(state.opts.directory, id, :active, queue) do
+      :ok when queue == :hold ->
+        admin_event(:held, id)
+        state
+
       :ok ->
         :telemetry.execute(
           [:sovite, :queue, :message, :deferred],
@@ -1067,12 +1321,14 @@ defmodule Sovite.Core.QueueManager do
           %{queue_id: id, next_attempt: DateTime.to_iso8601(next_attempt)}
         )
 
+        due =
+          if message.after == :requeue,
+            do: 0,
+            else: DateTime.to_unix(next_attempt, :millisecond)
+
         state
-        |> add_deferred(
-          id,
-          DateTime.to_unix(next_attempt, :millisecond),
-          pending_domains(message.entry)
-        )
+        |> add_deferred(id, due, pending_domains(message.entry))
+        |> activate_due()
         |> schedule_wake()
 
       {:error, reason} ->

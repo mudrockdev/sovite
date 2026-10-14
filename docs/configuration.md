@@ -31,6 +31,7 @@ Every setting is optional. A release ships a commented example at `etc/sovite.to
 |---|---|---|---|
 | `hostname` | hostname | system hostname | Fully qualified name used in the SMTP greeting, `EHLO`, and `Received:` headers. Set it explicitly: the system hostname is often not fully qualified. |
 | `authserv_id` | hostname | `hostname` | The name in the `Authentication-Results:` fields this server adds (RFC 8601). Fields with this name that arrive with a message are removed. Use the same value on all servers of one site. |
+| `shutdown_timeout` | duration | `30s` | How long a stopping server waits for SMTP sessions to finish their transaction and for running deliveries to end, before it cuts them off. See [Operations](operations.md#stopping-and-reloading). |
 
 ## `[database]`
 
@@ -914,6 +915,53 @@ Delivery status notifications (RFC 3464) are sent from `MAILER-DAEMON@<server.ho
 | `rotation` | `never` \| `hourly` \| `daily` \| `weekly` \| `monthly` | `daily` | Also start a new file when the hour, day, ISO week, or month changes. |
 | `max_files` | integer | `14` | Number of log files to keep, including the current one. Older files matching `file_name` are deleted after each rotation. `0` keeps all. |
 | `symlink` | file name | unset | Name of a symlink in `directory` that always points to the current file, for `tail -F`. |
+| `syslog` | boolean | `false` | Also send logs to a syslog daemon, instead of to standard output. With `directory` set, logs go to both. |
+| `syslog_address` | path or `host:port` | `/dev/log` | A local datagram socket (`/dev/log` for journald, rsyslog, or syslog-ng), or a remote daemon over UDP: `logs.example.com`, `192.0.2.1:514`, `[2001:db8::1]:514`. The port defaults to 514. |
+| `syslog_facility` | `mail` \| `daemon` \| `user` \| `local0` … `local7` | `mail` | The syslog facility. |
+| `syslog_format` | `rfc3164` \| `rfc5424` | `rfc3164` | The classic BSD format (`<22>Oct  4 12:00:00 sovite[812]: ...`), or RFC 5424. The message is the `text` line without its date and level, or the `json` object. |
+
+## `[admin]`
+
+The admin HTTP API, which `sovitectl` uses to act on the running server (queue changes, reloads, status), and which serves the Prometheus metrics. It listens on the loopback address only, and every request needs the token in `token_file`. See [Operations](operations.md#the-admin-api) for the requests.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Serve the admin API. Without it, `sovitectl queue` can only read the queue, and `config reload`, `config diff`, and `status` do not work. |
+| `address` | IP address | `127.0.0.1` | Address to listen on. |
+| `port` | integer | `9025` | TCP port. |
+| `token_file` | absolute path | `/var/lib/sovite/admin.token` | The bearer token. Created with a random token, mode `0600`, if it does not exist. `sovitectl` reads it, so it must run as root or the user Sovite runs as. |
+| `allowed_networks` | array of networks | `["127.0.0.0/8", "::1"]` | Clients outside these networks get `403`, token or not. |
+| `tls` | boolean | `false` | Serve HTTPS with the server's certificates (`[tls]`). |
+| `public_metrics` | boolean | `false` | Serve `/metrics` without the token, to clients in `allowed_networks`. |
+| `web_root` | absolute path | unset | Serve the files in this directory, such as a built status UI, for other `GET` requests. They need no token. |
+
+## `[metrics]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Serve Prometheus metrics at `/metrics` on the admin API. The metrics are listed in `Sovite.Core.Metrics`. |
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: sovite
+    authorization:
+      credentials_file: /var/lib/sovite/admin.token
+    static_configs:
+      - targets: ["127.0.0.1:9025"]
+```
+
+## `[tracing]`
+
+OpenTelemetry traces of SMTP sessions and deliveries, sent with OTLP over HTTP (JSON) to a collector such as the OpenTelemetry Collector, Jaeger, or Grafana Tempo. See `Sovite.Core.Tracing` for the spans.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Send traces. |
+| `endpoint` | URL | `http://127.0.0.1:4318/v1/traces` | The collector's OTLP/HTTP traces URL. `https` URLs are verified against the system CAs. |
+| `headers` | table of strings | `{}` | Extra request headers, such as `{ authorization = "Bearer ..." }`. |
+| `sample_ratio` | number, 0 to 1 | `1.0` | The share of traces sent. All the deliveries of one message are sampled together. |
+| `service_name` | string | `sovite` | The `service.name` resource attribute. |
 
 ---
 

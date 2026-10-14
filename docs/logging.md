@@ -30,6 +30,20 @@ A delivered message, from acceptance to removal:
 [info] queue_id=8CboABCDEFGHIJ event=queue.message.removed queue.message.removed: reason=delivered
 ```
 
+A message's lifecycle can be followed with `sovitectl trace`, by queue ID or `Message-ID`, and summarized with `sovitectl report`, in any of these formats (see [Operations](operations.md#tracing-a-message)).
+
+## Syslog
+
+With `[log] syslog = true`, logs go to a syslog daemon instead of standard output (and to files too, with `directory` set): to `/dev/log` by default, where journald, rsyslog, or syslog-ng read them, or over UDP to a remote daemon. In the classic BSD format (RFC 3164), with facility `mail`:
+
+```
+<22>Oct  4 12:00:00 sovite[812]: queue_id=4Xb2Kq event=queue.message.enqueued queue.message.enqueued: recipients=2, sender=a@example.com, size=1024
+```
+
+The syslog daemon adds the host name and writes the line where the `mail` facility goes, such as `/var/log/mail.log`. RFC 5424 (`syslog_format = "rfc5424"`) and JSON messages (`format = "json"`) work too. Lines are dropped, never waited for, when the daemon is not running or cannot keep up.
+
+Under systemd, standard output goes to the journal already, so `syslog` is only needed for a daemon that writes classic files or forwards them.
+
 ## Log Files
 
 By default, logs go to standard output, for systemd or a container runtime to collect. Set `[log] directory` to write rotating files instead, similar to pino-roll:
@@ -81,4 +95,4 @@ Failed logins look like this, ready for fail2ban:
 2026-10-04 12:00:00.000 [warning] session_id=... remote_ip=192.0.2.7 event=auth.failure auth.failure: mechanism=PLAIN, reason=invalid_credentials, username=alice@example.com
 ```
 
-The full event catalog, with measurements and metadata, is in the `Sovite.Core.Telemetry` module docs. Metrics exporters (Prometheus, OpenTelemetry; roadmap Phase 12) attach to the same events.
+The full event catalog, with measurements and metadata, is in the `Sovite.Core.Telemetry` module docs. The Prometheus metrics (`Sovite.Core.Metrics`) and OpenTelemetry traces (`Sovite.Core.Tracing`) are computed from the same events; see [Operations](operations.md#metrics-and-traces).

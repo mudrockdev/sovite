@@ -36,14 +36,18 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :tls, :acme, :issued]` | | `domains`, `not_after` |
   | `[:sovite, :tls, :acme, :failed]` | | `domains`, `reason` |
   | `[:sovite, :queue, :message, :enqueued]` | `size`, `recipients` | `queue_id`, `session_id`, `sender` |
-  | `[:sovite, :queue, :message, :removed]` | | `queue_id`, `reason` (`delivered`, `bounced`, `expired`) |
+  | `[:sovite, :queue, :message, :removed]` | | `queue_id`, `reason` (`delivered`, `bounced`, `expired`, `deleted`) |
   | `[:sovite, :queue, :message, :deferred]` | `attempts`, `recipients` | `queue_id`, `next_attempt` |
   | `[:sovite, :queue, :message, :corrupt]` | | `queue_id`, `reason` |
+  | `[:sovite, :queue, :message, :held]` | | `queue_id` |
+  | `[:sovite, :queue, :message, :released]` | | `queue_id` |
+  | `[:sovite, :queue, :message, :requeued]` | | `queue_id` |
   | `[:sovite, :queue, :notification, :sent]` | `recipients` | `queue_id`, `kind`, `to`, `notification_id` |
   | `[:sovite, :queue, :notification, :discarded]` | `recipients` | `queue_id`, `kind`, `sender` |
   | `[:sovite, :smtp, :client, :delivery, :start]` | `system_time` | `queue_id`, `relay` |
   | `[:sovite, :smtp, :client, :delivery, :stop]` | `duration` | `queue_id`, `relay`, `recipient`, `status`, `reply` |
   | `[:sovite, :smtp, :client, :delivery, :exception]` | `duration` | `queue_id`, `relay`, `kind`, `reason` |
+  | `[:sovite, :smtp, :message, :accepted]` | `recipients` | `session_id`, `queue_id`, `message_id`, `sender`, `remote_ip`, `helo`, `user` |
   | `[:sovite, :smtp, :message, :authenticated]` | | `session_id`, `queue_id`, `spf`, `dkim`, `arc`, `dmarc`, `disposition` |
   | `[:sovite, :dmarc, :report, :sent]` | `rows`, `messages` | `domain`, `report_id`, `queue_id`, `to` |
   | `[:sovite, :dmarc, :report, :skipped]` | `messages` | `domain`, `reason` |
@@ -53,22 +57,36 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :tls_rpt, :report, :sent]` | `sessions` | `domain`, `report_id`, `queue_id`, `to`, `urls` |
   | `[:sovite, :tls_rpt, :report, :skipped]` | `sessions` | `domain`, `reason` |
   | `[:sovite, :tls_rpt, :report, :post_failed]` | | `domain`, `url`, `reason` |
+  | `[:sovite, :config, :reloaded]` | | `path`, `changed` |
+  | `[:sovite, :config, :reload_failed]` | | `path`, `reason` |
+  | `[:sovite, :server, :drain, :start]` | `connections` | |
+  | `[:sovite, :server, :drain, :stop]` | `duration`, `connections` | `deliveries` |
+  | `[:sovite, :http, :request, :stop]` | `duration` | `listener`, `remote_ip`, `method`, `path`, `status` |
+  | `[:sovite, :http, :request, :exception]` | `duration` | `listener`, `remote_ip`, `method`, `path`, `kind`, `reason` |
+  | `[:sovite, :tracing, :export, :error]` | `spans` | `name`, `reason` |
+  | `[:sovite, :tracing, :spans, :dropped]` | `spans` | `name` |
+  | `[:sovite, :systemd, :watchdog, :skipped]` | | `reason` |
+
+  `smtp.message.accepted` links a received message's queue ID to its
+  session and `Message-ID`, so `sovitectl trace` can find it by either.
 
   Delivery `:stop` events come once per recipient; `status` is
   `:delivered`, `:deferred`, or `:failed`. `:notification` events are
   about the original message: `queue_id` is its ID, and `notification_id`
   the ID of the queued notification.
 
-  Message lifecycle events (`:queue`, delivery `:stop` and `:exception`),
-  authentication results of received mail, sent DMARC reports,
+  Message lifecycle events (`:queue`, delivery `:stop` and `:exception`,
+  accepted messages), administrator actions on the queue, config
+  reloads, draining, authentication results of received mail, sent DMARC reports,
   successful logins, certificate loads and ACME issuance, failed TLS
   handshakes, SMTP commands that got a 4xx or 5xx reply, clients the
   screen refused, exceeded rate limits, failed DNS list lookups, and
   connections without a valid PROXY protocol header are logged at
   `:info`. Corrupt messages, discarded notifications, failed logins,
   bans, suspended users, certificate errors, failed ACME orders,
-  `WARN` results of restrictions, and failed policy server requests are
-  logged at `:warning`.
+  `WARN` results of restrictions, failed policy server requests, failed
+  config reloads, admin API requests that crashed, failed trace exports,
+  and skipped watchdog pings are logged at `:warning`.
   All other events are logged at `:debug`.
 
   Failed logins are logged as `auth.failure: mechanism=PLAIN,
@@ -127,7 +145,20 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :tls, :mta_sts, :served],
     [:sovite, :tls_rpt, :report, :sent],
     [:sovite, :tls_rpt, :report, :skipped],
-    [:sovite, :tls_rpt, :report, :post_failed]
+    [:sovite, :tls_rpt, :report, :post_failed],
+    [:sovite, :queue, :message, :held],
+    [:sovite, :queue, :message, :released],
+    [:sovite, :queue, :message, :requeued],
+    [:sovite, :smtp, :message, :accepted],
+    [:sovite, :config, :reloaded],
+    [:sovite, :config, :reload_failed],
+    [:sovite, :server, :drain, :start],
+    [:sovite, :server, :drain, :stop],
+    [:sovite, :http, :request, :stop],
+    [:sovite, :http, :request, :exception],
+    [:sovite, :tracing, :export, :error],
+    [:sovite, :tracing, :spans, :dropped],
+    [:sovite, :systemd, :watchdog, :skipped]
   ]
 
   @info_events [
@@ -147,7 +178,14 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :abuse, :rate_limit, :exceeded],
     [:sovite, :abuse, :dnsbl, :error],
     [:sovite, :screen, :rejected],
-    [:sovite, :listener, :proxy, :error]
+    [:sovite, :listener, :proxy, :error],
+    [:sovite, :queue, :message, :held],
+    [:sovite, :queue, :message, :released],
+    [:sovite, :queue, :message, :requeued],
+    [:sovite, :smtp, :message, :accepted],
+    [:sovite, :config, :reloaded],
+    [:sovite, :server, :drain, :start],
+    [:sovite, :server, :drain, :stop]
   ]
 
   @warning_events [
@@ -161,7 +199,12 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :tls, :certificate, :error],
     [:sovite, :tls, :acme, :failed],
     [:sovite, :mta_sts, :failed],
-    [:sovite, :tls_rpt, :report, :post_failed]
+    [:sovite, :tls_rpt, :report, :post_failed],
+    [:sovite, :config, :reload_failed],
+    [:sovite, :http, :request, :exception],
+    [:sovite, :tracing, :export, :error],
+    [:sovite, :tracing, :spans, :dropped],
+    [:sovite, :systemd, :watchdog, :skipped]
   ]
 
   @doc "Returns every event in the catalog."

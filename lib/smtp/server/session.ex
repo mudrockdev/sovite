@@ -460,6 +460,19 @@ defmodule Sovite.SMTP.Server.Session do
     {:continue, [], session}
   end
 
+  @doc """
+  Whether the session is between transactions: no mail transaction,
+  message data, `AUTH` exchange, or TLS handshake in progress. A server
+  that shuts down gracefully closes idle sessions first, and the others
+  once they become idle.
+  """
+  @spec idle?(t()) :: boolean()
+  def idle?(%__MODULE__{phase: phase, transaction: nil, data: nil})
+      when phase == :command or (is_tuple(phase) and elem(phase, 0) == :greeting),
+      do: true
+
+  def idle?(%__MODULE__{}), do: false
+
   @doc "Milliseconds to wait for more input before calling `handle_timeout/1`."
   @spec timeout(t()) :: timeout()
   def timeout(%__MODULE__{phase: :data, opts: opts}), do: opts.data_timeout

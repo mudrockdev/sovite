@@ -4,14 +4,16 @@ defmodule Sovite.Core.Logging do
 
   Logs go to standard output through the VM's default `:logger` handler,
   or, when `directory` is set, to rotating files written by
-  `Sovite.Core.Logging.FileHandler`.
+  `Sovite.Core.Logging.FileHandler`. With `syslog`, they also go to the
+  syslog daemon (`Sovite.Core.Logging.SyslogHandler`), instead of to
+  standard output.
 
   Every log line about a message carries its queue ID in the `:queue_id`
   metadata key, so one message's lifecycle can be followed with grep.
   `metadata_keys/0` lists the standard keys. See `docs/logging.md`.
   """
 
-  alias Sovite.Core.Logging.{FileHandler, JSONFormatter}
+  alias Sovite.Core.Logging.{FileHandler, JSONFormatter, SyslogHandler}
 
   @metadata_keys [:queue_id, :session_id, :remote_ip, :event]
 
@@ -24,7 +26,11 @@ defmodule Sovite.Core.Logging do
           max_size: pos_integer(),
           rotation: FileHandler.rotation(),
           max_files: non_neg_integer(),
-          symlink: String.t() | nil
+          symlink: String.t() | nil,
+          syslog: boolean(),
+          syslog_address: {:unix, Path.t()} | {:udp, String.t() | :inet.ip_address(), 1..65_535},
+          syslog_facility: atom(),
+          syslog_format: :rfc3164 | :rfc5424
         }
 
   @doc """
@@ -50,16 +56,18 @@ defmodule Sovite.Core.Logging do
   end
 
   @doc """
-  Returns the child specs that write logs to files, or `[]` when logging
-  to standard output.
+  Returns the child specs that write logs to files and to syslog, or
+  `[]` when logging to standard output only.
 
-  The file handler silences the default handler while it runs, so lines
+  These handlers silence the default handler while they run, so lines
   are not written twice.
   """
   @spec child_specs(config()) :: [Supervisor.module_spec()]
-  def child_specs(%{directory: nil}), do: []
+  def child_specs(log), do: file_specs(log) ++ syslog_specs(log)
 
-  def child_specs(%{directory: _} = log) do
+  defp file_specs(%{directory: nil}), do: []
+
+  defp file_specs(log) do
     [
       {FileHandler,
        id: :sovite_file,
@@ -68,6 +76,34 @@ defmodule Sovite.Core.Logging do
        config: Map.take(log, FileHandler.config_keys())}
     ]
   end
+
+  defp syslog_specs(%{syslog: true} = log) do
+    # Syslog adds the time and severity itself.
+    formatter =
+      case log.format do
+        :text ->
+          Logger.Formatter.new(
+            format: "$metadata$message\n",
+            metadata: @metadata_keys,
+            colors: [enabled: false]
+          )
+
+        :json ->
+          formatter(:json)
+      end
+
+    [
+      {SyslogHandler,
+       id: :sovite_syslog,
+       address: log.syslog_address,
+       facility: log.syslog_facility,
+       format: log.syslog_format,
+       formatter: formatter,
+       replace: if(log.directory == nil, do: :default)}
+    ]
+  end
+
+  defp syslog_specs(_log), do: []
 
   @doc """
   Returns the `:logger` formatter for `format`.

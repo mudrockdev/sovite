@@ -28,3 +28,4 @@ sovite.toml
 
 # Bun workspace dependencies.
 /node_modules/
+/dist/

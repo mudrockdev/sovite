@@ -65,6 +65,28 @@ defmodule Sovite.Message.Headers do
     Enum.any?(fields, &(elem(&1, 0) == name))
   end
 
+  @doc """
+  Returns the value of the first field named `name` (case-insensitive),
+  unfolded and trimmed, or `nil`.
+
+      iex> fields = Sovite.Message.Headers.parse("Subject: a\r\n b\r\nTo: x@example.com\r\n")
+      iex> Sovite.Message.Headers.get(fields, "subject")
+      "a b"
+  """
+  @spec get([field()], String.t()) :: String.t() | nil
+  def get(fields, name) do
+    name = String.downcase(name, :ascii)
+
+    case List.keyfind(fields, name, 0) do
+      {_name, raw} ->
+        [_name, value] = :binary.split(raw, ":")
+        value |> String.replace(~r/\r?\n(?=[ \t])/, "") |> String.trim()
+
+      nil ->
+        nil
+    end
+  end
+
   @doc "Removes every field with one of `names` (case-insensitive)."
   @spec delete([field()], [String.t()]) :: [field()]
   def delete(fields, names) do
