@@ -110,6 +110,13 @@ defmodule Sovite.Core.Config do
         {:max_hops, {:integer, 1, 1000}, default: 50},
         {:requiretls, :boolean, default: true},
         {:smtputf8, :boolean, default: true},
+        {:chunking, :boolean, default: true},
+        {:binarymime, :boolean, default: false},
+        {:dsn, :boolean, default: true},
+        {:etrn, :boolean, default: true},
+        {:mt_priority, :boolean, default: true},
+        {:deliverby, :boolean, default: true},
+        {:rrvs, :boolean, default: true},
         {:tarpit_after, {:integer, 1, 1000}, default: 3},
         {:tarpit_delay, :duration, default: "1s"},
         {:forbid_unauth_pipelining, :boolean, default: true},
@@ -160,7 +167,8 @@ defmodule Sovite.Core.Config do
         {:tls_ca_file, :absolute_path, []},
         {:relayhost_username, :string, []},
         {:relayhost_password, :string, []},
-        {:source_address, {:list, :ip_address}, default: []}
+        {:source_address, {:list, :ip_address}, default: []},
+        {:chunking, :boolean, default: true}
       ]}, []},
     {:maildir, {:section, [{:local, :maildir_template, []}, {:mailbox, :maildir_template, []}]},
      []},
@@ -213,7 +221,13 @@ defmodule Sovite.Core.Config do
             {:required_scope, :string, []}
           ]}, []}
       ]}, []},
-    {:submission, {:section, [{:strip_headers, {:list, :string}, default: ["Return-Path"]}]}, []},
+    {:submission,
+     {:section,
+      [
+        {:strip_headers, {:list, :string}, default: ["Return-Path"]},
+        {:future_release, :boolean, default: true},
+        {:max_future_release, :duration, default: "7d"}
+      ]}, []},
     {:spf,
      {:section,
       [
@@ -357,7 +371,10 @@ defmodule Sovite.Core.Config do
       ]}, []},
     {:sendmail,
      {:section, [{:server, :relayhost, default: "[127.0.0.1]:25"}, {:origin, :domain, []}]}, []},
-    {:bounce, {:section, [{:double_bounce_recipient, :mailbox, []}]}, []},
+    {:bounce,
+     {:section,
+      [{:double_bounce_recipient, :mailbox, []}, {:size_limit, :byte_size, default: 50_000}]},
+     []},
     {:log,
      {:section,
       [
@@ -469,6 +486,13 @@ defmodule Sovite.Core.Config do
             max_hops: pos_integer(),
             requiretls: boolean(),
             smtputf8: boolean(),
+            chunking: boolean(),
+            binarymime: boolean(),
+            dsn: boolean(),
+            etrn: boolean(),
+            mt_priority: boolean(),
+            deliverby: boolean(),
+            rrvs: boolean(),
             tarpit_after: pos_integer(),
             tarpit_delay: pos_integer(),
             forbid_unauth_pipelining: boolean(),
@@ -501,7 +525,8 @@ defmodule Sovite.Core.Config do
             tls_ca_file: Path.t() | nil,
             relayhost_username: String.t() | nil,
             relayhost_password: String.t() | nil,
-            source_address: [:inet.ip_address()]
+            source_address: [:inet.ip_address()],
+            chunking: boolean()
           },
           maildir: %{local: String.t() | nil, mailbox: String.t() | nil},
           pipe: %{
@@ -515,7 +540,11 @@ defmodule Sovite.Core.Config do
             }
           },
           auth: map(),
-          submission: %{strip_headers: [String.t()]},
+          submission: %{
+            strip_headers: [String.t()],
+            future_release: boolean(),
+            max_future_release: pos_integer()
+          },
           spf: %{
             verify: boolean(),
             helo: boolean(),
@@ -625,7 +654,7 @@ defmodule Sovite.Core.Config do
           ],
           policy: %{timeout: pos_integer(), default_action: String.t()},
           sendmail: %{server: Sovite.Core.Transport.host(), origin: String.t() | nil},
-          bounce: %{double_bounce_recipient: String.t() | nil},
+          bounce: %{double_bounce_recipient: String.t() | nil, size_limit: pos_integer()},
           log: Sovite.Core.Logging.config()
         }
 

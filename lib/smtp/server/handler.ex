@@ -54,10 +54,16 @@ defmodule Sovite.SMTP.Server.Handler do
   @doc "`MAIL FROM`. `sender` is `\"\"` for the null reverse-path."
   @callback handle_mail(sender :: String.t(), Session.mail_params(), state()) :: result()
 
-  @doc "`RCPT TO`, after the session checked the recipient limit."
-  @callback handle_rcpt(recipient :: String.t(), state()) :: result()
+  @doc """
+  `RCPT TO`, after the session checked the recipient limit. `params` has
+  the DSN parameters, when the session offers `DSN`.
+  """
+  @callback handle_rcpt(recipient :: String.t(), Session.rcpt_params(), state()) :: result()
 
-  @doc "`DATA`, when the transaction has at least one recipient. Accept to get `354`."
+  @doc """
+  `DATA`, when the transaction has at least one recipient. Accept to get
+  `354`. With `BDAT`, called for the first chunk.
+  """
   @callback handle_data(Session.transaction(), state()) :: result()
 
   @doc """
@@ -67,17 +73,27 @@ defmodule Sovite.SMTP.Server.Handler do
   """
   @callback handle_data_chunk(iodata(), state()) :: {:ok, state()} | {:reply, Reply.t(), state()}
 
-  @doc "The final dot. Accept only once the message is safely stored."
+  @doc "The final dot, or `BDAT ... LAST`. Accept only once the message is safely stored."
   @callback handle_data_end(Session.transaction(), state()) :: result()
 
   @doc """
   The message was abandoned by the session: `:too_large`, `:bare_lf`,
-  `:bare_cr`, `:timeout`, or `:closed` (the connection ended).
+  `:bare_cr`, `:timeout`, `:closed` (the connection ended), or `:reset`
+  (the transaction was reset between `BDAT` chunks; `handle_rset/1`
+  follows).
   """
   @callback handle_data_abort(reason :: atom(), state()) :: state()
 
   @doc "`RSET`, or a new `EHLO`/`HELO` that resets the transaction."
   @callback handle_rset(state()) :: state()
+
+  @doc """
+  `ETRN` (RFC 1985), only when enabled: start delivering the mail queued
+  for `node`. Accept to get `250 Queuing started`; reply `251` when no
+  mail is waiting, `253` with the number of messages, `458` when it
+  cannot be done now, and `459` when the node is not allowed.
+  """
+  @callback handle_etrn(Sovite.SMTP.Command.etrn_node(), state()) :: result()
 
   @doc "`VRFY`, only when enabled. Without this callback the reply is `252`."
   @callback handle_vrfy(argument :: String.t(), state()) :: result()
@@ -136,6 +152,7 @@ defmodule Sovite.SMTP.Server.Handler do
   @optional_callbacks handle_greet: 2,
                       handle_rset: 1,
                       handle_vrfy: 2,
+                      handle_etrn: 2,
                       handle_tls: 2,
                       auth_mechanisms: 1,
                       handle_auth: 3,

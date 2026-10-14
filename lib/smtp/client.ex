@@ -14,7 +14,10 @@ defmodule Sovite.SMTP.Client do
   in one batch. `SIZE` (RFC 1870) and `BODY=8BITMIME` (RFC 6152) are sent
   when the server supports them, and `REQUIRETLS` (RFC 8689) and
   `SMTPUTF8` (RFC 6531) when asked for. The body is dot-stuffed while streaming
-  with `Sovite.SMTP.DataEncoder`.
+  with `Sovite.SMTP.DataEncoder`, or sent in `BDAT` chunks of up to 1 MiB
+  (`CHUNKING`, RFC 3030) when asked for and supported, and always for
+  `BINARYMIME`. DSN parameters (RFC 3461) are sent to servers that
+  support `DSN`, and left out for the others.
 
   Replies are parsed with `Sovite.SMTP.Reply.decode/2`, so a hostile
   server cannot make the client buffer without limit. Every wait has a
@@ -55,7 +58,7 @@ defmodule Sovite.SMTP.Client do
   """
 
   alias Sovite.SASL
-  alias Sovite.SMTP.{DataEncoder, Reply, XText}
+  alias Sovite.SMTP.{DataEncoder, DSNParams, Params, Reply, XText}
   alias Sovite.Validators
 
   @defaults [
@@ -141,10 +144,14 @@ defmodule Sovite.SMTP.Client do
       `REQUIRETLS`.
     * `:smtputf8_not_supported` - `smtputf8: true`, but the server does
       not offer `SMTPUTF8`.
+    * `:binarymime_not_supported` - a binary message (`body_type:
+      :binarymime`), but the server does not offer `BINARYMIME` and
+      `CHUNKING`.
   """
   @type refusal ::
           {:message_too_large, pos_integer()}
           | :eight_bit_not_supported
+          | :binarymime_not_supported
           | {:invalid_address, String.t()}
           | :requiretls_not_supported
           | :smtputf8_not_supported
@@ -155,6 +162,21 @@ defmodule Sovite.SMTP.Client do
   the message for this recipient.
   """
   @type result :: {recipient :: String.t(), stage(), Reply.t()}
+
+  @typedoc """
+  DSN parameters (RFC 3461) for `deliver/5`: `RET` and `ENVID` for the
+  message, and `NOTIFY` and `ORCPT` by recipient (`nil` when not given).
+  """
+  @type dsn :: %{
+          optional(:ret) => Sovite.SMTP.DSNParams.ret() | nil,
+          optional(:envid) => String.t() | nil,
+          optional(:recipients) => %{
+            String.t() => %{
+              optional(:notify) => Sovite.SMTP.DSNParams.notify() | nil,
+              optional(:orcpt) => Sovite.SMTP.DSNParams.orcpt() | nil
+            }
+          }
+        }
 
   @typedoc "Where to connect: an IP address, or a Unix socket."
   @type address :: :inet.ip_address() | {:local, Path.t()}
@@ -330,6 +352,10 @@ defmodule Sovite.SMTP.Client do
   @spec server_name(t()) :: String.t() | nil
   def server_name(%__MODULE__{server_name: name}), do: name
 
+  @doc "Returns `true` if the connection speaks LMTP."
+  @spec lmtp?(t()) :: boolean()
+  def lmtp?(%__MODULE__{opts: opts}), do: opts.protocol == :lmtp
+
   @doc """
   Returns the extensions the server announced: upper-cased keywords
   mapped to their parameters (`""` if none).
@@ -351,7 +377,18 @@ defmodule Sovite.SMTP.Client do
 
     * `:size` - the message size in bytes, sent with `SIZE` and checked
       against the server's limit.
-    * `:body_type` - `:"7bit"`, `:"8bitmime"`, or `nil` (not declared).
+    * `:body_type` - `:"7bit"`, `:"8bitmime"`, `:binarymime`, or `nil`
+      (not declared).
+    * `:chunking` - send the message with `BDAT` when the server offers
+      `CHUNKING`. Defaults to `false`.
+    * `:dsn` - DSN parameters, see `t:dsn/0`, sent when the server
+      offers `DSN`.
+    * `:priority` - `MT-PRIORITY` (RFC 6710), sent when the server offers
+      it.
+    * `:deliver_by` - `BY` (RFC 2852), with the seconds left now, sent
+      when the server offers `DELIVERBY`.
+    * `:rrvs` - `RRVS` (RFC 7293) by recipient, sent when the server
+      offers it.
     * `:requiretls` - send `REQUIRETLS`, so the server must relay the
       message only over verified TLS too (RFC 8689). Defaults to `false`.
     * `:smtputf8` - the message needs `SMTPUTF8` (RFC 6531): its
@@ -373,6 +410,7 @@ defmodule Sovite.SMTP.Client do
     requiretls = Keyword.get(opts, :requiretls, false)
     smtputf8 = Keyword.get(opts, :smtputf8, false)
     checks = %{size: size, body_type: body_type, requiretls: requiretls, smtputf8: smtputf8}
+    dsn = if Map.has_key?(client.extensions, "DSN"), do: Keyword.get(opts, :dsn)
 
     with :ok <- check(client, sender, recipients, checks),
          {:ok, client} <- xforward(client, Keyword.get(opts, :xforward)) do
@@ -382,10 +420,25 @@ defmodule Sovite.SMTP.Client do
         ">",
         mail_params(client, size, body_type),
         if(requiretls, do: " REQUIRETLS", else: []),
-        if(smtputf8, do: " SMTPUTF8", else: [])
+        if(smtputf8, do: " SMTPUTF8", else: []),
+        dsn_mail_params(dsn),
+        extension_params(client, opts)
       ]
 
-      run_transaction(client, mail, recipients, body)
+      rrvs =
+        if Map.has_key?(client.extensions, "RRVS"), do: Keyword.get(opts, :rrvs, %{}), else: %{}
+
+      rcpts =
+        Enum.map(recipients, fn rcpt ->
+          {rcpt,
+           ["RCPT TO:<", rcpt, ">", dsn_rcpt_params(dsn, rcpt, smtputf8), rrvs_param(rrvs, rcpt)]}
+        end)
+
+      chunked =
+        body_type == :binarymime or
+          (Keyword.get(opts, :chunking, false) and Map.has_key?(client.extensions, "CHUNKING"))
+
+      run_transaction(client, mail, rcpts, body, chunked)
     else
       {:error, {:xforward, _reason}} = error -> error
       {:error, refusal} -> {:error, client, refusal}
@@ -493,13 +546,19 @@ defmodule Sovite.SMTP.Client do
       limit && size && size > limit ->
         {:error, {:message_too_large, limit}}
 
-      body_type == :"8bitmime" and not Map.has_key?(client.extensions, "8BITMIME") ->
-        {:error, :eight_bit_not_supported}
-
       true ->
-        :ok
+        check_body(client.extensions, body_type)
     end
   end
+
+  defp check_body(extensions, :"8bitmime") when not is_map_key(extensions, "8BITMIME"),
+    do: {:error, :eight_bit_not_supported}
+
+  defp check_body(extensions, :binarymime)
+       when not is_map_key(extensions, "BINARYMIME") or not is_map_key(extensions, "CHUNKING"),
+       do: {:error, :binarymime_not_supported}
+
+  defp check_body(_extensions, _body_type), do: :ok
 
   defp invalid_address?("", _utf8), do: false
   defp invalid_address?(address, utf8), do: not Validators.mailbox?(address, utf8: utf8)
@@ -521,11 +580,67 @@ defmodule Sovite.SMTP.Client do
         else: []
 
     body =
-      if body_type && Map.has_key?(client.extensions, "8BITMIME"),
-        do: [" BODY=", if(body_type == :"8bitmime", do: "8BITMIME", else: "7BIT")],
-        else: []
+      cond do
+        body_type == :binarymime ->
+          " BODY=BINARYMIME"
+
+        body_type && Map.has_key?(client.extensions, "8BITMIME") ->
+          [" BODY=", body_name(body_type)]
+
+        true ->
+          []
+      end
 
     [size, body]
+  end
+
+  defp body_name(:"8bitmime"), do: "8BITMIME"
+  defp body_name(:"7bit"), do: "7BIT"
+
+  defp dsn_mail_params(nil), do: []
+
+  defp dsn_mail_params(dsn) do
+    [
+      if(dsn[:ret], do: [" RET=", DSNParams.encode_ret(dsn.ret)], else: []),
+      if(dsn[:envid], do: [" ENVID=", DSNParams.encode_envid(dsn.envid)], else: [])
+    ]
+  end
+
+  defp extension_params(client, opts) do
+    priority = Keyword.get(opts, :priority)
+    by = Keyword.get(opts, :deliver_by)
+
+    [
+      if(priority && Map.has_key?(client.extensions, "MT-PRIORITY"),
+        do: [" MT-PRIORITY=", Integer.to_string(priority)],
+        else: []
+      ),
+      if(by && Map.has_key?(client.extensions, "DELIVERBY"),
+        do: [" BY=", Params.encode_by(by)],
+        else: []
+      )
+    ]
+  end
+
+  defp rrvs_param(rrvs, rcpt) do
+    case Map.fetch(rrvs, rcpt) do
+      {:ok, value} -> [" RRVS=", Params.encode_rrvs(value)]
+      :error -> []
+    end
+  end
+
+  defp dsn_rcpt_params(nil, _rcpt, _smtputf8), do: []
+
+  defp dsn_rcpt_params(dsn, rcpt, smtputf8) do
+    params = dsn |> Map.get(:recipients, %{}) |> Map.get(rcpt, %{})
+
+    [
+      if(params[:notify], do: [" NOTIFY=", DSNParams.encode_notify(params.notify)], else: []),
+      if(params[:orcpt],
+        do: [" ORCPT=", DSNParams.encode_orcpt(params.orcpt, smtputf8: smtputf8)],
+        else: []
+      )
+    ]
   end
 
   @xforward_names [
@@ -539,6 +654,8 @@ defmodule Sovite.SMTP.Client do
   ]
 
   # Postfix limits each XFORWARD command to 512 bytes.
+  @chunk_size 1024 * 1024
+
   @xforward_line 512
 
   defp xforward(client, attributes) when is_map(attributes) and map_size(attributes) > 0 do
@@ -590,14 +707,31 @@ defmodule Sovite.SMTP.Client do
     |> Enum.map(&("XFORWARD " <> Enum.join(Enum.reverse(&1), " ")))
   end
 
-  defp run_transaction(client, mail, recipients, body) do
+  # `rcpts` are {recipient, RCPT command} pairs.
+  defp run_transaction(client, mail, rcpts, body, chunked) do
     if Map.has_key?(client.extensions, "PIPELINING"),
-      do: pipelined(client, mail, recipients, body),
-      else: sequential(client, mail, recipients, body)
+      do: pipelined(client, mail, rcpts, body, chunked),
+      else: sequential(client, mail, rcpts, body, chunked)
   end
 
-  defp pipelined(client, mail, recipients, body) do
-    commands = [mail | Enum.map(recipients, &["RCPT TO:<", &1, ">"])] ++ ["DATA"]
+  # With BDAT, the first chunk waits for the RCPT replies.
+  defp pipelined(client, mail, rcpts, body, true) do
+    recipients = Enum.map(rcpts, &elem(&1, 0))
+    read_rcpt = &read_reply(&1, :rcpt, &1.opts.command_timeout)
+
+    with :ok <- send_lines(client, [mail | Enum.map(rcpts, &elem(&1, 1))], :mail),
+         {:ok, mail_reply, client} <- read_reply(client, :mail, client.opts.command_timeout),
+         {:ok, rcpt_replies, client} <-
+           collect(client, recipients, fn client, _rcpt -> read_rcpt.(client) end) do
+      if Reply.positive?(mail_reply),
+        do: after_rcpts(client, rcpt_replies, body),
+        else: {:ok, client, all(recipients, :mail, mail_reply)}
+    end
+  end
+
+  defp pipelined(client, mail, rcpts, body, false) do
+    recipients = Enum.map(rcpts, &elem(&1, 0))
+    commands = [mail | Enum.map(rcpts, &elem(&1, 1))] ++ ["DATA"]
     read_rcpt = &read_reply(&1, :rcpt, &1.opts.command_timeout)
 
     with :ok <- send_lines(client, commands, :mail),
@@ -612,21 +746,82 @@ defmodule Sovite.SMTP.Client do
     end
   end
 
-  defp sequential(client, mail, recipients, body) do
+  defp sequential(client, mail, rcpts, body, chunked) do
     with {:ok, mail_reply, client} <- command(client, :mail, mail) do
       if Reply.positive?(mail_reply),
-        do: sequential_rcpts(client, recipients, body),
-        else: {:ok, client, all(recipients, :mail, mail_reply)}
+        do: sequential_rcpts(client, rcpts, body, chunked),
+        else: {:ok, client, all(Enum.map(rcpts, &elem(&1, 0)), :mail, mail_reply)}
     end
   end
 
-  defp sequential_rcpts(client, recipients, body) do
-    send_rcpt = &command(&1, :rcpt, ["RCPT TO:<", &2, ">"])
+  defp sequential_rcpts(client, rcpts, body, chunked) do
+    commands = Map.new(rcpts)
+    send_rcpt = &command(&1, :rcpt, Map.fetch!(commands, &2))
 
-    with {:ok, rcpt_replies, client} <- collect(client, recipients, send_rcpt),
-         {:ok, data_reply, client} <- send_data_command(client, rcpt_replies) do
-      after_data_reply(client, rcpt_replies, data_reply, body)
+    with {:ok, rcpt_replies, client} <- collect(client, Enum.map(rcpts, &elem(&1, 0)), send_rcpt) do
+      if chunked,
+        do: after_rcpts(client, rcpt_replies, body),
+        else: send_data(client, rcpt_replies, body)
     end
+  end
+
+  defp send_data(client, rcpt_replies, body) do
+    with {:ok, data_reply, client} <- send_data_command(client, rcpt_replies),
+         do: after_data_reply(client, rcpt_replies, data_reply, body)
+  end
+
+  defp after_rcpts(client, rcpt_replies, body) do
+    if accepted(rcpt_replies) == [] do
+      with {:ok, client} <- reset(client), do: {:ok, client, rejected(rcpt_replies)}
+    else
+      send_chunks(client, rcpt_replies, body)
+    end
+  end
+
+  # BDAT chunks of up to @chunk_size, each answered before the next is
+  # sent; the rest goes with LAST.
+  defp send_chunks(client, rcpt_replies, body) do
+    accepted = accepted(rcpt_replies)
+
+    case Enum.reduce_while(body, {:ok, client, [], 0}, &add_chunk/2) do
+      {:ok, client, buffer, size} ->
+        count = if lmtp?(client), do: length(accepted), else: 1
+
+        with :ok <-
+               send_raw(
+                 client,
+                 ["BDAT ", Integer.to_string(size), " LAST\r\n", buffer],
+                 :data_end
+               ),
+             {:ok, replies, client} <- read_data_end(client, count) do
+          {:ok, client, rejected(rcpt_replies) ++ data_end_results(accepted, replies)}
+        end
+
+      {:refused, client, reply} ->
+        with {:ok, client} <- reset(client),
+             do: {:ok, client, rejected(rcpt_replies) ++ all(accepted, :data, reply)}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp add_chunk(chunk, {:ok, client, buffer, size}) do
+    buffer = [buffer | chunk]
+    size = size + IO.iodata_length(chunk)
+
+    if size < @chunk_size,
+      do: {:cont, {:ok, client, buffer, size}},
+      else: chunk_sent(send_chunk(client, buffer, size))
+  end
+
+  defp chunk_sent({:ok, %Reply{code: 250}, client}), do: {:cont, {:ok, client, [], 0}}
+  defp chunk_sent({:ok, reply, client}), do: {:halt, {:refused, client, reply}}
+  defp chunk_sent({:error, _} = error), do: {:halt, error}
+
+  defp send_chunk(client, data, size) do
+    with :ok <- send_raw(client, ["BDAT ", Integer.to_string(size), "\r\n", data], :data),
+         do: read_reply(client, :data, client.opts.data_timeout)
   end
 
   # Without an accepted recipient there is nothing to send.
@@ -722,8 +917,6 @@ defmodule Sovite.SMTP.Client do
 
   defp data_end_results(accepted, replies),
     do: Enum.zip_with(accepted, replies, &{&1, :data_end, &2})
-
-  defp lmtp?(client), do: client.opts.protocol == :lmtp
 
   defp accepted(rcpt_replies),
     do: for({rcpt, reply} <- rcpt_replies, Reply.positive?(reply), do: rcpt)

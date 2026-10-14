@@ -181,6 +181,13 @@ Settings for all listeners. Limits apply per listener.
 | `max_hops` | integer | `50` | A message with more `Received:` fields than this is refused with `554 5.4.6 Too many hops`: it is most likely in a mail loop (RFC 5321 §6.3). |
 | `requiretls` | boolean | `true` | Offer `REQUIRETLS` (RFC 8689) on encrypted connections, except LMTP. A message sent with it is only relayed over TLS verified with DANE or MTA-STS, see [REQUIRETLS](#requiretls). |
 | `smtputf8` | boolean | `true` | Offer `SMTPUTF8` (RFC 6531): accept internationalized mail, see [Internationalized mail](#internationalized-mail). |
+| `chunking` | boolean | `true` | Offer `CHUNKING` (RFC 3030): clients may send the message in `BDAT` chunks instead of with `DATA`, see [ESMTP extensions](#esmtp-extensions). |
+| `binarymime` | boolean | `false` | Offer `BINARYMIME` (RFC 3030) along with `CHUNKING`: accept binary messages. They can only be relayed to servers that support `BINARYMIME` too, and bounce otherwise, so leave this off unless your next hops do. |
+| `dsn` | boolean | `true` | Offer `DSN` (RFC 3461): clients choose which delivery status notifications they get, see [ESMTP extensions](#esmtp-extensions). |
+| `etrn` | boolean | `true` | Offer `ETRN` (RFC 1985) on `smtp` listeners: a client asks for the mail queued for its relay domain to be sent now. |
+| `mt_priority` | boolean | `true` | Offer `MT-PRIORITY` (RFC 6710): message priorities from -9 to 9. |
+| `deliverby` | boolean | `true` | Offer `DELIVERBY` (RFC 2852): delivery deadlines. |
+| `rrvs` | boolean | `true` | Offer `RRVS` (RFC 7293): refuse mail for a mailbox whose owner may have changed. |
 | `tarpit_after` | integer | `3` | Error replies before the tarpit starts. |
 | `tarpit_delay` | duration | `1s` | From the `tarpit_after`th error reply on, each one is sent this much later, slowing down dictionary attacks and other clients that keep getting errors. |
 | `forbid_unauth_pipelining` | boolean | `true` | Disconnect a client with `554 5.5.0` when it sends more commands without waiting for the reply to one that must end a group (`EHLO`, `DATA`, `NOOP`, ..., RFC 2920 §3.1), or pipelines at all before `PIPELINING` was offered. Spam bots and SMTP smuggling attempts do this; real servers do not. Not on LMTP listeners. |
@@ -191,6 +198,16 @@ Settings for all listeners. Limits apply per listener.
 | `proxy_timeout` | duration | `10s` | How long to wait for the PROXY header. |
 
 HTTP requests and header lines (cross-protocol attacks) close the session with `421 4.7.0`.
+
+### ESMTP extensions
+
+- **`CHUNKING` and `BINARYMIME`** (RFC 3030). A client may send `BDAT <size>` and the message in chunks of exactly that many bytes, the last one with `BDAT <size> LAST`, instead of `DATA`. There is no dot-stuffing; bare line endings get the `bare_line_endings` policy all the same. A chunk is always read to its end, also when it is refused, so its content is never taken for commands. With `binarymime`, `MAIL FROM:<...> BODY=BINARYMIME` announces a binary message, which must be sent with `BDAT`. When delivering, Sovite uses `BDAT` for servers that offer `CHUNKING` (`delivery.chunking`).
+- **`DSN`** (RFC 3461). `RCPT TO:<...> NOTIFY=SUCCESS,FAILURE,DELAY` (or `NOTIFY=NEVER`) chooses which notifications the sender gets about that recipient, `ORCPT=rfc822;address` names the address it was originally sent to, `MAIL FROM:<...> RET=FULL` (or `HDRS`) asks for the whole message (or only its header fields) back in a failure notification, and `ENVID=...` gives an ID that notifications quote. Without `NOTIFY`, failures and delays are reported, as before. These parameters are passed on to next hops that support `DSN`. A recipient delivered to a mailbox here is reported as "delivered" when `SUCCESS` was asked for, and one delivered to a server without `DSN` as "relayed". An alias that forwards to one address passes the parameters on; one that expands to several passes them on without `SUCCESS`, and is itself reported as "expanded" (RFC 3461 §5.2.7.3).
+- **`MT-PRIORITY`** (RFC 6710). `MAIL FROM:<...> MT-PRIORITY=3` gives a message a priority from -9 to 9 (0 by default): messages to the same destination are sent in priority order, and the priority goes to next hops that support it. Clients that are neither trusted nor authenticated may lower it, not raise it. The `Received:` field shows it (`PRIORITY 3`).
+- **`FUTURERELEASE`** (RFC 4865). On submission listeners, an authenticated client may send `MAIL FROM:<...> HOLDFOR=3600` or `HOLDUNTIL=2026-10-20T08:00:00Z`: the message waits in the queue until then, up to `submission.max_future_release` ahead, and its `queue.max_lifetime` starts at its release.
+- **`DELIVERBY`** (RFC 2852). `MAIL FROM:<...> BY=3600;R` asks for delivery within an hour, or the message is returned (`5.4.7`); it then only goes to next hops that support `DELIVERBY`, which get the time left. `BY=3600;N` sends a delay notification when the hour is up instead, and a "relayed" notification when the message goes to a server without `DELIVERBY`; `T` (`BY=3600;RT`) asks for "relayed" notifications on the way.
+- **`RRVS`** (RFC 7293). `RCPT TO:<...> RRVS=2014-04-03T23:01:00Z` asks that the recipient's mailbox has had the same owner since then. A mailbox here that was added later (`sovitectl mailbox add`) gets `550 5.7.17`; other local recipients, and role accounts such as `postmaster`, pass. For a relayed recipient the parameter goes to the next hop, which must support `RRVS`: otherwise it fails with `5.7.19`, or with `;C` goes on without.
+- **`ETRN`** (RFC 1985). `ETRN example.net` retries the deferred mail for a relay domain now, `ETRN @example.net` for it and its subdomains, as a backup MX does when the primary comes back. Only for relay domains (`domains.relay`, or `relay` in the database), at most once a minute per domain; others get `459`.
 
 ### Internationalized mail
 
@@ -306,6 +323,7 @@ Outbound delivery over SMTP, for the `smtp` transport.
 | `tls_ca_file` | absolute path | system CAs | PEM file of CAs to trust for `verify`. |
 | `relayhost_username` | string | unset | Log in to the relay host with SASL (`SCRAM-SHA-256`, `PLAIN`, or `LOGIN`, whichever it offers first). Credentials are only sent over TLS. |
 | `relayhost_password` | string | unset | Password for `relayhost_username`. |
+| `chunking` | boolean | `true` | Send messages in `BDAT` chunks (RFC 3030) to servers that offer `CHUNKING`. Binary messages always are, and only go to servers that offer `BINARYMIME` (`5.6.3` otherwise). |
 
 ### How mail is delivered
 
@@ -775,6 +793,8 @@ Set `auth.mechanisms` to what Dovecot offers if it is more than `PLAIN` and `LOG
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `strip_headers` | array of strings | `["Return-Path"]` | Header fields removed from messages of authenticated clients. Add `"X-Originating-IP"` and similar to hide client details. |
+| `future_release` | boolean | `true` | Offer `FUTURERELEASE` (RFC 4865) on submission listeners: authenticated clients may hold messages for later, see [ESMTP extensions](#esmtp-extensions). |
+| `max_future_release` | duration | `7d` | How far ahead a message may be held. |
 
 ## Email authentication
 
@@ -874,11 +894,12 @@ The Sender Rewriting Scheme lets this server forward mail without breaking SPF a
 
 ## `[bounce]`
 
-Delivery status notifications (RFC 3464) are sent from `MAILER-DAEMON@<server.hostname>` with the null sender `<>`. They contain an explanation, a machine-readable report, and the headers of the original message (not its body).
+Delivery status notifications (RFC 3464) are sent from `MAILER-DAEMON@<server.hostname>` with the null sender `<>`. They contain an explanation, a machine-readable report, and the headers of the original message (not its body). A failure notification about a message sent with `RET=FULL` (see [ESMTP extensions](#esmtp-extensions)) returns the whole message instead, unless it is larger than `size_limit`, binary, or was sent with `REQUIRETLS`. Which recipients are reported depends on their `NOTIFY` parameters.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `double_bounce_recipient` | email address | unset | Where to report a notification, or any other message from the null sender, that could not be delivered. Unset: such double bounces are only logged. A failed double-bounce report is never reported again. |
+| `size_limit` | size | `50000` | The largest message a failure notification returns whole, for `RET=FULL`. Larger ones get their header fields returned. |
 
 ## `[log]`
 

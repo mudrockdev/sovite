@@ -134,7 +134,7 @@ defmodule Sovite.SMTP.ClientTLSTest do
       def init(_connection, users), do: {:ok, %{users: users, sasl: nil}}
       def handle_helo(_kind, _name, state), do: {:ok, state}
       def handle_mail(_s, _p, state), do: {:ok, state}
-      def handle_rcpt(_r, state), do: {:ok, state}
+      def handle_rcpt(_r, _params, state), do: {:ok, state}
       def handle_data(_t, state), do: {:ok, state}
       def handle_data_chunk(_c, state), do: {:ok, state}
       def handle_data_end(_t, state), do: {:ok, state}

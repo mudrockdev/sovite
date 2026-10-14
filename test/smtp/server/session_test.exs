@@ -1,7 +1,7 @@
 defmodule Sovite.SMTP.Server.SessionTest do
   use ExUnit.Case, async: true
 
-  alias Sovite.SMTP.Reply
+  alias Sovite.SMTP.{Params, Reply}
   alias Sovite.SMTP.Server.Session
 
   defmodule Handler do
@@ -24,7 +24,13 @@ defmodule Sovite.SMTP.Server.SessionTest do
     @impl true
     def handle_mail(sender, params, state), do: respond(:mail, {sender, params}, state)
     @impl true
-    def handle_rcpt(recipient, state), do: respond(:rcpt, recipient, state)
+    def handle_rcpt(recipient, params, state) do
+      send(state.test, {:rcpt_params, recipient, params})
+      respond(:rcpt, recipient, state)
+    end
+
+    @impl true
+    def handle_etrn(node, state), do: respond(:etrn, node, state)
     @impl true
     def handle_data(transaction, state), do: respond(:data, transaction, state)
     @impl true
@@ -1155,6 +1161,419 @@ defmodule Sovite.SMTP.Server.SessionTest do
 
       {:continue, out, _} = input(session, "XFORWARD ADDR=[UNAVAILABLE]\r\n")
       assert codes(out) == [250]
+    end
+  end
+
+  describe "CHUNKING" do
+    defp chunking(handler_opts \\ [], opts \\ []),
+      do: in_transaction(handler_opts, Keyword.merge([chunking: true], opts))
+
+    test "is offered on request" do
+      {:continue, out, _} = input(started(), "EHLO c.test\r\n")
+      refute out =~ "CHUNKING"
+
+      {:continue, out, _} = input(started([], chunking: true), "EHLO c.test\r\n")
+      assert out =~ ~r"250[- ]CHUNKING\r\n"
+      refute out =~ "BINARYMIME"
+
+      {:continue, out, _} =
+        input(started([], chunking: true, binarymime: true), "EHLO c.test\r\n")
+
+      assert out =~ ~r"250-CHUNKING\r\n250[- ]BINARYMIME\r\n"
+    end
+
+    test "receives a message in chunks, without dot-stuffing" do
+      session = chunking()
+      {:continue, out, session} = input(session, "BDAT 13\r\nSubject: hi\r\n")
+      assert replies(out) == ["250 2.0.0 13 octets received"]
+      assert_received {:data, %{recipients: ["b@y.test"]}}
+      assert_received {:chunk, "Subject: hi\r\n"}
+
+      # A chunk may arrive in parts, and the next command right after it.
+      {:continue, "", session} = input(session, "BDAT 11 LAST\r\n\r\n.d")
+      assert Session.timeout(session) == 300_000
+      {:continue, out, session} = input(session, "ot\r\n.\r\nNOOP\r\n")
+
+      assert replies(out) == ["250 2.0.0 Ok", "250 2.0.0 Ok"]
+      assert_received {:chunk, "\r\n.d"}
+      assert_received {:chunk, "ot\r\n.\r\n"}
+      assert_received {:data_end, %{sender: "a@x.test"}}
+
+      # The transaction is over.
+      {:continue, out, _} = input(session, "BDAT 0 LAST\r\n")
+      assert replies(out) == ["503 5.5.1 Need MAIL command"]
+    end
+
+    test "BDAT 0 LAST ends the message" do
+      {:continue, out, _} = input(chunking(), "BDAT 2\r\nabBDAT 0 LAST\r\n")
+      assert codes(out) == [250, 250]
+      assert_received {:chunk, "ab"}
+      assert_received {:data_end, _}
+    end
+
+    test "reads refused chunks, so their content is never taken for commands" do
+      {:continue, out, session} = input(started(), "EHLO c.test\r\nBDAT 6\r\nQUIT\r\n")
+      assert replies(out) |> tl() == ["502 5.5.1 Command not implemented"]
+
+      {:continue, out, _} =
+        input(session, "MAIL FROM:<a@x.test>\r\nBDAT 6 LAST\r\nQUIT\r\n")
+
+      assert codes(out) == [250, 502]
+
+      session = started([], chunking: true)
+      {:continue, out, session} = input(session, "EHLO c.test\r\nBDAT 6\r\nQUIT\r\n")
+      assert replies(out) |> tl() == ["503 5.5.1 Need MAIL command"]
+
+      {:continue, out, _} = input(session, "MAIL FROM:<a@x.test>\r\nBDAT 6 LAST\r\nQUIT\r\n")
+      assert replies(out) |> tl() == ["554 5.5.1 No valid recipients"]
+    end
+
+    test "a refused message refuses every chunk, and the last one ends the transaction" do
+      reject = fn _transaction, state -> {:reply, Reply.new(554, "5.7.1", "No"), state} end
+      session = chunking(data: reject)
+
+      {:continue, out, session} = input(session, "BDAT 2\r\nabBDAT 2\r\ncdBDAT 2 LAST\r\nef")
+      assert codes(out) == [554, 554, 554]
+      refute_received {:chunk, _}
+      refute_received {:data_end, _}
+
+      {:continue, out, _} = input(session, "RCPT TO:<b@y.test>\r\n")
+      assert replies(out) == ["503 5.5.1 Need MAIL command"]
+    end
+
+    test "a handler that closes on the first chunk closes the session" do
+      close = fn _transaction, state -> {:close, Reply.new(421, "4.3.0", "Bye"), state} end
+      assert {:close, out, _} = input(chunking(data: close), "BDAT 2\r\nab")
+      assert replies(out) == ["421 4.3.0 Bye"]
+    end
+
+    test "a message that is too large is refused at every chunk after" do
+      session = chunking([], max_message_size: 10)
+      {:continue, out, session} = input(session, "BDAT 8\r\n12345678BDAT 8\r\n12345678")
+      assert codes(out) == [250, 552]
+      assert_received {:abort, :too_large}
+
+      {:continue, out, _} = input(session, "BDAT 1 LAST\r\nx")
+      assert codes(out) == [552]
+      refute_received {:data_end, _}
+    end
+
+    test "a handler error is replied to the chunk" do
+      fail = fn _chunk, state -> {:reply, Reply.new(451, "4.3.0", "Disk full"), state} end
+      {:continue, out, _} = input(chunking(chunk: fail), "BDAT 1\r\naBDAT 1 LAST\r\nb")
+      assert codes(out) == [451, 451]
+    end
+
+    test "commands that do not fit between chunks" do
+      {:continue, out, session} = input(chunking(), "BDAT 1\r\na")
+      assert codes(out) == [250]
+
+      {:continue, out, session} =
+        input(session, "RCPT TO:<c@y.test>\r\nDATA\r\nMAIL FROM:<a@x.test>\r\nNOOP\r\n")
+
+      assert replies(out) == [
+               "503 5.5.1 Error: BDAT in progress",
+               "503 5.5.1 Error: BDAT in progress",
+               "503 5.5.1 Nested MAIL command",
+               "250 2.0.0 Ok"
+             ]
+
+      # RSET drops the message.
+      {:continue, out, _} = input(session, "RSET\r\n")
+      assert codes(out) == [250]
+      assert_received {:abort, :reset}
+      assert_received :rset
+    end
+
+    test "bare line endings get the policy" do
+      assert {:close, out, _} = input(chunking(), "BDAT 4\r\nab\nc")
+      assert replies(out) == ["521 5.5.2 mx.test Error: bare <LF> received"]
+      assert_received {:abort, :bare_lf}
+
+      # A CR at the end of a chunk may be followed by the LF in the next.
+      {:continue, out, session} = input(chunking(), "BDAT 3\r\nab\rBDAT 1\r\n\n")
+      assert codes(out) == [250, 250]
+      assert {:close, out, _} = input(session, "BDAT 2 LAST\r\nc\r")
+      assert replies(out) == ["521 5.5.2 mx.test Error: bare <CR> received"]
+
+      {:continue, out, _} =
+        input(chunking([], bare_line_endings: :normalize), "BDAT 6 LAST\r\na\nb\rc\r")
+
+      assert codes(out) == [250]
+      assert_received {:chunk, "a\r\nb\r\nc"}
+      assert_received {:chunk, "\r\n"}
+    end
+
+    test "timeouts and closed connections abort the message" do
+      {:continue, _, session} = input(chunking(), "BDAT 10\r\nabc")
+      assert {:close, out, _} = Session.handle_timeout(session)
+      assert codes(IO.iodata_to_binary(out)) == [421]
+      assert_received {:abort, :timeout}
+
+      {:continue, _, session} = input(chunking(), "BDAT 3\r\nabc")
+      :ok = Session.terminate(session, :closed)
+      assert_received {:abort, :closed}
+    end
+
+    test "BINARYMIME needs BDAT, and its content is passed on as it is" do
+      session = started([], chunking: true, binarymime: true)
+
+      {:continue, out, session} =
+        input(
+          session,
+          "EHLO c.test\r\nMAIL FROM:<a@x.test> BODY=BINARYMIME\r\nRCPT TO:<b@y.test>\r\nDATA\r\n"
+        )
+
+      assert replies(out) |> tl() == [
+               "250 2.1.0 Ok",
+               "250 2.1.5 Ok",
+               "503 5.5.1 BODY=BINARYMIME needs BDAT"
+             ]
+
+      assert_received {:mail, {"a@x.test", %{body: :binarymime}}}
+
+      {:continue, out, _} = input(session, "BDAT 5 LAST\r\n\0\n\r\xFF.")
+      assert codes(out) == [250]
+      assert_received {:chunk, "\0\n\r\xFF."}
+      assert_received {:data_end, %{params: %{body: :binarymime}}}
+    end
+
+    test "BODY=BINARYMIME is refused unless offered" do
+      {:continue, out, _} =
+        input(
+          started([], chunking: true),
+          "EHLO c.test\r\nMAIL FROM:<a@x.test> BODY=BINARYMIME\r\n"
+        )
+
+      assert replies(out) |> tl() == ["501 5.5.4 Invalid BODY parameter"]
+    end
+
+    test "LMTP answers the last chunk once per recipient" do
+      {:continue, _, session} = start([], lmtp: true, chunking: true)
+
+      {:continue, _, session} =
+        input(
+          session,
+          "LHLO c.test\r\nMAIL FROM:<a@x.test>\r\nRCPT TO:<b@y.test>\r\nRCPT TO:<c@y.test>\r\n"
+        )
+
+      {:continue, out, _} = input(session, "BDAT 2\r\nabBDAT 2 LAST\r\ncd")
+      assert out == "250 2.0.0 2 octets received\r\n250 2.0.0 Ok\r\n250 2.0.0 Ok\r\n"
+    end
+  end
+
+  describe "DSN" do
+    defp dsn(handler_opts \\ [], opts \\ []) do
+      session = started(handler_opts, Keyword.merge([dsn: true], opts))
+      {:continue, out, session} = input(session, "EHLO c.test\r\n")
+      assert out =~ ~r"250[- ]DSN\r\n"
+      session
+    end
+
+    test "passes the MAIL and RCPT parameters on" do
+      {:continue, out, _} =
+        input(
+          dsn(),
+          "MAIL FROM:<a@x.test> RET=HDRS ENVID=QQ+2B314\r\n" <>
+            "RCPT TO:<b@y.test> NOTIFY=SUCCESS,DELAY ORCPT=rfc822;b+2Bx@y.test\r\n" <>
+            "RCPT TO:<c@y.test> NOTIFY=never\r\nRCPT TO:<d@y.test>\r\n"
+        )
+
+      assert codes(out) == [250, 250, 250, 250]
+      assert_received {:mail, {"a@x.test", %{ret: :hdrs, envid: "QQ+314"}}}
+
+      assert_received {:rcpt_params, "b@y.test",
+                       %{notify: [:success, :delay], orcpt: {"rfc822", "b+x@y.test"}}}
+
+      assert_received {:rcpt_params, "c@y.test", %{notify: :never, orcpt: nil}}
+      assert_received {:rcpt_params, "d@y.test", %{notify: nil, orcpt: nil}}
+    end
+
+    test "refuses invalid parameters" do
+      session = dsn()
+
+      for {params, reply} <- [
+            {"RET=ALL", "501 5.5.4 Invalid RET parameter"},
+            {"RET", "501 5.5.4 Invalid RET parameter"},
+            {"ENVID=" <> String.duplicate("x", 101), "501 5.5.4 Invalid ENVID parameter"},
+            {"ENVID=a+00", "501 5.5.4 Invalid ENVID parameter"},
+            {"RET=FULL RET=HDRS", "501 5.5.4 Duplicate parameter"}
+          ] do
+        {:continue, out, _} = input(session, "MAIL FROM:<a@x.test> #{params}\r\n")
+        assert replies(out) == [reply], "for #{params}"
+      end
+
+      {:continue, _, session} = input(session, "MAIL FROM:<a@x.test>\r\n")
+
+      for {params, reply} <- [
+            {"NOTIFY=NEVER,SUCCESS", "501 5.5.4 Invalid NOTIFY parameter"},
+            {"NOTIFY=SOMETIMES", "501 5.5.4 Invalid NOTIFY parameter"},
+            {"NOTIFY=FAILURE,FAILURE", "501 5.5.4 Invalid NOTIFY parameter"},
+            {"NOTIFY", "501 5.5.4 Invalid NOTIFY parameter"},
+            {"ORCPT=b@y.test", "501 5.5.4 Invalid ORCPT parameter"},
+            {"ORCPT=rfc822;b+0Ay@y.test", "501 5.5.4 Invalid ORCPT parameter"},
+            {"ORCPT=utf-8;ü@y.test", "501 5.5.4 Invalid ORCPT parameter"},
+            {"NOTIFY=NEVER NOTIFY=NEVER", "501 5.5.4 Duplicate parameter"},
+            {"FOO=1", "555 5.5.4 Unsupported parameter"}
+          ] do
+        {:continue, out, _} = input(session, "RCPT TO:<b@y.test> #{params}\r\n")
+        assert replies(out) == [reply], "for #{params}"
+      end
+    end
+
+    test "internationalized ORCPT addresses need SMTPUTF8" do
+      session = dsn([], smtputf8: true)
+
+      {:continue, out, _} =
+        input(
+          session,
+          "MAIL FROM:<a@x.test> SMTPUTF8\r\n" <>
+            "RCPT TO:<b@y.test> ORCPT=utf-8;jü\\x{2B}r@y.test\r\n"
+        )
+
+      assert codes(out) == [250, 250]
+      assert_received {:rcpt_params, "b@y.test", %{orcpt: {"utf-8", "jü+r@y.test"}}}
+    end
+
+    test "the parameters are refused unless offered" do
+      {:continue, out, _} =
+        input(
+          started(),
+          "EHLO c.test\r\nMAIL FROM:<a@x.test> RET=FULL\r\nMAIL FROM:<a@x.test>\r\n" <>
+            "RCPT TO:<b@y.test> NOTIFY=NEVER\r\n"
+        )
+
+      assert codes(out) == [250, 555, 250, 555]
+    end
+  end
+
+  describe "ETRN" do
+    test "asks the handler" do
+      session = started([], etrn: true)
+      {:continue, out, session} = input(session, "EHLO c.test\r\n")
+      assert out =~ ~r"250[- ]ETRN\r\n"
+
+      {:continue, out, session} = input(session, "ETRN example.com\r\nETRN @Example.com\r\n")
+      assert replies(out) == ["250 2.0.0 Queuing started", "250 2.0.0 Queuing started"]
+      assert_received {:etrn, {:domain, "example.com"}}
+      assert_received {:etrn, {:subdomains, "example.com"}}
+
+      refuse = fn _node, state -> {:reply, Reply.new(459, "4.7.1", "Node not allowed"), state} end
+
+      {:continue, out, _} =
+        input(started([etrn: refuse], etrn: true), "EHLO c.test\r\nETRN #q\r\n")
+
+      assert replies(out) |> tl() == ["459 4.7.1 Node not allowed"]
+
+      {:continue, out, _} = input(session, "ETRN a..b\r\n")
+      assert replies(out) == ["501 5.5.4 Syntax: ETRN [@]domain"]
+    end
+
+    test "needs EHLO, and no transaction" do
+      session = started([], etrn: true)
+
+      {:continue, out, session} =
+        input(session, "ETRN example.com\r\nHELO c.test\r\nETRN example.com\r\n")
+
+      assert codes(out) == [503, 250, 503]
+
+      {:continue, out, _} =
+        input(session, "EHLO c.test\r\nMAIL FROM:<a@x.test>\r\nETRN example.com\r\n")
+
+      assert replies(out) |> List.last() == "503 5.5.1 MAIL transaction in progress"
+      refute_received {:etrn, _}
+    end
+
+    test "is not offered by default" do
+      {:continue, out, _} = input(started(), "EHLO c.test\r\nETRN example.com\r\n")
+      refute out =~ "ETRN\r\n"
+      assert replies(out) |> List.last() == "502 5.5.1 Command not implemented"
+    end
+  end
+
+  describe "MT-PRIORITY, FUTURERELEASE, DELIVERBY, and RRVS" do
+    @extensions [mt_priority: true, future_release: 3600, deliverby: true, rrvs: true]
+
+    defp extended do
+      session = started([], @extensions)
+      {:continue, out, session} = input(session, "EHLO c.test\r\n")
+      {session, out}
+    end
+
+    test "are offered on request" do
+      {_session, out} = extended()
+      assert out =~ "250-MT-PRIORITY\r\n"
+      assert out =~ ~r"250-FUTURERELEASE 3600 \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\r\n"
+      assert out =~ "250-DELIVERBY\r\n"
+      assert out =~ ~r"250[- ]RRVS\r\n"
+
+      {:continue, out, _} = input(started(), "EHLO c.test\r\n")
+      refute out =~ "PRIORITY"
+      refute out =~ "FUTURERELEASE"
+    end
+
+    test "pass the MAIL and RCPT parameters on" do
+      {session, _} = extended()
+
+      {:continue, out, _} =
+        input(
+          session,
+          "MAIL FROM:<a@x.test> MT-PRIORITY=-3 HOLDFOR=600 BY=3600;NT\r\n" <>
+            "RCPT TO:<b@y.test> RRVS=2014-04-03T23:01:00Z;C\r\n"
+        )
+
+      assert codes(out) == [250, 250]
+
+      assert_received {:mail,
+                       {"a@x.test",
+                        %{
+                          priority: -3,
+                          hold: {:for, 600},
+                          by: %{time: 3600, mode: :notify, trace: true}
+                        }}}
+
+      assert_received {:rcpt_params, "b@y.test", %{rrvs: {~U[2014-04-03 23:01:00Z], :continue}}}
+    end
+
+    test "refuse invalid parameters" do
+      {session, _} = extended()
+      later = DateTime.utc_now() |> DateTime.add(7200) |> Params.format_time()
+      soon = DateTime.utc_now() |> DateTime.add(60) |> Params.format_time()
+
+      for {params, reply} <- [
+            {"MT-PRIORITY=10", "501 5.5.2 Invalid MT-PRIORITY parameter"},
+            {"MT-PRIORITY", "501 5.5.2 Invalid MT-PRIORITY parameter"},
+            {"HOLDFOR=3601", "501 5.5.4 Invalid HOLDFOR parameter"},
+            {"HOLDUNTIL=#{later}", "501 5.5.4 Invalid HOLDUNTIL parameter"},
+            {"HOLDUNTIL=soon", "501 5.5.4 Invalid HOLDUNTIL parameter"},
+            {"HOLDFOR=60 HOLDUNTIL=#{soon}", "501 5.5.4 Invalid HOLDFOR parameter"},
+            {"HOLDFOR=600 BY=300;R", "501 5.5.4 BY must end after the release time"},
+            {"BY=0;R", "501 5.5.4 Invalid BY parameter"},
+            {"BY=60", "501 5.5.4 Invalid BY parameter"}
+          ] do
+        {:continue, out, _} = input(session, "MAIL FROM:<a@x.test> #{params}\r\n")
+        assert replies(out) == [reply], "for #{params}"
+      end
+
+      {:continue, out, _} =
+        input(
+          session,
+          "MAIL FROM:<a@x.test> HOLDUNTIL=#{soon} BY=3600;R\r\nRCPT TO:<b@y.test> RRVS=now\r\n"
+        )
+
+      assert replies(out) == ["250 2.1.0 Ok", "501 5.5.4 Invalid RRVS parameter"]
+    end
+
+    test "are refused unless offered" do
+      {:continue, out, _} =
+        input(
+          started(),
+          "EHLO c.test\r\nMAIL FROM:<a@x.test> MT-PRIORITY=1\r\nMAIL FROM:<a@x.test> HOLDFOR=1\r\n" <>
+            "MAIL FROM:<a@x.test> BY=60;N\r\nMAIL FROM:<a@x.test>\r\n" <>
+            "RCPT TO:<b@y.test> RRVS=2014-04-03T23:01:00Z\r\n"
+        )
+
+      assert codes(out) == [250, 555, 555, 555, 250, 555]
     end
   end
 end

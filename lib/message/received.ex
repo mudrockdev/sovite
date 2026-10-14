@@ -22,7 +22,8 @@ defmodule Sovite.Message.Received do
           optional(:id) => String.t() | nil,
           optional(:for) => String.t() | nil,
           optional(:date) => DateTime.t(),
-          optional(:tls) => String.t() | nil
+          optional(:tls) => String.t() | nil,
+          optional(:priority) => -9..9 | nil
         }
 
   @doc """
@@ -31,7 +32,9 @@ defmodule Sovite.Message.Received do
   `:for` is the recipient to show. Leave it out for messages with several
   recipients, so they are not disclosed to each other. `:date` defaults to
   now. `:tls` describes the encryption, as `Sovite.TLS.describe/1` does,
-  and is shown in a comment like Postfix does:
+  and is shown in a comment like Postfix does. `:priority` is the
+  message's `MT-PRIORITY`, shown in a `PRIORITY` clause (RFC 6710 §6).
+  As Postfix does with TLS:
 
       Received: from client.example.net ([192.0.2.7])
               (using TLSv1.3 with cipher TLS_AES_256_GCM_SHA384 (256/256 bits))
@@ -43,12 +46,13 @@ defmodule Sovite.Message.Received do
 
     id = if fields[:id], do: " id #{fields.id}", else: ""
     recipient = if fields[:for], do: "\r\n\tfor <#{fields.for}>", else: ""
+    priority = if fields[:priority], do: " PRIORITY #{fields.priority}", else: ""
 
     tls = if fields[:tls], do: "\t(using #{fields.tls})\r\n", else: ""
 
     "Received: from #{fields.helo} (#{address_literal(fields.remote_ip)})\r\n" <>
       tls <>
-      "\tby #{fields.by} with #{fields.protocol}#{id}#{recipient}; #{Date.format(date)}\r\n"
+      "\tby #{fields.by} with #{fields.protocol}#{id}#{recipient}#{priority}; #{Date.format(date)}\r\n"
   end
 
   @doc """

@@ -44,6 +44,15 @@ defmodule Sovite.SMTP.Command do
           | {:auth, mechanism :: String.t(), initial_response :: String.t() | nil}
           | {:xclient, attributes()}
           | {:xforward, attributes()}
+          | {:bdat, size :: non_neg_integer(), last :: boolean()}
+          | {:etrn, etrn_node()}
+
+  @typedoc """
+  What `ETRN` (RFC 1985) asks for: the mail queued for a domain, for a
+  domain and its subdomains (`@example.com`), or in a named queue
+  (`#queue`). Domains are lower-cased.
+  """
+  @type etrn_node :: {:domain, String.t()} | {:subdomains, String.t()} | {:queue, String.t()}
 
   @typedoc """
   `XCLIENT` and `XFORWARD` attributes: upper-cased names and decoded
@@ -90,10 +99,12 @@ defmodule Sovite.SMTP.Command do
     "STARTTLS" => :starttls,
     "AUTH" => :auth,
     "XCLIENT" => :xclient,
-    "XFORWARD" => :xforward
+    "XFORWARD" => :xforward,
+    "BDAT" => :bdat,
+    "ETRN" => :etrn
   }
 
-  @not_implemented ~w(EXPN TURN ETRN ATRN BDAT SEND SOML SAML)
+  @not_implemented ~w(EXPN TURN ATRN SEND SOML SAML)
   @http ~w(GET POST HEAD PUT DELETE OPTIONS CONNECT PATCH TRACE)
 
   @doc "Parses one command line. Returns the verb, if known, with errors."
@@ -187,7 +198,52 @@ defmodule Sovite.SMTP.Command do
     end
   end
 
+  # BDAT chunk-size [LAST] (RFC 3030 §2). The size is bounded, so a
+  # client cannot make it a bignum.
+  defp parse_verb(:bdat, argument) do
+    case String.split(argument, " ") do
+      [size] ->
+        bdat(size, false)
+
+      [size, last] ->
+        if String.upcase(last, :ascii) == "LAST", do: bdat(size, true), else: bdat(nil, false)
+
+      _ ->
+        {:error, :bdat, :syntax}
+    end
+  end
+
+  # ETRN [@|#]node (RFC 1985 §5).
+  defp parse_verb(:etrn, argument) do
+    case String.trim(argument) do
+      "#" <> queue when queue != "" ->
+        if String.match?(queue, ~r/\A[A-Za-z0-9._-]{1,64}\z/),
+          do: {:ok, {:etrn, {:queue, queue}}},
+          else: {:error, :etrn, :syntax}
+
+      "@" <> domain ->
+        etrn(:subdomains, domain)
+
+      domain ->
+        etrn(:domain, domain)
+    end
+  end
+
   ## Paths and parameters
+
+  defp bdat(size, last) when is_binary(size) and byte_size(size) in 1..15 do
+    if String.match?(size, ~r/\A[0-9]+\z/),
+      do: {:ok, {:bdat, String.to_integer(size), last}},
+      else: {:error, :bdat, :syntax}
+  end
+
+  defp bdat(_size, _last), do: {:error, :bdat, :syntax}
+
+  defp etrn(kind, domain) do
+    if Validators.domain?(domain),
+      do: {:ok, {:etrn, {kind, String.downcase(domain, :ascii)}}},
+      else: {:error, :etrn, :syntax}
+  end
 
   defp attribute(attribute) do
     with [name, value] <- :binary.split(attribute, "="),
@@ -299,7 +355,7 @@ defmodule Sovite.SMTP.Command do
   end
 
   # esmtp-keyword = (ALPHA / DIGIT) *(ALPHA / DIGIT / "-")
-  # esmtp-value   = 1*(%d33-60 / %d62-126)
+  # esmtp-value   = 1*(%d33-60 / %d62-126 / UTF8-non-ascii)  (RFC 6531 §3.3)
   defp parse_param(param) do
     {keyword, value} =
       case :binary.split(param, "=") do
@@ -308,7 +364,7 @@ defmodule Sovite.SMTP.Command do
       end
 
     if String.match?(keyword, ~r/\A[A-Za-z0-9][A-Za-z0-9-]*\z/) and
-         (value == nil or String.match?(value, ~r/\A[\x21-\x3c\x3e-\x7e]+\z/)),
+         (value == nil or String.match?(value, ~r/\A[\x21-\x3c\x3e-\x7e\x{80}-\x{10FFFF}]+\z/u)),
        do: {:ok, {String.upcase(keyword, :ascii), value}},
        else: :error
   end

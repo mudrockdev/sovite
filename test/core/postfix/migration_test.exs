@@ -915,6 +915,7 @@ defmodule Sovite.Core.Postfix.MigrationTest do
         maximal_backoff_time = 2h
         delay_warning_time = 0h
         message_size_limit = 1048576
+        bounce_size_limit = 100000
         smtpd_client_connection_rate_limit = 30
         anvil_rate_time_unit = 2m
         disable_vrfy_command = no
@@ -935,6 +936,7 @@ defmodule Sovite.Core.Postfix.MigrationTest do
       assert result.parsed.queue.max_backoff == 7_200_000
       assert result.parsed.queue.delay_warning == nil
       assert result.parsed.smtp.max_message_size == 1_048_576
+      assert result.parsed.bounce.size_limit == 100_000
       assert result.parsed.rate_limit.client_connections == {30, 120_000}
       assert result.parsed.smtp.vrfy
       assert result.parsed.delivery.destination_concurrency == 7

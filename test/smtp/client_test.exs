@@ -500,4 +500,234 @@ defmodule Sovite.SMTP.ClientTest do
                )
     end
   end
+
+  describe "CHUNKING" do
+    @chunking ["PIPELINING", "8BITMIME", "CHUNKING", "BINARYMIME"]
+
+    test "sends the message with BDAT when asked to, without dot-stuffing" do
+      mta = start_mta(extensions: @chunking)
+      client = connect!(mta)
+
+      assert {:ok, client, results} =
+               Client.deliver(
+                 client,
+                 "a@example.org",
+                 ["b@example.net", "c@example.net"],
+                 [@body],
+                 chunking: true
+               )
+
+      assert outcomes(results) == [
+               {"b@example.net", :data_end, 250},
+               {"c@example.net", :data_end, 250}
+             ]
+
+      assert_receive {:fake_mta, ^mta, {:message, %{chunked: true, data: @body}}}
+
+      # Without the option, DATA.
+      assert {:ok, _, _} = Client.deliver(client, "a@example.org", ["b@example.net"], [@body])
+      assert_receive {:fake_mta, ^mta, {:message, %{chunked: false, data: @body}}}
+    end
+
+    test "sends large messages in several chunks" do
+      test = self()
+
+      mta =
+        start_mta(
+          extensions: @chunking,
+          responses: %{
+            bdat: fn chunk ->
+              send(test, {:chunk, byte_size(chunk)})
+              "250 2.0.0 OK"
+            end
+          }
+        )
+
+      client = connect!(mta)
+      line = String.duplicate("x", 998) <> "\r\n"
+      body = Stream.duplicate(line, 1500)
+
+      assert {:ok, _, [{_, :data_end, %Reply{code: 250}}]} =
+               Client.deliver(client, "", ["b@example.net"], body, chunking: true)
+
+      assert_receive {:chunk, size} when size >= 1024 * 1024
+      assert_receive {:fake_mta, ^mta, {:message, %{data: data}}}
+      assert data == IO.iodata_to_binary(Enum.to_list(body))
+    end
+
+    test "a refused chunk fails the accepted recipients, and the transaction is reset" do
+      mta = start_mta(extensions: @chunking, responses: %{bdat: "452 4.3.1 Disk full"})
+      client = connect!(mta)
+      body = Stream.duplicate(String.duplicate("x", 1000) <> "\r\n", 2000)
+
+      assert {:ok, client, results} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], body, chunking: true)
+
+      assert outcomes(results) == [{"b@example.net", :data, 452}]
+
+      assert {:ok, _, [{_, :data_end, %Reply{code: 250}}]} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body])
+    end
+
+    test "sends nothing when every recipient is refused" do
+      mta = start_mta(extensions: @chunking, responses: %{rcpt: "550 5.1.1 unknown"})
+      client = connect!(mta)
+
+      assert {:ok, _client, [{"b@example.net", :rcpt, %Reply{code: 550}}]} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body], chunking: true)
+
+      refute_receive {:fake_mta, ^mta, {:message, _}}, 100
+    end
+
+    test "works without PIPELINING" do
+      mta = start_mta(extensions: ["CHUNKING"])
+      client = connect!(mta)
+
+      assert {:ok, _, [{_, :data_end, %Reply{code: 250}}]} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body], chunking: true)
+
+      assert_receive {:fake_mta, ^mta, {:message, %{chunked: true}}}
+    end
+
+    test "a binary message needs BINARYMIME" do
+      mta = start_mta(extensions: ["PIPELINING", "8BITMIME", "CHUNKING"])
+      client = connect!(mta)
+
+      assert {:error, _client, :binarymime_not_supported} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], ["\0\r"],
+                 body_type: :binarymime
+               )
+
+      mta = start_mta(extensions: @chunking)
+      client = connect!(mta)
+
+      assert {:ok, _, [{_, :data_end, %Reply{code: 250}}]} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], ["\0\r"],
+                 body_type: :binarymime
+               )
+
+      assert_receive {:fake_mta, ^mta,
+                      {:message,
+                       %{
+                         chunked: true,
+                         data: "\0\r",
+                         mail_args: "FROM:<a@example.org> BODY=BINARYMIME"
+                       }}}
+    end
+  end
+
+  describe "DSN" do
+    @dsn %{
+      ret: :hdrs,
+      envid: "QQ 314",
+      recipients: %{
+        "b@example.net" => %{notify: [:success, :failure], orcpt: {"rfc822", "b+x@example.net"}},
+        "c@example.net" => %{notify: :never}
+      }
+    }
+
+    test "sends the parameters to a server that offers DSN" do
+      mta = start_mta(extensions: ["PIPELINING", "DSN"])
+      client = connect!(mta)
+
+      assert {:ok, _, _} =
+               Client.deliver(
+                 client,
+                 "a@example.org",
+                 ["b@example.net", "c@example.net", "d@example.net"],
+                 [@body],
+                 dsn: @dsn
+               )
+
+      assert_receive {:fake_mta, ^mta, {:message, message}}
+      assert message.mail_args == "FROM:<a@example.org> RET=HDRS ENVID=QQ+20314"
+
+      assert message.rcpt_args == [
+               "TO:<b@example.net> NOTIFY=SUCCESS,FAILURE ORCPT=rfc822;b+2Bx@example.net",
+               "TO:<c@example.net> NOTIFY=NEVER",
+               "TO:<d@example.net>"
+             ]
+    end
+
+    test "leaves them out for other servers" do
+      mta = start_mta(extensions: ["PIPELINING"])
+      client = connect!(mta)
+
+      assert {:ok, _, _} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body], dsn: @dsn)
+
+      assert_receive {:fake_mta, ^mta, {:message, message}}
+      assert message.mail_args == "FROM:<a@example.org>"
+      assert message.rcpt_args == ["TO:<b@example.net>"]
+    end
+
+    test "an internationalized ORCPT keeps its UTF-8 with SMTPUTF8 only" do
+      dsn = %{recipients: %{"b@example.net" => %{orcpt: {"utf-8", "jü+r@example.net"}}}}
+      mta = start_mta(extensions: ["PIPELINING", "DSN", "SMTPUTF8"])
+      client = connect!(mta)
+
+      assert {:ok, client, _} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body],
+                 dsn: dsn,
+                 smtputf8: true
+               )
+
+      assert_receive {:fake_mta, ^mta,
+                      {:message,
+                       %{rcpt_args: ["TO:<b@example.net> ORCPT=utf-8;jü\\x{2B}r@example.net"]}}}
+
+      assert {:ok, _, _} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body], dsn: dsn)
+
+      assert_receive {:fake_mta, ^mta,
+                      {:message,
+                       %{
+                         rcpt_args: [
+                           "TO:<b@example.net> ORCPT=utf-8;j\\x{FC}\\x{2B}r@example.net"
+                         ]
+                       }}}
+    end
+  end
+
+  describe "MT-PRIORITY, DELIVERBY, and RRVS" do
+    @opts [
+      priority: 3,
+      deliver_by: %{time: 98, mode: :return, trace: false},
+      rrvs: %{"b@example.net" => {~U[2014-04-03 23:01:00Z], :continue}}
+    ]
+
+    test "are sent to servers that offer them" do
+      mta = start_mta(extensions: ["PIPELINING", "MT-PRIORITY", "DELIVERBY", "RRVS"])
+      client = connect!(mta)
+
+      assert {:ok, _, _} =
+               Client.deliver(
+                 client,
+                 "a@example.org",
+                 ["b@example.net", "c@example.net"],
+                 [@body],
+                 @opts
+               )
+
+      assert_receive {:fake_mta, ^mta, {:message, message}}
+      assert message.mail_args == "FROM:<a@example.org> MT-PRIORITY=3 BY=98;R"
+
+      assert message.rcpt_args == [
+               "TO:<b@example.net> RRVS=2014-04-03T23:01:00Z;C",
+               "TO:<c@example.net>"
+             ]
+    end
+
+    test "are left out for other servers" do
+      mta = start_mta(extensions: ["PIPELINING"])
+      client = connect!(mta)
+
+      assert {:ok, _, _} =
+               Client.deliver(client, "a@example.org", ["b@example.net"], [@body], @opts)
+
+      assert_receive {:fake_mta, ^mta,
+                      {:message,
+                       %{mail_args: "FROM:<a@example.org>", rcpt_args: ["TO:<b@example.net>"]}}}
+    end
+  end
 end

@@ -44,6 +44,11 @@ defmodule Sovite.Message.ReceivedTest do
                  "\tfor <user@example.com>; Sun, 4 Oct 2026 12:00:00 +0000\r\n"
     end
 
+    test "adds the PRIORITY clause (RFC 6710 §6)" do
+      assert Received.build(fields(%{for: "user@example.com", priority: -3})) =~
+               "\tfor <user@example.com> PRIORITY -3; Sun, 4 Oct 2026"
+    end
+
     test "omits the for clause when :for is nil or absent" do
       expected =
         "Received: from client.example.net ([192.0.2.7])\r\n" <>

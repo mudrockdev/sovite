@@ -92,6 +92,16 @@ trusted_networks = []
 requiretls = true
 # Offer SMTPUTF8 (RFC 6531): internationalized addresses and UTF-8 headers.
 smtputf8 = true
+# Offer CHUNKING (BDAT, RFC 3030), DSN (RFC 3461), and ETRN (RFC 1985).
+chunking = true
+dsn = true
+etrn = true
+# Offer BINARYMIME (RFC 3030). Binary mail bounces at next hops without it.
+binarymime = false
+# Offer MT-PRIORITY (RFC 6710), DELIVERBY (RFC 2852), and RRVS (RFC 7293).
+mt_priority = true
+deliverby = true
+rrvs = true
 # From the tarpit_after-th error reply on, send each one tarpit_delay later.
 tarpit_after = 3
 tarpit_delay = "1s"
@@ -154,6 +164,8 @@ tls = "dane"
 # Log in to the relay host (only over TLS).
 # relayhost_username = "user"
 # relayhost_password = "secret"
+# Send messages with BDAT to servers that offer CHUNKING.
+chunking = true
 
 [auth]
 # Users for SMTP AUTH: "database" (sovitectl user add ...), "file", "ldap",
@@ -186,6 +198,9 @@ sender_check = true
 [submission]
 # Header fields removed from messages of authenticated clients.
 strip_headers = ["Return-Path"]
+# Let authenticated clients hold messages for later (FUTURERELEASE, RFC 4865).
+future_release = true
+max_future_release = "7d"
 
 # Email authentication. Mail from outside is checked with SPF, DKIM, ARC,
 # and DMARC, and the results are added as an Authentication-Results field.
@@ -325,6 +340,8 @@ server = "[127.0.0.1]:25"
 [bounce]
 # Where to report notifications that could not be delivered. Unset: log only.
 # double_bounce_recipient = "postmaster@example.com"
+# The largest message returned whole in a failure notification (RET=FULL).
+size_limit = 50000
 
 [log]
 # One of: debug, info, notice, warning, error

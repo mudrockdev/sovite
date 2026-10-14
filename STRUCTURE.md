@@ -50,7 +50,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `smtp/` | `Sovite.SMTP` | Command/reply codec, enhanced status codes, server session state machine (with greeting delay, tarpit, pipelining checks, `SMTPUTF8`, and Postfix's `XCLIENT` and `XFORWARD`), client state machine (with `SMTPUTF8` and `XFORWARD`), xtext, LMTP (client over TCP and Unix sockets, and server mode), extensions |
+| `smtp/` | `Sovite.SMTP` | Command/reply codec, enhanced status codes, server session state machine (with greeting delay, tarpit, pipelining checks, `SMTPUTF8`, `CHUNKING`/`BINARYMIME`, `DSN`, `ETRN`, `MT-PRIORITY`, `FUTURERELEASE`, `DELIVERBY`, `RRVS`, and Postfix's `XCLIENT` and `XFORWARD`), client state machine (with `SMTPUTF8`, `BDAT`, DSN and the other extension parameters, and `XFORWARD`), xtext and ESMTP parameter values, LMTP (client over TCP and Unix sockets, and server mode), extensions |
 | `dsn/` | `Sovite.DSN` | Build and parse delivery status notifications (RFC 3464 / 6522), internationalized ones too (RFC 6533) |
 | `spf/` | `Sovite.SPF` | SPF evaluation (RFC 7208) |
 | `dkim/` | `Sovite.DKIM` | DKIM signing and verification (RFC 6376, 8301, 8463) |

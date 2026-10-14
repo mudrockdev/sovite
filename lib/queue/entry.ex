@@ -6,12 +6,16 @@ defmodule Sovite.Queue.Entry do
   Each recipient is `:pending` (never tried), `:deferred`, `:delivered`,
   or `:failed`. Final states never change, so a record replayed after a
   crash cannot bring a delivered recipient back.
+
+  `notified` tells whether the sender was told about a recipient's
+  failure or (when it asked with `NOTIFY=SUCCESS`) its delivery, or
+  about an alias of `expanded`.
   """
 
   alias Sovite.Queue.{Envelope, Record}
 
   @enforce_keys [:envelope, :recipients]
-  defstruct [:envelope, :recipients, :next_attempt, attempts: 0, warned: false]
+  defstruct [:envelope, :recipients, :next_attempt, attempts: 0, warned: false, expansions: %{}]
 
   @typedoc "The state of one recipient."
   @type recipient :: %{
@@ -25,7 +29,8 @@ defmodule Sovite.Queue.Entry do
           recipients: %{String.t() => recipient()},
           attempts: non_neg_integer(),
           next_attempt: DateTime.t() | nil,
-          warned: boolean()
+          warned: boolean(),
+          expansions: %{String.t() => boolean()}
         }
 
   @doc "Builds the state from an envelope and its records."
@@ -34,9 +39,11 @@ defmodule Sovite.Queue.Entry do
     recipients =
       Map.new(envelope.recipients, &{&1, %{status: :pending, details: nil, notified: false}})
 
+    expansions = Map.new(envelope.expanded, &{&1, false})
+
     Enum.reduce(
       records,
-      %__MODULE__{envelope: envelope, recipients: recipients},
+      %__MODULE__{envelope: envelope, recipients: recipients, expansions: expansions},
       &apply_record(&2, &1)
     )
   end
@@ -52,7 +59,11 @@ defmodule Sovite.Queue.Entry do
 
   def apply_record(entry, {:notified, addresses}) do
     Enum.reduce(addresses, entry, fn address, entry ->
-      update_recipient(entry, address, &%{&1 | notified: true})
+      entry = update_recipient(entry, address, &%{&1 | notified: true})
+
+      if Map.has_key?(entry.expansions, address),
+        do: put_in(entry.expansions[address], true),
+        else: entry
     end)
   end
 
@@ -87,6 +98,43 @@ defmodule Sovite.Queue.Entry do
     for address <- with_status(entry, :failed),
         %{notified: false, details: details} <- [entry.recipients[address]],
         do: {address, details}
+  end
+
+  @doc """
+  Delivered recipients whose delivery the sender asked to know about
+  (`NOTIFY=SUCCESS`, or `report` in the details unless `NOTIFY=NEVER`)
+  and was not told yet, with their details. Only those with an `action`
+  in their details: the others went to a server that tells the sender
+  itself.
+  """
+  @spec unnotified_successes(t()) :: [{String.t(), Record.details()}]
+  def unnotified_successes(entry) do
+    for address <- with_status(entry, :delivered),
+        %{notified: false, details: details} <- [entry.recipients[address]],
+        details[:action] != nil,
+        notify?(entry, address, :success) or
+          (details[:report] == true and notify?(entry, address, :relay)),
+        do: {address, details}
+  end
+
+  @doc "Aliases of `expanded` the sender was not told about yet."
+  @spec unnotified_expansions(t()) :: [String.t()]
+  def unnotified_expansions(entry),
+    do: Enum.filter(entry.envelope.expanded, &(entry.expansions[&1] == false))
+
+  @doc """
+  Whether a notification of `kind` is due for `address` by its `NOTIFY`
+  parameter (RFC 3461 §4.1). Without one, failures and delays are
+  reported, and successes are not. `:relay` is anything but `NEVER`.
+  """
+  @spec notify?(t(), String.t(), :failure | :delay | :success | :relay) :: boolean()
+  def notify?(entry, address, kind) do
+    case entry.envelope.dsn do
+      %{^address => %{notify: :never}} -> false
+      _ when kind == :relay -> true
+      %{^address => %{notify: [_ | _] = notify}} -> kind in notify
+      _ -> kind != :success
+    end
   end
 
   @doc "Returns `true` when every recipient is delivered or failed."

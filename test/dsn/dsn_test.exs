@@ -193,4 +193,84 @@ defmodule Sovite.DSNTest do
     assert message =~ ~r/Message-ID: <[a-z0-9.]+@mx.example.org>\r\n/
     assert message =~ ~r/boundary="=_sovite_[a-z2-7]+"/
   end
+
+  test "builds a success report with DSN fields (RFC 3461)" do
+    report = %{
+      @report
+      | kind: :success,
+        recipients: [
+          %{
+            recipient: "bob@example.net",
+            status: "2.0.0",
+            action: :delivered,
+            reason: "delivered to mailbox",
+            original_recipient: {"rfc822", "Bob@Example.net"}
+          },
+          %{
+            recipient: "list@example.net",
+            status: "2.0.0",
+            action: :expanded,
+            reason: "expanded to 3 recipients"
+          },
+          %{recipient: "carol@example.com", status: "2.0.0", action: :relayed}
+        ]
+    }
+
+    {message, :"7bit"} = DSN.build(Map.put(report, :envid, "QQ314159"))
+    {headers, [text, status, original, "--\r\n"]} = parts(message)
+
+    assert headers =~ "Subject: Successful Mail Delivery Report\r\n"
+    assert text =~ "Your message was successfully delivered"
+    assert text =~ "<list@example.net>: expanded to 3 recipients\r\n"
+    assert status =~ "Original-Envelope-Id: QQ314159\r\nReporting-MTA: dns; mx.example.org\r\n"
+
+    assert status =~
+             "Original-Recipient: rfc822; Bob@Example.net\r\nFinal-Recipient: rfc822; bob@example.net\r\nAction: delivered\r\n"
+
+    assert status =~ "Final-Recipient: rfc822; list@example.net\r\nAction: expanded\r\n"
+    assert status =~ "Final-Recipient: rfc822; carol@example.com\r\nAction: relayed\r\n"
+
+    assert original =~
+             "Content-Type: text/rfc822-headers\r\nContent-Description: Message Headers\r\n"
+  end
+
+  test "returns the whole message of a failure when given" do
+    content = "From: alice@example.org\r\nSubject: hello\r\n\r\nThe body.\r\n"
+    {message, :"7bit"} = DSN.build(Map.put(@report, :content, content))
+    {_headers, [_text, _status, original, "--\r\n"]} = parts(message)
+
+    assert original ==
+             "\r\nContent-Type: message/rfc822\r\nContent-Description: Undelivered Message\r\n\r\n" <>
+               content
+
+    # Delay warnings return the headers only.
+    {message, _} = DSN.build(%{@report | kind: :delay} |> Map.put(:content, content))
+    refute message =~ "The body."
+
+    # Internationalized content is message/global.
+    utf8 = "Subject: =?utf-8?q?x?=\r\nFrom: jürgen@example.org\r\n\r\nbody\r\n"
+
+    {message, :"8bitmime"} =
+      DSN.build(@report |> Map.put(:content, utf8) |> Map.put(:smtputf8, true))
+
+    assert message =~ "Content-Type: message/global\r\n"
+    assert message =~ "Content-Transfer-Encoding: 8bit\r\n\r\n" <> utf8
+  end
+
+  test "an internationalized original recipient makes the notification global" do
+    report = %{
+      @report
+      | recipients: [
+          %{
+            recipient: "bob@example.net",
+            status: "5.1.1",
+            original_recipient: {"utf-8", "böb@example.net"}
+          }
+        ]
+    }
+
+    assert DSN.global?(report)
+    {message, _} = DSN.build(report)
+    assert message =~ "Original-Recipient: utf-8; böb@example.net\r\n"
+  end
 end

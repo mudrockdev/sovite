@@ -11,6 +11,39 @@ defmodule Sovite.Core.Delivery.Transaction do
   alias Sovite.Validators
 
   def transaction(job, client, remote) do
+    case rrvs_refused(job, client) do
+      [] ->
+        deliver(job, client, remote)
+
+      refused ->
+        failed =
+          details("5.7.19", "RRVS required, but host #{remote} does not offer it", remote, false)
+
+        results = Enum.map(refused, &{&1, :failed, failed})
+
+        case job.recipients -- refused do
+          [] -> {results, remote, {client, remote}}
+          rest -> merge(results, deliver(%{job | recipients: rest}, client, remote))
+        end
+    end
+  end
+
+  defp merge(results, {more, remote, connection}), do: {results ++ more, remote, connection}
+  defp merge(_results, {:retry, _error} = retry), do: retry
+
+  # RFC 7293 §5.1.1: with R, recipients only go to servers that check it.
+  defp rrvs_refused(job, client) do
+    if Map.has_key?(Client.extensions(client), "RRVS"),
+      do: [],
+      else:
+        for(
+          {rcpt, {_time, :reject}} <- Map.get(job, :rrvs, %{}),
+          rcpt in job.recipients,
+          do: rcpt
+        )
+  end
+
+  defp deliver(job, client, remote) do
     body = Spool.stream_message(job.path, job.message_offset, job.message_size, job.prefix)
 
     opts = [
@@ -18,14 +51,21 @@ defmodule Sovite.Core.Delivery.Transaction do
       body_type: job.body_type,
       requiretls: Map.get(job, :requiretls, false),
       smtputf8: smtputf8?(job),
-      xforward: Map.get(job, :xforward)
+      xforward: Map.get(job, :xforward),
+      dsn: Map.get(job, :dsn),
+      chunking: Map.get(job, :chunking, false),
+      priority: Map.get(job, :priority),
+      deliver_by: deliver_by(Map.get(job, :deliver_by)),
+      rrvs: Map.get(job, :rrvs, %{})
     ]
 
     case Client.deliver(client, job.sender, job.recipients, body, opts) do
       {:ok, client, replies} ->
+        action = action(client, Map.get(job, :deliver_by))
+
         results =
           Enum.map(replies, fn {rcpt, stage, reply} ->
-            reply_result(rcpt, stage, reply, remote)
+            reply_result(rcpt, stage, reply, remote, action)
           end)
 
         {results, remote, {client, remote}}
@@ -48,15 +88,51 @@ defmodule Sovite.Core.Delivery.Transaction do
     end
   end
 
-  defp reply_result(rcpt, stage, reply, remote) do
-    status =
+  defp reply_result(rcpt, stage, reply, remote, action) do
+    details = details(Reply.status(reply), Reply.to_string(reply), remote, true)
+
+    cond do
+      stage == :data_end and reply.code in 200..299 ->
+        {rcpt, :delivered, Map.merge(details, action)}
+
+      reply.code >= 500 ->
+        {rcpt, :failed, details}
+
+      true ->
+        {rcpt, :deferred, details}
+    end
+  end
+
+  # The seconds left until a DELIVERBY deadline (RFC 2852 §4.1.4).
+  defp deliver_by(nil), do: nil
+
+  defp deliver_by(by) do
+    left = DateTime.diff(by.deadline, DateTime.utc_now(), :second)
+    left = if by.mode == :return, do: max(left, 1), else: left
+    %{time: left, mode: by.mode, trace: by.trace}
+  end
+
+  # What a success notification reports (RFC 3461 §5.2): none from a
+  # server that supports DSN, which got the parameters; otherwise
+  # delivered (LMTP) or relayed (SMTP). DELIVERBY asks for "relayed"
+  # notifications, to a server without it with N, and always with T
+  # (RFC 2852 §4.1.4.1, §4.2).
+  defp action(client, by) do
+    extensions = Client.extensions(client)
+    lmtp = Client.lmtp?(client)
+
+    action =
       cond do
-        stage == :data_end and reply.code in 200..299 -> :delivered
-        reply.code >= 500 -> :failed
-        true -> :deferred
+        Map.has_key?(extensions, "DSN") -> nil
+        lmtp -> :delivered
+        true -> :relayed
       end
 
-    {rcpt, status, details(Reply.status(reply), Reply.to_string(reply), remote, true)}
+    report =
+      not lmtp and by != nil and
+        (by.trace or (by.mode == :notify and not Map.has_key?(extensions, "DELIVERBY")))
+
+    if report, do: %{action: :relayed, report: true}, else: %{action: action}
   end
 
   def all(job, status, text, remote \\ nil) do
@@ -92,6 +168,9 @@ defmodule Sovite.Core.Delivery.Transaction do
 
   defp refusal_error(:eight_bit_not_supported, remote, _job),
     do: {"5.6.3", "8-bit message, but #{remote} does not support 8BITMIME"}
+
+  defp refusal_error(:binarymime_not_supported, remote, _job),
+    do: {"5.6.3", "binary message, but #{remote} does not support BINARYMIME"}
 
   defp refusal_error(:requiretls_not_supported, remote, _job),
     do: {"5.7.30", "REQUIRETLS support required, but host #{remote} does not offer it"}

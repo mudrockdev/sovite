@@ -100,6 +100,52 @@ defmodule Sovite.SMTP.Server.Session do
   (`Sovite.Validators.ascii_domain/1`), so every domain has one form.
   The message may then have UTF-8 header fields (RFC 6532).
 
+  ## CHUNKING and BINARYMIME
+
+  With `chunking: true`, `CHUNKING` (RFC 3030) is offered: the client
+  may send the message in `BDAT` chunks instead of with `DATA`. Each
+  chunk is passed to the handler as it arrives, as `DATA` content is,
+  but there is no dot-stuffing; bare line endings get the
+  `:bare_line_endings` policy all the same. The first chunk calls
+  `handle_data/2`, every chunk but the last is answered with `250`, and
+  `BDAT ... LAST` ends the message like the final dot. A chunk is always
+  read to its end, also when it is refused, so its content can never be
+  taken for commands.
+
+  With `binarymime: true` as well, `BINARYMIME` is offered: `MAIL FROM`
+  with `BODY=BINARYMIME` sets `body: :binarymime`, and the message must
+  be sent with `BDAT`. Its content is binary: it is passed on unchecked.
+
+  ## DSN
+
+  With `dsn: true`, `DSN` (RFC 3461) is offered. `MAIL FROM` may then
+  have `RET` and `ENVID` (in the mail parameters), and `RCPT TO` may
+  have `NOTIFY` and `ORCPT` (in the recipient parameters passed to
+  `handle_rcpt/3`), see `Sovite.SMTP.DSNParams`. Acting on them is up to
+  the handler.
+
+  ## ETRN
+
+  With `etrn: true` and a handler with `handle_etrn/2`, `ETRN` (RFC
+  1985) is offered: the client asks for the mail queued for its domain
+  to be sent now. Not allowed in a mail transaction.
+
+  ## MT-PRIORITY, FUTURERELEASE, DELIVERBY, and RRVS
+
+  These are offered on request, and their parameters (see
+  `Sovite.SMTP.Params`) reach the handler checked but not acted on:
+
+    * `mt_priority: true` - `MT-PRIORITY` (RFC 6710): `MAIL FROM` may
+      have `MT-PRIORITY=-9..9` (`priority` in the mail parameters). The
+      handler must not let untrusted clients raise it.
+    * `future_release: seconds` - `FUTURERELEASE` (RFC 4865), with
+      `HOLDFOR` and `HOLDUNTIL` up to that many seconds ahead (`hold`).
+    * `deliverby: true` - `DELIVERBY` (RFC 2852): `BY=seconds;R|N[T]`
+      (`by`). With a hold as well, the message must be due after its
+      release.
+    * `rrvs: true` - `RRVS` (RFC 7293): `RCPT TO` may have
+      `RRVS=time[;R|;C]` (`rrvs` in the recipient parameters).
+
   ## Options
 
     * `:hostname` - name in the greeting and `EHLO` reply. Required.
@@ -136,6 +182,13 @@ defmodule Sovite.SMTP.Server.Session do
       MTA-STS. Defaults to `false`.
     * `:smtputf8` - offer `SMTPUTF8`, see "SMTPUTF8". Defaults to
       `false`.
+    * `:chunking` / `:binarymime` - offer `CHUNKING` and `BINARYMIME`,
+      see "CHUNKING and BINARYMIME". Default to `false`.
+    * `:dsn` - offer `DSN`, see "DSN". Defaults to `false`.
+    * `:etrn` - offer `ETRN`, see "ETRN". Defaults to `false`.
+    * `:mt_priority`, `:future_release`, `:deliverby`, `:rrvs` - see
+      "MT-PRIORITY, FUTURERELEASE, DELIVERBY, and RRVS". Default to
+      `false` (`nil` for `:future_release`).
     * `:tarpit_after` - errors before the tarpit starts. Defaults to 3.
     * `:tarpit_delay` - milliseconds per error reply after that. Defaults
       to 0: no tarpit.
@@ -151,13 +204,14 @@ defmodule Sovite.SMTP.Server.Session do
   `[:sovite, :smtp, :server, :command, :stop]` for every reply, with
   `%{duration}` and `%{session_id, remote_ip, command, argument,
   reply_code, reply}`. `command` is the verb (`"MAIL"`), `"UNKNOWN"`, or
-  `"END-OF-MESSAGE"` for the final dot. `argument` is only set for `EHLO`,
-  `HELO`, `LHLO`, `MAIL`, `RCPT`, and `VRFY`, and is network input. For `AUTH` it
+  `"END-OF-MESSAGE"` for the final dot or `BDAT ... LAST`. `argument` is
+  only set for `EHLO`, `HELO`, `LHLO`, `MAIL`, `RCPT`, `VRFY`, and
+  `ETRN`, and is network input. For `AUTH` it
   is the mechanism; SASL responses are never included.
   """
 
   alias Sovite.Net
-  alias Sovite.SMTP.{Command, DataDecoder, Reply}
+  alias Sovite.SMTP.{Command, DataDecoder, DSNParams, Params, Reply}
   alias Sovite.Validators
 
   @typedoc "Who is connected. Passed to the handler's `init/2`."
@@ -174,12 +228,27 @@ defmodule Sovite.SMTP.Server.Session do
           optional(:login) => String.t() | nil
         }
 
-  @typedoc "`MAIL FROM` parameters. `size` and `body` are `nil` when not given."
+  @typedoc """
+  `MAIL FROM` parameters. Those not given are `nil` (`false` for
+  `requiretls` and `smtputf8`).
+  """
   @type mail_params :: %{
           size: non_neg_integer() | nil,
-          body: :"7bit" | :"8bitmime" | nil,
+          body: :"7bit" | :"8bitmime" | :binarymime | nil,
           requiretls: boolean(),
-          smtputf8: boolean()
+          smtputf8: boolean(),
+          ret: DSNParams.ret() | nil,
+          envid: String.t() | nil,
+          priority: -9..9 | nil,
+          hold: Params.hold() | nil,
+          by: Params.by() | nil
+        }
+
+  @typedoc "`RCPT TO` parameters (DSN and RRVS), `nil` when not given."
+  @type rcpt_params :: %{
+          notify: DSNParams.notify() | nil,
+          orcpt: DSNParams.orcpt() | nil,
+          rrvs: Params.rrvs() | nil
         }
 
   @typedoc """
@@ -228,6 +297,14 @@ defmodule Sovite.SMTP.Server.Session do
     lmtp: false,
     requiretls: false,
     smtputf8: false,
+    chunking: false,
+    binarymime: false,
+    dsn: false,
+    etrn: false,
+    mt_priority: false,
+    future_release: nil,
+    deliverby: false,
+    rrvs: false,
     tarpit_after: 3,
     tarpit_delay: 0,
     forbid_unauth_pipelining: false,
@@ -239,7 +316,19 @@ defmodule Sovite.SMTP.Server.Session do
   # closes anyway, and input after STARTTLS is dropped.
   @group_end ~w(EHLO HELO LHLO DATA VRFY NOOP AUTH XCLIENT)
 
-  @no_mail_params %{size: nil, body: nil, requiretls: false, smtputf8: false}
+  @no_mail_params %{
+    size: nil,
+    body: nil,
+    requiretls: false,
+    smtputf8: false,
+    ret: nil,
+    envid: nil,
+    priority: nil,
+    hold: nil,
+    by: nil
+  }
+
+  @no_rcpt_params %{notify: nil, orcpt: nil, rrvs: nil}
 
   @xclient_attributes ~w(NAME REVERSE_NAME ADDR PORT PROTO HELO LOGIN DESTADDR DESTPORT)
   @xforward_attributes ~w(NAME ADDR PORT PROTO HELO IDENT SOURCE)
@@ -374,6 +463,7 @@ defmodule Sovite.SMTP.Server.Session do
   @doc "Milliseconds to wait for more input before calling `handle_timeout/1`."
   @spec timeout(t()) :: timeout()
   def timeout(%__MODULE__{phase: :data, opts: opts}), do: opts.data_timeout
+  def timeout(%__MODULE__{phase: {:bdat, _chunk}, opts: opts}), do: opts.data_timeout
 
   def timeout(%__MODULE__{phase: {:greeting, deadline}}),
     do: max(deadline - System.monotonic_time(:millisecond), 0)
@@ -427,6 +517,7 @@ defmodule Sovite.SMTP.Server.Session do
 
   defp process(%{phase: :closed} = session, out), do: {:close, Enum.reverse(out), session}
   defp process(%{phase: :data} = session, out), do: process_data(session, out)
+  defp process(%{phase: {:bdat, _chunk}} = session, out), do: process_chunk(session, out)
 
   # Input after STARTTLS is dropped until the handshake, see the moduledoc.
   defp process(%{phase: :starttls} = session, out),
@@ -665,6 +756,13 @@ defmodule Sovite.SMTP.Server.Session do
       session.transaction.recipients == [] ->
         reply(session, out, "DATA", nil, Reply.new(554, "5.5.1", "No valid recipients"), started)
 
+      session.data != nil ->
+        reply(session, out, "DATA", nil, bdat_in_progress(), started)
+
+      session.transaction.params.body == :binarymime ->
+        text = "BODY=BINARYMIME needs BDAT"
+        reply(session, out, "DATA", nil, Reply.new(503, "5.5.1", text), started)
+
       true ->
         go_ahead = Reply.new(354, "End data with <CR><LF>.<CR><LF>")
 
@@ -673,6 +771,71 @@ defmodule Sovite.SMTP.Server.Session do
           decoder = DataDecoder.new(s.opts.bare_line_endings)
           %{s | phase: :data, data: %{decoder: decoder, size: 0, error: nil}}
         end)
+    end
+  end
+
+  # The chunk is read first, whatever the reply (RFC 3030 §2).
+  defp execute({:bdat, size, last}, session, out, started) do
+    {session, refusal} =
+      cond do
+        not session.opts.chunking ->
+          {session, Reply.new(502, "5.5.1", "Command not implemented")}
+
+        session.transaction == nil ->
+          {session, Reply.new(503, "5.5.1", "Need MAIL command")}
+
+        session.transaction.recipients == [] ->
+          {session, Reply.new(554, "5.5.1", "No valid recipients")}
+
+        session.data == nil ->
+          open_chunks(session, started)
+
+        true ->
+          {session, nil}
+      end
+
+    chunk = %{remaining: size, last: last, refusal: refusal, started: started}
+    process(%{session | phase: {:bdat, chunk}}, out)
+  end
+
+  defp execute({:etrn, node}, session, out, started) do
+    argument = etrn_argument(node)
+
+    cond do
+      not etrn_offered?(session) ->
+        reply(
+          session,
+          out,
+          "ETRN",
+          argument,
+          Reply.new(502, "5.5.1", "Command not implemented"),
+          started
+        )
+
+      not session.esmtp ->
+        reply(session, out, "ETRN", argument, Reply.new(503, "5.5.1", "Send EHLO first"), started)
+
+      session.transaction != nil ->
+        reply(
+          session,
+          out,
+          "ETRN",
+          argument,
+          Reply.new(503, "5.5.1", "MAIL transaction in progress"),
+          started
+        )
+
+      true ->
+        session.handler.handle_etrn(node, session.handler_state)
+        |> accept(
+          session,
+          out,
+          "ETRN",
+          argument,
+          started,
+          Reply.new(250, "2.0.0", "Queuing started"),
+          & &1
+        )
     end
   end
 
@@ -724,7 +887,12 @@ defmodule Sovite.SMTP.Server.Session do
 
   defp execute({:help, _argument}, session, out, started) do
     greeting = if session.opts.lmtp, do: "LHLO", else: "EHLO HELO"
-    text = "Commands: #{greeting} MAIL RCPT DATA RSET NOOP QUIT VRFY HELP STARTTLS AUTH"
+    bdat = if session.opts.chunking, do: " BDAT", else: ""
+    etrn = if etrn_offered?(session), do: " ETRN", else: ""
+
+    text =
+      "Commands: #{greeting} MAIL RCPT DATA#{bdat} RSET NOOP QUIT VRFY HELP STARTTLS AUTH#{etrn}"
+
     reply(session, out, "HELP", nil, Reply.new(214, "2.0.0", text), started)
   end
 
@@ -1060,24 +1228,6 @@ defmodule Sovite.SMTP.Server.Session do
   defp helo_reply(session, :helo), do: Reply.new(250, session.hostname)
 
   defp helo_reply(session, _ehlo_or_lhlo) do
-    starttls = if session.opts.starttls and tls(session) == nil, do: ["STARTTLS"], else: []
-    requiretls = if requiretls_offered?(session), do: ["REQUIRETLS"], else: []
-    smtputf8 = if session.opts.smtputf8, do: ["SMTPUTF8"], else: []
-
-    xclient =
-      if session.xclient, do: ["XCLIENT " <> Enum.join(@xclient_attributes, " ")], else: []
-
-    xforward =
-      if session.xforward, do: ["XFORWARD " <> Enum.join(@xforward_attributes, " ")], else: []
-
-    auth =
-      with true <- auth_offered?(session) and session.identity == nil,
-           [_ | _] = mechanisms <- mechanisms(session) do
-        ["AUTH " <> Enum.join(mechanisms, " ")]
-      else
-        _ -> []
-      end
-
     Reply.new(
       250,
       [
@@ -1086,9 +1236,58 @@ defmodule Sovite.SMTP.Server.Session do
         "SIZE #{session.opts.max_message_size}",
         "8BITMIME",
         "ENHANCEDSTATUSCODES"
-      ] ++ starttls ++ requiretls ++ smtputf8 ++ auth ++ xclient ++ xforward
+      ] ++ optional_extensions(session) ++ auth_extension(session) ++ proxy_extensions(session)
     )
   end
+
+  defp optional_extensions(%{opts: opts} = session) do
+    for {true, extension} <- [
+          {opts.chunking, "CHUNKING"},
+          {opts.chunking and opts.binarymime, "BINARYMIME"},
+          {opts.dsn, "DSN"},
+          {etrn_offered?(session), "ETRN"},
+          {opts.starttls and tls(session) == nil, "STARTTLS"},
+          {requiretls_offered?(session), "REQUIRETLS"},
+          {opts.smtputf8, "SMTPUTF8"},
+          {opts.mt_priority, "MT-PRIORITY"},
+          {opts.future_release != nil, "FUTURERELEASE"},
+          {opts.deliverby, "DELIVERBY"},
+          {opts.rrvs, "RRVS"}
+        ],
+        do: extension_line(extension, session)
+  end
+
+  # RFC 4865 §3: the longest hold, and the latest release time.
+  defp extension_line("FUTURERELEASE", %{opts: %{future_release: max}}) do
+    latest = DateTime.add(DateTime.utc_now(), max)
+    "FUTURERELEASE #{max} #{Params.format_time(latest)}"
+  end
+
+  defp extension_line(extension, _session), do: extension
+
+  defp auth_extension(session) do
+    with true <- auth_offered?(session) and session.identity == nil,
+         [_ | _] = mechanisms <- mechanisms(session) do
+      ["AUTH " <> Enum.join(mechanisms, " ")]
+    else
+      _ -> []
+    end
+  end
+
+  defp proxy_extensions(session) do
+    for {true, name, attributes} <- [
+          {session.xclient, "XCLIENT", @xclient_attributes},
+          {session.xforward, "XFORWARD", @xforward_attributes}
+        ],
+        do: name <> " " <> Enum.join(attributes, " ")
+  end
+
+  defp etrn_offered?(session),
+    do: session.opts.etrn and function_exported?(session.handler, :handle_etrn, 2)
+
+  defp etrn_argument({:domain, domain}), do: domain
+  defp etrn_argument({:subdomains, domain}), do: "@" <> domain
+  defp etrn_argument({:queue, queue}), do: "#" <> queue
 
   # RFC 8689 §4: only offered once the connection is encrypted.
   defp requiretls_offered?(session), do: session.opts.requiretls and tls(session) != nil
@@ -1125,8 +1324,8 @@ defmodule Sovite.SMTP.Server.Session do
           started
         )
 
-      params != [] ->
-        reply(session, out, "RCPT", recipient, unsupported_parameter(), started)
+      session.data != nil ->
+        reply(session, out, "RCPT", recipient, bdat_in_progress(), started)
 
       length(session.transaction.recipients) >= session.opts.max_recipients ->
         reply(
@@ -1139,12 +1338,66 @@ defmodule Sovite.SMTP.Server.Session do
         )
 
       true ->
-        session.handler.handle_rcpt(recipient, session.handler_state)
-        |> accept(session, out, "RCPT", recipient, started, Reply.new(250, "2.1.5", "Ok"), fn s ->
-          update_in(s.transaction.recipients, &(&1 ++ [recipient]))
-        end)
+        case check_rcpt(params, session) do
+          {:ok, rcpt_params} -> rcpt(recipient, rcpt_params, session, out, started)
+          {:error, reply} -> reply(session, out, "RCPT", recipient, reply, started)
+        end
     end
   end
+
+  defp rcpt(recipient, rcpt_params, session, out, started) do
+    session.handler.handle_rcpt(recipient, rcpt_params, session.handler_state)
+    |> accept(
+      session,
+      out,
+      "RCPT",
+      recipient,
+      started,
+      Reply.new(250, "2.1.5", "Ok"),
+      fn s -> update_in(s.transaction.recipients, &(&1 ++ [recipient])) end
+    )
+  end
+
+  defp check_rcpt([], _session), do: {:ok, @no_rcpt_params}
+  defp check_rcpt(_params, %{esmtp: false}), do: {:error, unsupported_parameter()}
+
+  defp check_rcpt(params, session) do
+    with :ok <- unique_params(params),
+         do: Enum.reduce_while(params, {:ok, @no_rcpt_params}, &add_rcpt_param(&1, &2, session))
+  end
+
+  defp add_rcpt_param(param, {:ok, acc}, session) do
+    case rcpt_param(param, session) do
+      {:ok, key, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
+      {:error, reply} -> {:halt, {:error, reply}}
+    end
+  end
+
+  defp rcpt_param({"NOTIFY", value}, %{opts: %{dsn: true}}) when is_binary(value) do
+    case DSNParams.parse_notify(value) do
+      {:ok, notify} -> {:ok, :notify, notify}
+      :error -> {:error, invalid_parameter("NOTIFY")}
+    end
+  end
+
+  defp rcpt_param({"ORCPT", value}, %{opts: %{dsn: true}} = session) when is_binary(value) do
+    case DSNParams.parse_orcpt(value, utf8: session.transaction.params.smtputf8) do
+      {:ok, orcpt} -> {:ok, :orcpt, orcpt}
+      :error -> {:error, invalid_parameter("ORCPT")}
+    end
+  end
+
+  defp rcpt_param({key, _value}, %{opts: %{dsn: true}}) when key in ["NOTIFY", "ORCPT"],
+    do: {:error, invalid_parameter(key)}
+
+  defp rcpt_param({"RRVS", value}, %{opts: %{rrvs: true}}) do
+    case value && Params.parse_rrvs(value) do
+      {:ok, rrvs} -> {:ok, :rrvs, rrvs}
+      _ -> {:error, invalid_parameter("RRVS")}
+    end
+  end
+
+  defp rcpt_param(_param, _session), do: {:error, unsupported_parameter()}
 
   # RFC 6531 §3.4: internationalized addresses only in transactions
   # with SMTPUTF8. Their domains go on in A-labels.
@@ -1181,23 +1434,46 @@ defmodule Sovite.SMTP.Server.Session do
   defp check_mail(_params, %{esmtp: false}), do: {:error, unsupported_parameter()}
 
   defp check_mail(params, session) do
+    with :ok <- unique_params(params),
+         {:ok, mail_params} <-
+           Enum.reduce_while(params, {:ok, @no_mail_params}, &add_mail_param(&1, &2, session)),
+         do: check_release(mail_params)
+  end
+
+  # RFC 4865 §4: one hold at most, and with BY, due after the release.
+  defp check_release(%{hold: {:conflict, _}}), do: {:error, invalid_parameter("HOLDFOR")}
+
+  defp check_release(%{hold: hold, by: %{time: by}} = mail_params) when hold != nil do
+    now = DateTime.utc_now()
+
+    if DateTime.compare(Params.release_time(hold, now), DateTime.add(now, by)) == :lt,
+      do: {:ok, mail_params},
+      else: {:error, Reply.new(501, "5.5.4", "BY must end after the release time")}
+  end
+
+  defp check_release(mail_params), do: {:ok, mail_params}
+
+  defp unique_params(params) do
     keys = Enum.map(params, &elem(&1, 0))
 
     if length(Enum.uniq(keys)) != length(keys),
       do: {:error, Reply.new(501, "5.5.4", "Duplicate parameter")},
-      else:
-        Enum.reduce_while(
-          params,
-          {:ok, @no_mail_params},
-          &add_mail_param(&1, &2, session)
-        )
+      else: :ok
   end
 
   defp add_mail_param(param, {:ok, acc}, session) do
     case mail_param(param, session) do
-      {:ok, :auth, _value} -> {:cont, {:ok, acc}}
-      {:ok, key, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
-      {:error, reply} -> {:halt, {:error, reply}}
+      {:ok, :auth, _value} ->
+        {:cont, {:ok, acc}}
+
+      {:ok, :hold, value} when acc.hold != nil ->
+        {:cont, {:ok, %{acc | hold: {:conflict, value}}}}
+
+      {:ok, key, value} ->
+        {:cont, {:ok, Map.put(acc, key, value)}}
+
+      {:error, reply} ->
+        {:halt, {:error, reply}}
     end
   end
 
@@ -1214,11 +1490,68 @@ defmodule Sovite.SMTP.Server.Session do
     end
   end
 
-  defp mail_param({"BODY", value}, _session) when is_binary(value) do
+  defp mail_param({"BODY", value}, session) when is_binary(value) do
     case String.upcase(value, :ascii) do
-      "7BIT" -> {:ok, :body, :"7bit"}
-      "8BITMIME" -> {:ok, :body, :"8bitmime"}
-      _ -> {:error, Reply.new(501, "5.5.4", "Invalid BODY parameter")}
+      "7BIT" ->
+        {:ok, :body, :"7bit"}
+
+      "8BITMIME" ->
+        {:ok, :body, :"8bitmime"}
+
+      "BINARYMIME" when session.opts.chunking and session.opts.binarymime ->
+        {:ok, :body, :binarymime}
+
+      _ ->
+        {:error, invalid_parameter("BODY")}
+    end
+  end
+
+  defp mail_param({"RET", value}, %{opts: %{dsn: true}}) when is_binary(value) do
+    case DSNParams.parse_ret(value) do
+      {:ok, ret} -> {:ok, :ret, ret}
+      :error -> {:error, invalid_parameter("RET")}
+    end
+  end
+
+  defp mail_param({"ENVID", value}, %{opts: %{dsn: true}}) when is_binary(value) do
+    case DSNParams.parse_envid(value) do
+      {:ok, envid} -> {:ok, :envid, envid}
+      :error -> {:error, invalid_parameter("ENVID")}
+    end
+  end
+
+  defp mail_param({key, _value}, %{opts: %{dsn: true}}) when key in ["RET", "ENVID"],
+    do: {:error, invalid_parameter(key)}
+
+  defp mail_param({"MT-PRIORITY", value}, %{opts: %{mt_priority: true}}) do
+    case value && Params.parse_priority(value) do
+      {:ok, priority} -> {:ok, :priority, priority}
+      _ -> {:error, Reply.new(501, "5.5.2", "Invalid MT-PRIORITY parameter")}
+    end
+  end
+
+  defp mail_param({"HOLDFOR", value}, %{opts: %{future_release: max}}) when max != nil do
+    case value && Params.parse_holdfor(value) do
+      {:ok, seconds} when seconds <= max -> {:ok, :hold, {:for, seconds}}
+      _ -> {:error, invalid_parameter("HOLDFOR")}
+    end
+  end
+
+  defp mail_param({"HOLDUNTIL", value}, %{opts: %{future_release: max}}) when max != nil do
+    latest = DateTime.add(DateTime.utc_now(), max)
+
+    with {:ok, time} <- (value && Params.parse_holduntil(value)) || :error,
+         true <- DateTime.compare(time, latest) != :gt do
+      {:ok, :hold, {:until, time}}
+    else
+      _ -> {:error, invalid_parameter("HOLDUNTIL")}
+    end
+  end
+
+  defp mail_param({"BY", value}, %{opts: %{deliverby: true}}) do
+    case value && Params.parse_by(value) do
+      {:ok, by} -> {:ok, :by, by}
+      _ -> {:error, invalid_parameter("BY")}
     end
   end
 
@@ -1236,11 +1569,15 @@ defmodule Sovite.SMTP.Server.Session do
   defp mail_param({"SMTPUTF8", nil}, %{opts: %{smtputf8: true}}), do: {:ok, :smtputf8, true}
 
   defp mail_param({key, _value}, _session) when key in ["SIZE", "BODY", "REQUIRETLS"],
-    do: {:error, Reply.new(501, "5.5.4", "Invalid #{key} parameter")}
+    do: {:error, invalid_parameter(key)}
 
   defp mail_param(_param, _session), do: {:error, unsupported_parameter()}
 
   defp unsupported_parameter, do: Reply.new(555, "5.5.4", "Unsupported parameter")
+
+  defp invalid_parameter(key), do: Reply.new(501, "5.5.4", "Invalid #{key} parameter")
+
+  defp bdat_in_progress, do: Reply.new(503, "5.5.1", "Error: BDAT in progress")
 
   defp line_too_long, do: Reply.new(500, "5.5.2", "Line too long")
 
@@ -1274,6 +1611,8 @@ defmodule Sovite.SMTP.Server.Session do
   defp usage(:rcpt), do: "RCPT TO:<address>"
   defp usage(:vrfy), do: "VRFY address"
   defp usage(:auth), do: "AUTH mechanism [initial-response]"
+  defp usage(:bdat), do: "BDAT size [LAST]"
+  defp usage(:etrn), do: "ETRN [@]domain"
   defp usage(verb), do: verb_name(verb)
 
   defp verb_name(nil), do: "UNKNOWN"
@@ -1282,6 +1621,9 @@ defmodule Sovite.SMTP.Server.Session do
   defp reset_transaction(%{transaction: nil} = session), do: session
 
   defp reset_transaction(session) do
+    # Chunks of a message sent with BDAT.
+    session = %{abort_data(session, :reset) | data: nil}
+
     state =
       if function_exported?(session.handler, :handle_rset, 1),
         do: session.handler.handle_rset(session.handler_state),
@@ -1391,8 +1733,129 @@ defmodule Sovite.SMTP.Server.Session do
     reply(session, out, "END-OF-MESSAGE", last, reply, started)
   end
 
+  ## BDAT chunks
+
+  # The first chunk of a message: the handler accepts it as DATA. A
+  # refusal is kept for the rest of the chunks.
+  defp open_chunks(session, started) do
+    decoder =
+      if session.transaction.params.body != :binarymime,
+        do: DataDecoder.new(session.opts.bare_line_endings, dots: false)
+
+    data = %{decoder: decoder, size: 0, error: nil}
+
+    case session.handler.handle_data(session.transaction, session.handler_state) do
+      {:ok, state} ->
+        {%{session | handler_state: state, data: data}, nil}
+
+      {:reply, reply, state} ->
+        if Reply.positive?(reply),
+          do: {%{session | handler_state: state, data: data}, nil},
+          else: {%{session | handler_state: state, data: %{data | error: reply}}, nil}
+
+      {:close, reply, state} ->
+        session = %{session | handler_state: state, phase: :closed}
+        {session, {:close, reply, started}}
+    end
+  end
+
+  defp process_chunk(%{phase: {:bdat, %{refusal: {:close, reply, started}}}} = session, out) do
+    session = %{session | phase: :closed, buffer: <<>>}
+    reply(session, out, "BDAT", nil, reply, started)
+  end
+
+  defp process_chunk(%{phase: {:bdat, chunk}} = session, out) do
+    taken = min(chunk.remaining, byte_size(session.buffer))
+    <<bytes::binary-size(^taken), rest::binary>> = session.buffer
+    chunk = %{chunk | remaining: chunk.remaining - taken}
+    session = %{session | buffer: rest, phase: {:bdat, chunk}}
+
+    case chunk_content(session, bytes) do
+      {:ok, session} when chunk.remaining > 0 ->
+        {:continue, Enum.reverse(out), session}
+
+      {:ok, session} ->
+        chunk_done(%{session | phase: :command}, out, chunk)
+
+      {:error, reason} ->
+        bare_line_ending(%{session | buffer: <<>>, phase: :command}, out, "BDAT", reason)
+    end
+  end
+
+  defp chunk_content(%{phase: {:bdat, %{refusal: nil}}, data: %{error: nil}} = session, bytes) do
+    case session.data.decoder do
+      nil ->
+        {:ok, content(session, bytes)}
+
+      decoder ->
+        case DataDecoder.decode(decoder, bytes) do
+          {:more, content, decoder} ->
+            {:ok, content(put_in(session.data.decoder, decoder), content)}
+
+          {:error, reason, _content} ->
+            {:error, reason}
+        end
+    end
+  end
+
+  defp chunk_content(session, _bytes), do: {:ok, session}
+
+  defp chunk_done(session, out, %{refusal: %Reply{} = reply} = chunk) do
+    session = if chunk.last and session.transaction, do: reset_transaction(session), else: session
+    reply(session, out, "BDAT", nil, reply, chunk.started)
+  end
+
+  defp chunk_done(session, out, %{last: false} = chunk) do
+    case session.data do
+      %{error: nil, size: size} ->
+        reply(
+          session,
+          out,
+          "BDAT",
+          nil,
+          Reply.new(250, "2.0.0", "#{size} octets received"),
+          chunk.started
+        )
+
+      %{error: :aborted} ->
+        reply(
+          session,
+          out,
+          "BDAT",
+          nil,
+          Reply.new(554, "5.5.0", "Error: message aborted"),
+          chunk.started
+        )
+
+      %{error: reply} ->
+        reply(session, out, "BDAT", nil, reply, chunk.started)
+    end
+  end
+
+  # The last chunk ends the message as the final dot does.
+  defp chunk_done(session, out, _chunk) do
+    case session.data do
+      %{error: nil, decoder: decoder} when decoder != nil ->
+        case DataDecoder.finish(decoder) do
+          {:ok, content} -> finish_data(content(session, content), out)
+          {:error, reason, _} -> bare_line_ending(session, out, "END-OF-MESSAGE", reason)
+        end
+
+      %{error: :aborted} ->
+        session = %{
+          session
+          | data: %{session.data | error: Reply.new(554, "5.5.0", "Error: message aborted")}
+        }
+
+        finish_data(session, out)
+
+      _data ->
+        finish_data(session, out)
+    end
+  end
+
   # Tells the handler that an open message will not complete.
-  defp abort_data(%{phase: :data, data: %{error: nil}} = session, reason) do
+  defp abort_data(%{data: %{error: nil}} = session, reason) do
     state = session.handler.handle_data_abort(reason, session.handler_state)
     %{session | handler_state: state, data: %{session.data | error: :aborted}}
   end

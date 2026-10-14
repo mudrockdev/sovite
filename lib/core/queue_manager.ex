@@ -29,13 +29,36 @@ defmodule Sovite.Core.QueueManager do
 
     1. Failed recipients are reported to the sender (`Sovite.Core.Bounce`),
        and counted against the user who sent the message, if any
-       (`Sovite.Core.Outbound`).
+       (`Sovite.Core.Outbound`). Delivered recipients and expanded
+       aliases are reported too, when the sender asked for it
+       (`NOTIFY=SUCCESS`); a recipient with `NOTIFY=NEVER`, or without
+       `FAILURE`, is never reported as failed.
     2. If no recipient is pending, the message is deleted.
     3. If the message is older than `queue.max_lifetime`, its pending
        recipients fail and are reported, and it is deleted.
     4. Otherwise it is deferred: a delay warning is sent if due
-       (`queue.delay_warning`), and the next attempt is scheduled with
-       exponential backoff (`Sovite.Queue.Backoff`).
+       (`queue.delay_warning`) for the recipients whose `NOTIFY` does not
+       rule it out, and the next attempt is scheduled with exponential
+       backoff (`Sovite.Queue.Backoff`).
+
+  The DSN parameters of the message (RFC 3461) go with it to servers
+  that support `DSN`.
+
+  ## Priorities and deadlines
+
+  Jobs for the same destination run in `MT-PRIORITY` order (RFC 6710),
+  and of the destinations waiting, the one with the highest priority
+  job goes first. A message on hold (`FUTURERELEASE`, RFC 4865) waits in
+  `deferred/` until its release time, and its lifetime starts then. A
+  message with a `DELIVERBY` deadline (RFC 2852) is retried by then at
+  the latest; when it passes, the pending recipients fail with `5.4.7`
+  (`R`), or the sender gets a delay warning (`N`).
+
+  ## ETRN
+
+  `flush/2` with a domain retries the deferred messages with recipients
+  in that domain now, for `ETRN` (RFC 1985). The same domain is flushed
+  at most once a minute.
 
   ## Limits
 
@@ -53,8 +76,11 @@ defmodule Sovite.Core.QueueManager do
   require Logger
 
   alias Sovite.Core.{Bounce, Config, Delivery, Outbound, Recipients, Router, Routing}
-  alias Sovite.Queue.{Backoff, Entry, Spool}
+  alias Sovite.Queue.{Backoff, Entry, Envelope, Spool}
   alias Sovite.SMTP.Client
+
+  # The shortest time between two ETRN flushes of the same domain.
+  @flush_interval 60_000
 
   defstruct [
     :opts,
@@ -64,6 +90,9 @@ defmodule Sovite.Core.QueueManager do
     messages: %{},
     deferred: :gb_sets.new(),
     deferred_due: %{},
+    deferred_domains: %{},
+    flushed: %{},
+    seq: 0,
     ready: %{},
     running: %{},
     workers: %{},
@@ -105,6 +134,7 @@ defmodule Sovite.Core.QueueManager do
       max_backoff: config.queue.max_backoff,
       delay_warning: config.queue.delay_warning,
       double_bounce_recipient: config.bounce.double_bounce_recipient,
+      bounce_size_limit: config.bounce.size_limit,
       maildir: config.maildir,
       pipes: config.pipe,
       delimiter: config.routing.extension_delimiter
@@ -124,6 +154,19 @@ defmodule Sovite.Core.QueueManager do
   @doc "Retries every deferred message now, like `postqueue -f`."
   @spec flush(GenServer.server()) :: :ok
   def flush(server), do: GenServer.call(server, :flush)
+
+  @doc """
+  Retries the deferred messages with pending recipients in a domain now
+  (`{:domain, domain}`), or in a domain and its subdomains
+  (`{:subdomains, domain}`), as `ETRN` asks. Returns how many there
+  were, or `{:error, :too_soon}` when the same was asked less than a
+  minute ago.
+  """
+  @spec flush(GenServer.server(), {:domain | :subdomains, String.t()}) ::
+          {:ok, non_neg_integer()} | {:error, :too_soon}
+  def flush(server, {kind, domain} = node)
+      when kind in [:domain, :subdomains] and is_binary(domain),
+      do: GenServer.call(server, {:flush, node})
 
   @doc "Counts of messages and deliveries, for status output and tests."
   @spec stats(GenServer.server()) :: %{
@@ -245,6 +288,34 @@ defmodule Sovite.Core.QueueManager do
     {:reply, :ok, state |> activate_due() |> schedule_wake() |> dispatch()}
   end
 
+  def handle_call({:flush, node}, _from, state) do
+    now = now_ms()
+
+    case Map.fetch(state.flushed, node) do
+      {:ok, last} when now - last < @flush_interval ->
+        {:reply, {:error, :too_soon}, state}
+
+      _ ->
+        ids =
+          for {id, domains} <- state.deferred_domains,
+              Enum.any?(domains, &in_node?(&1, node)),
+              do: id
+
+        state =
+          Enum.reduce(ids, %{state | flushed: Map.put(state.flushed, node, now)}, fn id, state ->
+            due = Map.fetch!(state.deferred_due, id)
+
+            %{
+              state
+              | deferred: :gb_sets.add({0, id}, :gb_sets.delete({due, id}, state.deferred)),
+                deferred_due: Map.put(state.deferred_due, id, 0)
+            }
+          end)
+
+        {:reply, {:ok, length(ids)}, state |> activate_due() |> schedule_wake() |> dispatch()}
+    end
+  end
+
   def handle_call(:stats, _from, state) do
     stats = %{
       active: map_size(state.messages),
@@ -322,6 +393,24 @@ defmodule Sovite.Core.QueueManager do
     end
   end
 
+  defp in_node?(domain, {:domain, node}), do: domain == node
+
+  defp in_node?(domain, {:subdomains, node}),
+    do: domain == node or String.ends_with?(domain, "." <> node)
+
+  # The domains of a message's pending recipients, for ETRN.
+  defp pending_domains(entry) do
+    entry
+    |> Entry.pending()
+    |> Enum.flat_map(fn address ->
+      case Sovite.Validators.split_mailbox(address, utf8: true) do
+        {:ok, {_local, domain}} -> [String.downcase(domain, :ascii)]
+        {:error, _} -> []
+      end
+    end)
+    |> Enum.uniq()
+  end
+
   ## Picking up messages
 
   defp capacity?(state), do: map_size(state.messages) < state.opts.max_active
@@ -340,7 +429,7 @@ defmodule Sovite.Core.QueueManager do
         due =
           if entry.next_attempt, do: DateTime.to_unix(entry.next_attempt, :millisecond), else: 0
 
-        add_deferred(state, id, due)
+        add_deferred(state, id, due, pending_domains(entry))
 
       {:error, reason} ->
         corrupt(state, id, :deferred, reason)
@@ -377,11 +466,12 @@ defmodule Sovite.Core.QueueManager do
     end
   end
 
-  defp add_deferred(state, id, due) do
+  defp add_deferred(state, id, due, domains) do
     %{
       state
       | deferred: :gb_sets.add({due, id}, state.deferred),
-        deferred_due: Map.put(state.deferred_due, id, due)
+        deferred_due: Map.put(state.deferred_due, id, due),
+        deferred_domains: Map.put(state.deferred_domains, id, domains)
     }
   end
 
@@ -401,7 +491,8 @@ defmodule Sovite.Core.QueueManager do
             state = %{
               state
               | deferred: :gb_sets.delete({due, id}, state.deferred),
-                deferred_due: Map.delete(state.deferred_due, id)
+                deferred_due: Map.delete(state.deferred_due, id),
+                deferred_domains: Map.delete(state.deferred_domains, id)
             }
 
             state |> activate(id, :deferred) |> activate_due()
@@ -438,22 +529,8 @@ defmodule Sovite.Core.QueueManager do
         path = Spool.path(dir, :active, id)
 
         case Spool.load(path) do
-          {:ok, loaded} ->
-            message = %{
-              entry: Entry.new(loaded.envelope, loaded.records),
-              path: path,
-              message_offset: loaded.message_offset,
-              message_size: loaded.message_size,
-              prefix: loaded.prefix,
-              end_offset: loaded.end_offset,
-              jobs: 0,
-              expired: false
-            }
-
-            plan(state, id, message)
-
-          {:error, reason} ->
-            corrupt(state, id, :active, reason)
+          {:ok, loaded} -> loaded(state, id, path, loaded)
+          {:error, reason} -> corrupt(state, id, :active, reason)
         end
 
       # Picked up already, or removed by the administrator.
@@ -462,6 +539,43 @@ defmodule Sovite.Core.QueueManager do
 
       {:error, reason} ->
         Logger.error("cannot activate message: #{:file.format_error(reason)}", queue_id: id)
+        state
+    end
+  end
+
+  defp loaded(state, id, path, loaded) do
+    message = %{
+      entry: Entry.new(loaded.envelope, loaded.records),
+      path: path,
+      message_offset: loaded.message_offset,
+      message_size: loaded.message_size,
+      prefix: loaded.prefix,
+      end_offset: loaded.end_offset,
+      jobs: 0,
+      expired: false
+    }
+
+    release = Envelope.release_time(loaded.envelope)
+
+    if release && DateTime.after?(release, DateTime.utc_now()),
+      do: hold(state, id, message, release),
+      else: plan(state, id, message)
+  end
+
+  # FUTURERELEASE: back to deferred/ until the release time.
+  defp hold(state, id, message, release) do
+    case Spool.move(state.opts.directory, id, :active, :deferred) do
+      :ok ->
+        state
+        |> add_deferred(
+          id,
+          DateTime.to_unix(release, :millisecond),
+          pending_domains(message.entry)
+        )
+        |> schedule_wake()
+
+      {:error, reason} ->
+        Logger.error("cannot hold message: #{:file.format_error(reason)}", queue_id: id)
         state
     end
   end
@@ -478,6 +592,12 @@ defmodule Sovite.Core.QueueManager do
 
   defp plan(state, id, message) do
     envelope = message.entry.envelope
+
+    # DELIVERBY with R: too late to try again.
+    message =
+      if deadline_passed?(envelope, :return),
+        do: fail_pending(message, "5.4.7", "delivery time expired (DELIVERBY)"),
+        else: message
 
     route =
       case envelope.content_filter do
@@ -502,35 +622,78 @@ defmodule Sovite.Core.QueueManager do
 
     jobs =
       for {{{:deliver, destination}, sender}, recipients} <- groups,
-          chunk <- Enum.chunk_every(recipients, state.opts.max_recipients) do
-        %{
-          queue_id: id,
-          destination: destination,
-          recipients: chunk,
-          sender: sender,
-          body_type: envelope.body_type,
-          path: message.path,
-          message_offset: message.message_offset,
-          message_size: message.message_size,
-          prefix: message.prefix,
-          requiretls: envelope.requiretls and envelope.content_filter == nil,
-          smtputf8: envelope.smtputf8,
-          xforward: if(envelope.content_filter, do: xforward(envelope))
-        }
-      end
+          chunk <- Enum.chunk_every(recipients, state.opts.max_recipients),
+          do: job(state, id, message, destination, sender, chunk)
 
     if jobs == [] do
       finalize(state, id, message)
     else
       state = put_in(state.messages[id], %{message | jobs: length(jobs)})
-
-      ready =
-        Enum.reduce(jobs, state.ready, fn job, ready ->
-          Map.update(ready, job.destination, :queue.from_list([job]), &:queue.in(job, &1))
-        end)
-
-      %{state | ready: ready}
+      Enum.reduce(jobs, state, &add_job(&2, &1))
     end
+  end
+
+  defp job(state, id, message, destination, sender, recipients) do
+    envelope = message.entry.envelope
+    filter = envelope.content_filter != nil
+
+    %{
+      queue_id: id,
+      destination: destination,
+      recipients: recipients,
+      sender: sender,
+      body_type: envelope.body_type,
+      path: message.path,
+      message_offset: message.message_offset,
+      message_size: message.message_size,
+      prefix: message.prefix,
+      requiretls: envelope.requiretls and not filter,
+      smtputf8: envelope.smtputf8,
+      xforward: if(filter, do: xforward(envelope)),
+      dsn: job_dsn(envelope, recipients),
+      chunking: Map.get(state.opts, :chunking, false),
+      priority: envelope.priority,
+      deliver_by: if(not filter, do: envelope.deliver_by),
+      rrvs: if(filter, do: %{}, else: Map.take(envelope.rrvs, recipients))
+    }
+  end
+
+  # Ready jobs by destination, in priority order, then first come first
+  # served.
+  defp add_job(state, job) do
+    key = {-job.priority, state.seq, job}
+
+    ready =
+      Map.update(state.ready, job.destination, :gb_sets.singleton(key), &:gb_sets.add(key, &1))
+
+    %{state | ready: ready, seq: state.seq + 1}
+  end
+
+  defp head_priority(state, destination) do
+    {priority, _seq, _job} = :gb_sets.smallest(Map.fetch!(state.ready, destination))
+    priority
+  end
+
+  defp deadline_passed?(%{deliver_by: %{mode: mode, deadline: deadline}}, mode),
+    do: not DateTime.after?(deadline, DateTime.utc_now())
+
+  defp deadline_passed?(_envelope, _mode), do: false
+
+  defp fail_pending(message, status, text) do
+    records =
+      for address <- Entry.pending(message.entry),
+          do: {:recipient, address, :failed, details({status, text})}
+
+    append(message, records)
+  end
+
+  # The DSN parameters to relay with the message, if any.
+  defp job_dsn(envelope, recipients) do
+    dsn = Map.take(envelope.dsn, recipients)
+
+    if envelope.ret == nil and envelope.envid == nil and dsn == %{},
+      do: nil,
+      else: %{ret: envelope.ret, envid: envelope.envid, recipients: dsn}
   end
 
   # What the content filter is told about the message's origin.
@@ -571,6 +734,7 @@ defmodule Sovite.Core.QueueManager do
   defp immediate_result({rcpt, {:fail, status, text}}),
     do: {rcpt, :failed, details({status, text})}
 
+  # No success notification: the message was not delivered.
   defp immediate_result({rcpt, {:discard, text}}),
     do: {rcpt, :delivered, details({"2.0.0", "discarded: #{text}"})}
 
@@ -587,7 +751,10 @@ defmodule Sovite.Core.QueueManager do
     now = now_ms()
     {allowed, waiting} = startable(state, now)
 
-    case Enum.sort_by(allowed, &Map.get(state.destination_last, &1, 0)) do
+    case Enum.sort_by(
+           allowed,
+           &{head_priority(state, &1), Map.get(state.destination_last, &1, 0)}
+         ) do
       [] -> schedule_rate_timer(state, waiting, now)
       [destination | _] -> state |> start_worker(destination, now) |> dispatch()
     end
@@ -655,10 +822,10 @@ defmodule Sovite.Core.QueueManager do
   end
 
   defp pop_job(state, destination) do
-    {{:value, job}, queue} = :queue.out(Map.fetch!(state.ready, destination))
+    {{_priority, _seq, job}, queue} = :gb_sets.take_smallest(Map.fetch!(state.ready, destination))
 
     ready =
-      if :queue.is_empty(queue),
+      if :gb_sets.is_empty(queue),
         do: Map.delete(state.ready, destination),
         else: Map.put(state.ready, destination, queue)
 
@@ -731,7 +898,9 @@ defmodule Sovite.Core.QueueManager do
   ## Finishing an attempt
 
   defp finalize(state, id, message) do
-    {notified, message} = notify_failures(state, message)
+    {failures_notified, message} = notify_failures(state, message)
+    {successes_notified, message} = notify_successes(state, message)
+    notified = failures_notified and successes_notified
 
     cond do
       Entry.pending(message.entry) == [] and notified ->
@@ -739,6 +908,9 @@ defmodule Sovite.Core.QueueManager do
 
       Entry.pending(message.entry) != [] and expired?(state, message) ->
         finalize(state, id, expire(message))
+
+      Entry.pending(message.entry) != [] and deadline_passed?(message.entry.envelope, :return) ->
+        finalize(state, id, fail_pending(message, "5.4.7", "delivery time expired (DELIVERBY)"))
 
       true ->
         defer(state, id, message)
@@ -752,9 +924,52 @@ defmodule Sovite.Core.QueueManager do
 
       failures ->
         record = {:notified, Enum.map(failures, &elem(&1, 0))}
-        {result, message} = send_notification(state, :failure, message, failures, record)
+        # NOTIFY=NEVER, or without FAILURE: not reported.
+        reported = Enum.filter(failures, &Entry.notify?(message.entry, elem(&1, 0), :failure))
+
+        {result, message} =
+          if reported == [],
+            do: {:ok, append(message, [record])},
+            else: send_notification(state, :failure, message, reported, record)
+
         user = message.entry.envelope.auth_user
         if result == :ok, do: Outbound.failed(state.opts[:outbound], user, length(failures))
+        {result == :ok, message}
+    end
+  end
+
+  # NOTIFY=SUCCESS: delivered recipients and expanded aliases. Not for
+  # the copy sent to a content filter: it comes back as a new message.
+  # Never to the null sender.
+  defp notify_successes(_state, %{entry: %{envelope: %{sender: ""}}} = message),
+    do: {true, message}
+
+  defp notify_successes(state, message) do
+    entry = message.entry
+
+    delivered =
+      if entry.envelope.content_filter, do: [], else: Entry.unnotified_successes(entry)
+
+    expanded =
+      for alias <- Entry.unnotified_expansions(entry) do
+        {alias,
+         %{
+           status: "2.0.0",
+           reply: "expanded to several recipients",
+           remote: nil,
+           smtp: false,
+           at: entry.envelope.received_at || DateTime.utc_now(),
+           action: :expanded
+         }}
+      end
+
+    case delivered ++ expanded do
+      [] ->
+        {true, message}
+
+      successes ->
+        record = {:notified, Enum.map(successes, &elem(&1, 0))}
+        {result, message} = send_notification(state, :success, message, successes, record)
         {result == :ok, message}
     end
   end
@@ -780,6 +995,7 @@ defmodule Sovite.Core.QueueManager do
 
     state.opts
     |> Map.take([:hostname, :directory, :max_lifetime, :double_bounce_recipient])
+    |> Map.put(:size_limit, Map.get(state.opts, :bounce_size_limit, 50_000))
     |> Map.put(:expand, fn address ->
       case Recipients.expand(routing, address) do
         {:ok, addresses} -> addresses
@@ -789,9 +1005,12 @@ defmodule Sovite.Core.QueueManager do
     end)
   end
 
+  # From the release of a message on hold.
   defp age(message) do
-    case message.entry.envelope.received_at do
-      %DateTime{} = received_at -> DateTime.diff(DateTime.utc_now(), received_at, :millisecond)
+    envelope = message.entry.envelope
+
+    case Envelope.release_time(envelope) || envelope.received_at do
+      %DateTime{} = start -> max(DateTime.diff(DateTime.utc_now(), start, :millisecond), 0)
       nil -> 0
     end
   end
@@ -836,7 +1055,7 @@ defmodule Sovite.Core.QueueManager do
     message = maybe_warn(state, message)
     attempts = message.entry.attempts + 1
     delay = Backoff.delay(attempts, min: state.opts.min_backoff, max: state.opts.max_backoff)
-    next_attempt = DateTime.add(DateTime.utc_now(), delay, :millisecond)
+    next_attempt = next_attempt(message.entry.envelope, delay)
     message = append(message, [{:retry, attempts, next_attempt}])
     state = %{state | messages: Map.delete(state.messages, id)}
 
@@ -849,7 +1068,11 @@ defmodule Sovite.Core.QueueManager do
         )
 
         state
-        |> add_deferred(id, DateTime.to_unix(next_attempt, :millisecond))
+        |> add_deferred(
+          id,
+          DateTime.to_unix(next_attempt, :millisecond),
+          pending_domains(message.entry)
+        )
         |> schedule_wake()
 
       {:error, reason} ->
@@ -859,26 +1082,54 @@ defmodule Sovite.Core.QueueManager do
     end
   end
 
+  # Before a DELIVERBY deadline, at the latest at it.
+  defp next_attempt(envelope, delay) do
+    now = DateTime.utc_now()
+    next = DateTime.add(now, delay, :millisecond)
+
+    case envelope.deliver_by do
+      %{deadline: deadline} ->
+        if DateTime.after?(deadline, now) and DateTime.after?(next, deadline),
+          do: deadline,
+          else: next
+
+      nil ->
+        next
+    end
+  end
+
   defp maybe_warn(state, message) do
     if warning_due?(state, message) do
       entry = message.entry
+      by = deadline_passed?(entry.envelope, :notify)
 
       pending =
-        for address <- Entry.pending(entry) do
-          {address, entry.recipients[address].details || details({"4.0.0", "not yet attempted"})}
+        for address <- Entry.pending(entry), Entry.notify?(entry, address, :delay) do
+          {address, warning_details(entry.recipients[address].details, by)}
         end
 
-      {_result, message} = send_notification(state, :delay, message, pending, :warned)
-      message
+      if pending == [] do
+        append(message, [:warned])
+      else
+        {_result, message} = send_notification(state, :delay, message, pending, :warned)
+        message
+      end
     else
       message
     end
   end
 
-  defp warning_due?(%{opts: %{delay_warning: nil}}, _message), do: false
+  # DELIVERBY with N: the deadline passed (RFC 2852 §4.1.4.1).
+  defp warning_details(_details, true),
+    do: details({"4.4.7", "delivery time expired (DELIVERBY), still trying"})
+
+  defp warning_details(details, false), do: details || details({"4.0.0", "not yet attempted"})
 
   defp warning_due?(state, %{entry: entry} = message) do
-    not entry.warned and entry.envelope.sender != "" and age(message) >= state.opts.delay_warning
+    delay = state.opts.delay_warning
+
+    not entry.warned and entry.envelope.sender != "" and
+      (deadline_passed?(entry.envelope, :notify) or (delay != nil and age(message) >= delay))
   end
 
   defp now_ms, do: System.monotonic_time(:millisecond)

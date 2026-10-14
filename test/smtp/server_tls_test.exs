@@ -26,7 +26,7 @@ defmodule Sovite.SMTP.ServerTLSTest do
     @impl true
     def handle_mail(_sender, _params, state), do: {:ok, state}
     @impl true
-    def handle_rcpt(_recipient, state), do: {:ok, state}
+    def handle_rcpt(_recipient, _params, state), do: {:ok, state}
     @impl true
     def handle_data(_transaction, state), do: {:ok, %{state | data: []}}
     @impl true

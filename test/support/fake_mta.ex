@@ -6,8 +6,9 @@ defmodule Sovite.Test.FakeMTA do
   connections. Each accepted message is sent to the owner process as
   `{:fake_mta, pid, {:message, message}}`, where `message` is a map with
   `:helo`, `:mail_from`, `:mail_args` (the whole `MAIL` argument, with
-  parameters), `:rcpt_to` (accepted recipients only), and `:data`
-  (dot-unstuffed, without the final `.`). Each new connection is reported
+  parameters), `:rcpt_to` (accepted recipients only), `:rcpt_args` (their
+  whole `RCPT` arguments), `:data` (dot-unstuffed, without the final
+  `.`), and `:chunked` (sent with `BDAT`). Each new connection is reported
   as `{:fake_mta, pid, :connected}`.
 
       {:ok, mta} = FakeMTA.start_link(responses: %{rcpt: &reject_unknown/1})
@@ -41,8 +42,9 @@ defmodule Sovite.Test.FakeMTA do
   receives the command argument and returns either of those.
 
   Stages: `:greeting`, `:ehlo`, `:helo`, `:mail`, `:rcpt`, `:data` (reply
-  to `DATA`), `:data_end` (reply after the final dot), `:rset`, `:noop`,
-  `:quit`. Recipients are recorded only when the `:rcpt` reply is 2xx.
+  to `DATA`), `:data_end` (reply after the final dot or `BDAT LAST`),
+  `:bdat` (reply to other `BDAT` chunks, called with the chunk), `:rset`,
+  `:noop`, `:quit`. Recipients are recorded only when the `:rcpt` reply is 2xx.
   """
 
   use GenServer
@@ -144,6 +146,8 @@ defmodule Sovite.Test.FakeMTA do
       mail_from: nil,
       mail_args: nil,
       rcpt_to: [],
+      rcpt_args: [],
+      chunks: [],
       xforward: [],
       tls: session.tls,
       auth: session.auth
@@ -246,8 +250,36 @@ defmodule Sovite.Test.FakeMTA do
     send_reply(
       socket,
       reply,
-      if(positive?(reply), do: %{txn | rcpt_to: txn.rcpt_to ++ [rcpt]}, else: txn)
+      if(positive?(reply),
+        do: %{txn | rcpt_to: txn.rcpt_to ++ [rcpt], rcpt_args: txn.rcpt_args ++ [arg]},
+        else: txn
+      )
     )
+  end
+
+  defp handle_command("BDAT", arg, socket, config, txn) do
+    {size, last} =
+      case String.split(arg, " ") do
+        [size] -> {String.to_integer(size), false}
+        [size, _last] -> {String.to_integer(size), true}
+      end
+
+    {:ok, chunk} = recv_bytes(socket, size)
+    txn = %{txn | chunks: txn.chunks ++ [chunk]}
+
+    cond do
+      txn.rcpt_to == [] ->
+        send_reply(socket, "554 5.5.1 No valid recipients", txn)
+
+      not last ->
+        send_reply(socket, respond(config, :bdat, chunk, "250 2.0.0 OK"), txn)
+
+      config.lmtp ->
+        lmtp_data_end(socket, config, txn, chunks(txn))
+
+      true ->
+        data_end(socket, config, txn, chunks(txn))
+    end
   end
 
   defp handle_command("DATA", _arg, socket, config, txn) do
@@ -347,8 +379,24 @@ defmodule Sovite.Test.FakeMTA do
     end)
   end
 
-  defp report(config, message),
-    do: send(config.owner, {:fake_mta, config.server, {:message, message}})
+  defp report(config, message) do
+    message = message |> Map.put(:chunked, message.chunks != []) |> Map.delete(:chunks)
+    send(config.owner, {:fake_mta, config.server, {:message, message}})
+  end
+
+  defp chunks(txn), do: IO.iodata_to_binary(txn.chunks)
+
+  defp recv_bytes(_socket, 0), do: {:ok, ""}
+
+  defp recv_bytes({transport, raw} = socket, size) do
+    setopts(socket, packet: :raw)
+    result = transport.recv(raw, size, @recv_timeout)
+    setopts(socket, packet: :line)
+    result
+  end
+
+  defp setopts({:ssl, raw}, opts), do: :ssl.setopts(raw, opts)
+  defp setopts({:gen_tcp, raw}, opts), do: :inet.setopts(raw, opts)
 
   ## Helpers
 

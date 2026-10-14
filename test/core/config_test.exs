@@ -169,10 +169,11 @@ defmodule Sovite.Core.ConfigTest do
              tls_ca_file: nil,
              relayhost_username: nil,
              relayhost_password: nil,
-             source_address: []
+             source_address: [],
+             chunking: true
            }
 
-    assert config.bounce == %{double_bounce_recipient: nil}
+    assert config.bounce == %{double_bounce_recipient: nil, size_limit: 50_000}
   end
 
   test "parses queue, delivery, and bounce settings" do

@@ -16,21 +16,42 @@ defmodule Sovite.SMTP.DataDecoder do
 
   The decoded content keeps CRLF line endings, and the final CRLF before
   the terminating dot is part of the content.
+
+  ## BDAT
+
+  With `dots: false` it checks the content of `BDAT` chunks (RFC 3030)
+  instead: there is no dot-stuffing and no terminator, the chunk sizes
+  delimit the message, but bare line endings get the same policy. Call
+  `finish/1` after the last chunk. `BINARYMIME` content is binary and
+  needs no decoder.
   """
 
-  defstruct policy: :reject, line_start: true, pending: <<>>
+  defstruct policy: :reject, dots: true, line_start: true, pending: <<>>
 
   @type policy :: :reject | :normalize
   @opaque t :: %__MODULE__{
             policy: policy(),
+            dots: boolean(),
             line_start: boolean() | :normalized,
             pending: binary()
           }
 
-  @doc "Returns a decoder for content right after the `354` reply."
-  @spec new(policy()) :: t()
-  def new(policy \\ :reject) when policy in [:reject, :normalize],
-    do: %__MODULE__{policy: policy}
+  @doc """
+  Returns a decoder for content right after the `354` reply, or with
+  `dots: false` for `BDAT` content.
+  """
+  @spec new(policy(), keyword()) :: t()
+  def new(policy \\ :reject, opts \\ []) when policy in [:reject, :normalize],
+    do: %__MODULE__{policy: policy, dots: Keyword.get(opts, :dots, true)}
+
+  @doc """
+  Ends `BDAT` content: a CR left at the end is a bare one. Returns the
+  content still held back.
+  """
+  @spec finish(t()) :: {:ok, iodata()} | {:error, :bare_cr, iodata()}
+  def finish(%__MODULE__{pending: "\r", policy: :reject}), do: {:error, :bare_cr, []}
+  def finish(%__MODULE__{pending: "\r"}), do: {:ok, "\r\n"}
+  def finish(%__MODULE__{}), do: {:ok, []}
 
   @doc """
   Decodes `bytes`.
@@ -51,15 +72,15 @@ defmodule Sovite.SMTP.DataDecoder do
 
   # At the start of a line, a leading dot is either the end of the data or
   # stuffing. Wait for enough bytes to tell.
-  defp scan(%{line_start: true}, <<".\r\n", rest::binary>>, acc),
+  defp scan(%{dots: true, line_start: true}, <<".\r\n", rest::binary>>, acc),
     do: {:done, Enum.reverse(acc), rest}
 
-  defp scan(%{line_start: true} = d, buffer, acc) when buffer in [".", ".\r"],
+  defp scan(%{dots: true, line_start: true} = d, buffer, acc) when buffer in [".", ".\r"],
     do: {:more, Enum.reverse(acc), %{d | pending: buffer}}
 
   # After a normalized bare line ending, a dot is still unstuffed, but the
   # line cannot end the data.
-  defp scan(%{line_start: start} = d, <<".", rest::binary>>, acc)
+  defp scan(%{dots: true, line_start: start} = d, <<".", rest::binary>>, acc)
        when start in [true, :normalized],
        do: scan(%{d | line_start: false}, rest, acc)
 

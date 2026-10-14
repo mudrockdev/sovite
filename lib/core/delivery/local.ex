@@ -226,6 +226,8 @@ defmodule Sovite.Core.Delivery.Local do
         ?5 -> :failed
       end
 
-    {rcpt, outcome, Transaction.details(status, text, nil, false)}
+    details = Transaction.details(status, text, nil, false)
+    details = if outcome == :delivered, do: Map.put(details, :action, :delivered), else: details
+    {rcpt, outcome, details}
   end
 end

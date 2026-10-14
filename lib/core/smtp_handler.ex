@@ -81,6 +81,37 @@ defmodule Sovite.Core.SMTPHandler do
   `requiretls`, so `Sovite.Core.Delivery` relays it only over verified
   TLS.
 
+  ## DSN
+
+  The DSN parameters (RFC 3461) are kept in the queued message, for
+  each recipient after expansion: a recipient that an alias forwards to
+  one address keeps them, and gets the address the client gave as its
+  `ORCPT` when it had none. An alias that expands to several addresses
+  passes them on without `SUCCESS` in `NOTIFY`, and when the client
+  asked for `SUCCESS`, the alias itself gets an "expanded" notification
+  (RFC 3461 §5.2.7.3, option c).
+
+  ## Priorities, deadlines, and RRVS
+
+  The `MT-PRIORITY` (RFC 6710) of a message is kept, except that clients
+  neither trusted nor authenticated cannot raise it above 0. Only
+  authenticated clients may hold messages for later (`FUTURERELEASE`,
+  RFC 4865), and a `DELIVERBY` time (RFC 2852) becomes a deadline from
+  the time the message arrived.
+
+  A recipient with `RRVS` (RFC 7293) that is a mailbox here (in the
+  database) is refused with `550 5.7.17` if the mailbox was added after
+  the given time. Other local recipients pass, as do role accounts
+  (RFC 2142); one that is relayed keeps its `RRVS` for the next hop,
+  unless an alias changed it.
+
+  ## ETRN
+
+  `ETRN` (RFC 1985) starts the delivery of deferred mail for a relay
+  domain (`Sovite.Core.Routing`), or with `@`, for it and its subdomains, as
+  Postfix's `fast_flush_domains` does by default. Other domains and
+  named queues get `459`.
+
   ## Loops
 
   A message with more than `smtp.max_hops` `Received:` fields is refused
@@ -139,14 +170,14 @@ defmodule Sovite.Core.SMTPHandler do
     SenderCheck
   }
 
-  alias Sovite.Core.Repo.Tables.{AccessRules, Users}
+  alias Sovite.Core.Repo.Tables.{AccessRules, Mailboxes, Users}
 
   alias Sovite.{AuthResults, SASL, SRS}
   alias Sovite.Message.{Date, Headers, MessageID, Received, Trace}
   alias Sovite.Milter.Headers, as: MilterHeaders
   alias Sovite.Net
   alias Sovite.Queue.{Envelope, ID, Spool}
-  alias Sovite.SMTP.Reply
+  alias Sovite.SMTP.{DSNParams, Reply}
 
   # Header sections larger than this are passed through unchanged.
   @max_header_section 1024 * 1024
@@ -300,6 +331,9 @@ defmodule Sovite.Core.SMTPHandler do
         sender: nil,
         envelope_sender: nil,
         expansions: [],
+        dsn: %{},
+        expanded: [],
+        rrvs: %{},
         session_action: nil,
         action: nil,
         writer: nil,
@@ -417,6 +451,9 @@ defmodule Sovite.Core.SMTPHandler do
       | sender: sender,
         envelope_sender: nil,
         expansions: [],
+        dsn: %{},
+        expanded: [],
+        rrvs: %{},
         action: nil,
         spf: nil,
         effects: [],
@@ -425,7 +462,8 @@ defmodule Sovite.Core.SMTPHandler do
         next_id: ID.generate()
     }
 
-    with {:ok, state} <- Screen.mail(sender, state),
+    with {:ok, state} <- check_hold(params, state),
+         {:ok, state} <- Screen.mail(sender, state),
          {:ok, state} <- check_sender(sender, state),
          {:ok, state} <- restrict(state, :mail),
          {:ok, state} <- check_spf(sender, state),
@@ -433,6 +471,11 @@ defmodule Sovite.Core.SMTPHandler do
       milters(state, &Milters.mail(&1, sender, params, milter_info(state)))
     end
   end
+
+  defp check_hold(%{hold: hold}, %{identity: nil} = state) when hold != nil,
+    do: {:reply, Reply.new(550, "5.7.1", "Future release needs authentication"), state}
+
+  defp check_hold(_params, state), do: {:ok, state}
 
   defp check_spf(sender, state) do
     if inbound?(state) do
@@ -491,8 +534,8 @@ defmodule Sovite.Core.SMTPHandler do
   end
 
   @impl true
-  def handle_rcpt(recipient, state) do
-    with {:ok, checked} <- check_rcpt(recipient, state) do
+  def handle_rcpt(recipient, params, state) do
+    with {:ok, checked} <- check_rcpt(recipient, params, state) do
       # A refused recipient must not stay among the expansions.
       with {:ok, checked} <- Screen.rcpt(recipient, checked),
            {:ok, checked} <- milters(checked, &Milters.rcpt(&1, recipient)) do
@@ -504,14 +547,14 @@ defmodule Sovite.Core.SMTPHandler do
     end
   end
 
-  defp check_rcpt(recipient, state) do
+  defp check_rcpt(recipient, params, state) do
     case srs_reverse(recipient, state) do
       nil ->
-        check_recipient(recipient, state)
+        check_recipient(recipient, params, state)
 
       {:ok, original} ->
         with {:ok, state} <- restrict(state, :rcpt, recipient: recipient),
-             do: {:ok, %{state | expansions: state.expansions ++ [original]}}
+             do: {:ok, add_recipients(state, recipient, [original], params)}
 
       {:error, _reason} ->
         {:reply, Reply.new(550, "5.1.1", "<#{recipient}>: Invalid or expired SRS address"), state}
@@ -532,25 +575,31 @@ defmodule Sovite.Core.SMTPHandler do
 
   defp srs_reverse(_recipient, _state), do: nil
 
-  defp check_recipient(recipient, state) do
+  defp check_recipient(recipient, params, state) do
     case classify(recipient, state) do
       :remote when not state.trusted and state.identity == nil ->
         {:reply, Reply.new(554, "5.7.1", "<#{recipient}>: Relay access denied"), state}
 
       class ->
         with {:ok, state} <- restrict(state, :rcpt, recipient: recipient) do
-          accept_recipient(recipient, class, state)
+          accept_recipient(recipient, params, class, state)
         end
     end
   end
 
-  defp accept_recipient(recipient, class, state) do
+  defp accept_recipient(recipient, params, class, state) do
     address = queued_address(recipient, state)
 
     with {:ok, rewritten} <- Rewrite.recipient(state.routing, address),
          {:ok, finals} <- expand(state, rewritten),
-         :ok <- validate(state, class, rewritten, finals) do
-      {:ok, %{state | expansions: state.expansions ++ finals}}
+         :ok <- validate(state, class, rewritten, finals),
+         :ok <- check_rrvs(state, class, rewritten, finals, params[:rrvs]) do
+      state = add_recipients(state, address, finals, params)
+
+      # Relayed as given: the next hop checks it.
+      if params[:rrvs] != nil and finals == [address] and class in [:remote, :relay],
+        do: {:ok, %{state | rrvs: Map.put_new(state.rrvs, address, params.rrvs)}},
+        else: {:ok, state}
     else
       {:error, _table} -> {:reply, temporary_failure(), state}
       {:reject, reply} -> {:reply, reply, state}
@@ -589,6 +638,74 @@ defmodule Sovite.Core.SMTPHandler do
   end
 
   defp temporary_failure, do: Reply.new(451, "4.3.0", "Temporary lookup failure")
+
+  @role_accounts ~w(info marketing sales support abuse noc security postmaster hostmaster
+                    usenet news webmaster www uucp ftp)
+
+  # RFC 7293 §5.1: a mailbox here must have had the same owner since
+  # the time. Only database mailboxes have a date.
+  defp check_rrvs(%{repo: repo}, :hosted, address, [address], {since, _action})
+       when repo != nil do
+    {local, _domain} = Routing.split(address)
+
+    with false <- String.downcase(local) in @role_accounts,
+         {:ok, added} <- Mailboxes.added_at(repo, address),
+         true <- DateTime.after?(added, since) do
+      {:reject, Reply.new(550, "5.7.17", "<#{address}>: Mailbox owner has changed")}
+    else
+      _ -> :ok
+    end
+  rescue
+    _error -> {:reject, temporary_failure()}
+  end
+
+  defp check_rrvs(_state, _class, _address, _finals, _rrvs), do: :ok
+
+  # The recipients `address` expanded to, with their DSN parameters.
+  defp add_recipients(state, address, finals, params) do
+    orcpt = params.orcpt || DSNParams.orcpt(address)
+
+    {dsn, expanded} =
+      case finals do
+        [^address] ->
+          {[{address, params}], []}
+
+        [final] ->
+          {[{final, %{params | orcpt: orcpt}}], []}
+
+        finals ->
+          notify = without_success(params.notify)
+          expanded = if success?(params.notify), do: [address], else: []
+          entries = Enum.map(finals, &{&1, %{notify: notify, orcpt: orcpt}})
+          {[{address, %{params | orcpt: orcpt}} | entries], expanded}
+      end
+
+    dsn =
+      for {final, params} <- dsn,
+          params.notify != nil or params.orcpt != nil,
+          reduce: state.dsn do
+        acc -> Map.put_new(acc, final, params)
+      end
+
+    %{
+      state
+      | expansions: state.expansions ++ finals,
+        dsn: dsn,
+        expanded: Enum.uniq(state.expanded ++ expanded)
+    }
+  end
+
+  defp success?([_ | _] = notify), do: :success in notify
+  defp success?(_notify), do: false
+
+  defp without_success([_ | _] = notify) do
+    case notify -- [:success] do
+      [] -> :never
+      notify -> notify
+    end
+  end
+
+  defp without_success(notify), do: notify
 
   ## Restrictions
 
@@ -822,7 +939,15 @@ defmodule Sovite.Core.SMTPHandler do
       auth_user: state.identity,
       content_filter: state.content_filter,
       requiretls: Map.get(transaction.params, :requiretls, false),
-      smtputf8: smtputf8
+      smtputf8: smtputf8,
+      ret: Map.get(transaction.params, :ret),
+      envid: Map.get(transaction.params, :envid),
+      dsn: Map.take(state.dsn, recipients ++ state.expanded),
+      expanded: state.expanded,
+      rrvs: Map.take(state.rrvs, recipients),
+      priority: priority(transaction.params, state),
+      hold: Map.get(transaction.params, :hold),
+      deliver_by: deliver_by(Map.get(transaction.params, :by), received_at)
     }
 
     received =
@@ -834,7 +959,8 @@ defmodule Sovite.Core.SMTPHandler do
         id: queue_id,
         for: if(match?([_], transaction.recipients), do: hd(transaction.recipients)),
         date: received_at,
-        tls: state.tls && Sovite.TLS.describe(state.tls)
+        tls: state.tls && Sovite.TLS.describe(state.tls),
+        priority: Map.get(transaction.params, :priority) && priority(transaction.params, state)
       })
 
     with {:ok, writer} <- Spool.open(state.queue_directory, envelope),
@@ -847,6 +973,17 @@ defmodule Sovite.Core.SMTPHandler do
       {:error, reason} -> queue_error(state, reason)
     end
   end
+
+  # RFC 6710 §4.1: untrusted clients may lower the priority, not raise it.
+  defp priority(params, state) do
+    priority = Map.get(params, :priority) || 0
+    if state.trusted or state.identity != nil, do: priority, else: min(priority, 0)
+  end
+
+  defp deliver_by(nil, _received_at), do: nil
+
+  defp deliver_by(by, received_at),
+    do: %{deadline: DateTime.add(received_at, by.time), mode: by.mode, trace: by.trace}
 
   # The sender for forwarding mail from outside to other domains.
   defp srs_sender(sender, recipients, %{srs: %{enabled: true} = srs} = state) when sender != "" do
@@ -1206,7 +1343,46 @@ defmodule Sovite.Core.SMTPHandler do
   def handle_data_abort(_reason, state), do: abort(state)
 
   @impl true
-  def handle_rset(state), do: %{abort(state) | expansions: [], action: nil, effects: []}
+  def handle_rset(state),
+    do: %{
+      abort(state)
+      | expansions: [],
+        dsn: %{},
+        expanded: [],
+        rrvs: %{},
+        action: nil,
+        effects: []
+    }
+
+  @impl true
+  def handle_etrn({:queue, queue}, state),
+    do: {:reply, Reply.new(459, "4.7.1", "Node ##{queue} not allowed: unknown queue"), state}
+
+  def handle_etrn({_kind, domain} = node, state) do
+    name = if elem(node, 0) == :subdomains, do: "@" <> domain, else: domain
+
+    cond do
+      Routing.class(state.routing, domain) != :relay ->
+        {:reply, Reply.new(459, "4.7.1", "Node #{name} not allowed: not a relay domain"), state}
+
+      state.queue_manager == nil ->
+        {:reply, Reply.new(458, "4.3.0", "Unable to queue messages for node #{name}"), state}
+
+      true ->
+        case QueueManager.flush(state.queue_manager, node) do
+          {:ok, 0} ->
+            {:reply, Reply.new(251, "2.0.0", "OK, no messages waiting for node #{name}"), state}
+
+          {:ok, count} ->
+            text = "OK, #{count} pending messages for node #{name} started"
+            {:reply, Reply.new(253, "2.0.0", text), state}
+
+          {:error, :too_soon} ->
+            text = "Unable to queue messages for node #{name}: try again later"
+            {:reply, Reply.new(458, "4.7.0", text), state}
+        end
+    end
+  end
 
   @impl true
   def handle_vrfy(argument, state) do

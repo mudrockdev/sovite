@@ -9,5 +9,8 @@ defmodule Sovite.SMTP do
       `Sovite.SMTP.Server.Handler`
     * `Sovite.SMTP.Client` - an SMTP client for relaying messages
     * `Sovite.SMTP.DataEncoder` - streaming dot-stuffing for `DATA`
+    * `Sovite.SMTP.XText`, `Sovite.SMTP.DSNParams`, `Sovite.SMTP.Params` -
+      ESMTP parameter values (DSN, `MT-PRIORITY`, `FUTURERELEASE`,
+      `DELIVERBY`, `RRVS`)
   """
 end

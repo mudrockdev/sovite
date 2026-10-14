@@ -25,13 +25,22 @@ defmodule Sovite.Queue.Record do
   `reply` the remote server's reply or a local diagnostic, `remote` the
   server that gave it (`"mx.example.com[192.0.2.25]"`), and `smtp` whether
   `reply` came from a remote SMTP server.
+
+  For a delivered recipient, `action` is what a success notification
+  (DSN, RFC 3461) would report: `:delivered` to a mailbox, or `:relayed`
+  to a server that does not send notifications. Without it (a server
+  that does, or a discarded message), Sovite sends none. `report` asks
+  for a "relayed" notification even without `NOTIFY=SUCCESS`, as
+  `DELIVERBY` does (RFC 2852 §4.1.4.1).
   """
   @type details :: %{
-          status: String.t(),
-          reply: String.t() | nil,
-          remote: String.t() | nil,
-          smtp: boolean(),
-          at: DateTime.t()
+          required(:status) => String.t(),
+          required(:reply) => String.t() | nil,
+          required(:remote) => String.t() | nil,
+          required(:smtp) => boolean(),
+          required(:at) => DateTime.t(),
+          optional(:action) => :delivered | :relayed | nil,
+          optional(:report) => boolean()
         }
 
   @type t ::
@@ -51,7 +60,9 @@ defmodule Sovite.Queue.Record do
       "reply" => details.reply,
       "remote" => details.remote,
       "smtp" => details.smtp,
-      "at" => DateTime.to_iso8601(details.at)
+      "at" => DateTime.to_iso8601(details.at),
+      "action" => details[:action] && Atom.to_string(details[:action]),
+      "report" => Map.get(details, :report, false)
     }
   end
 
@@ -69,7 +80,9 @@ defmodule Sovite.Queue.Record do
     with {:ok, status} <- parse_status(map["status"]),
          {:ok, at} <- parse_time(map["at"]),
          true <- optional_string?(map["reply"]) and optional_string?(map["remote"]),
-         true <- is_boolean(map["smtp"]) do
+         true <- is_boolean(map["smtp"]),
+         {:ok, action} <- parse_action(map["action"]),
+         true <- map["report"] in [nil, true, false] do
       details = %{
         status: code,
         reply: map["reply"],
@@ -77,6 +90,9 @@ defmodule Sovite.Queue.Record do
         smtp: map["smtp"],
         at: at
       }
+
+      details = if action, do: Map.put(details, :action, action), else: details
+      details = if map["report"], do: Map.put(details, :report, true), else: details
 
       {:ok, {:recipient, address, status, details}}
     else
@@ -101,6 +117,11 @@ defmodule Sovite.Queue.Record do
   defp parse_status("failed"), do: {:ok, :failed}
   defp parse_status("deferred"), do: {:ok, :deferred}
   defp parse_status(_), do: :error
+
+  defp parse_action(nil), do: {:ok, nil}
+  defp parse_action("delivered"), do: {:ok, :delivered}
+  defp parse_action("relayed"), do: {:ok, :relayed}
+  defp parse_action(_), do: :error
 
   defp parse_time(value) when is_binary(value) do
     case DateTime.from_iso8601(value) do

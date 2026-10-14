@@ -1,12 +1,14 @@
 defmodule Sovite.DSN do
   @moduledoc """
   Builds delivery status notifications (RFC 3464), the messages that tell
-  a sender their mail was not delivered (or not yet).
+  a sender their mail was not delivered (or not yet), or was delivered
+  when they asked to know (DSN, RFC 3461).
 
   A notification is a `multipart/report` (RFC 6522) with three parts: a
   human-readable explanation, a `message/delivery-status` report for
   programs, and the headers of the original message
-  (`text/rfc822-headers`; the body is not returned).
+  (`text/rfc822-headers`), or for a failure with `:content` the whole
+  message (`message/rfc822`).
 
       DSN.build(%{
         kind: :failure,
@@ -51,10 +53,18 @@ defmodule Sovite.DSN do
     * `:reason` - a local explanation, used when there is no SMTP reply
       (for example "Host or domain name not found").
     * `:last_attempt` - time of the last delivery attempt.
+    * `:action` - for `:success` reports, what happened: `:delivered`
+      (to the mailbox), `:relayed` (to a server that does not send
+      notifications), or `:expanded` (to the members of an alias).
+      Defaults to `:delivered`.
+    * `:original_recipient` - the `ORCPT` the client gave, as
+      `Sovite.SMTP.DSNParams.orcpt()`.
   """
   @type recipient :: %{
           required(:recipient) => String.t(),
           required(:status) => String.t(),
+          optional(:action) => :delivered | :relayed | :expanded,
+          optional(:original_recipient) => {String.t(), String.t()} | nil,
           optional(:remote_mta) => String.t() | nil,
           optional(:diagnostic) => String.t() | nil,
           optional(:reason) => String.t() | nil,
@@ -65,13 +75,19 @@ defmodule Sovite.DSN do
   The report.
 
     * `:kind` - `:failure` (the listed recipients will never get the
-      message) or `:delay` (still trying). Required.
+      message), `:delay` (still trying), or `:success` (delivered).
+      Required.
     * `:reporting_mta` - this server's host name. Required.
     * `:from` - address in the `From:` field, usually
       `MAILER-DAEMON@<host>`. Required.
     * `:to` - the original sender. Required.
     * `:recipients` - at least one. Required.
     * `:headers` - the original message's header section.
+    * `:content` - for `:failure`, the whole original message, returned
+      instead of `:headers` (`RET=FULL`).
+    * `:envid` - the `ENVID` the client gave.
+    * `:future_release` - the original message's `FUTURERELEASE` request
+      (RFC 4865 §5), as `"for;3600"` or `"until;<date-time>"`.
     * `:queue_id` - the original message's queue ID.
     * `:smtputf8` - the original message was sent with `SMTPUTF8`, so
       its header fields may be UTF-8 (RFC 6532).
@@ -81,12 +97,15 @@ defmodule Sovite.DSN do
       a random boundary.
   """
   @type report :: %{
-          required(:kind) => :failure | :delay,
+          required(:kind) => :failure | :delay | :success,
           required(:reporting_mta) => String.t(),
           required(:from) => String.t(),
           required(:to) => String.t(),
           required(:recipients) => [recipient(), ...],
           optional(:headers) => binary() | nil,
+          optional(:content) => binary() | nil,
+          optional(:envid) => String.t() | nil,
+          optional(:future_release) => String.t() | nil,
           optional(:queue_id) => String.t() | nil,
           optional(:smtputf8) => boolean(),
           optional(:arrival_date) => DateTime.t() | nil,
@@ -105,11 +124,17 @@ defmodule Sovite.DSN do
   """
   @spec global?(report()) :: boolean()
   def global?(report) do
-    addresses = [report.to | Enum.map(report.recipients, & &1.recipient)]
+    addresses =
+      [report.to | Enum.map(report.recipients, & &1.recipient)] ++
+        for(%{original_recipient: {_type, address}} <- report.recipients, do: address)
 
     Enum.any?(addresses, &(not ascii?(&1))) or
-      (Map.get(report, :smtputf8, false) and not ascii?(Map.get(report, :headers) || ""))
+      (Map.get(report, :smtputf8, false) and not ascii?(returned(report)))
   end
+
+  # The part of the original message the notification returns.
+  defp returned(%{kind: :failure, content: content}) when is_binary(content), do: content
+  defp returned(report), do: Map.get(report, :headers) || ""
 
   @doc """
   Builds the notification message. Returns the message and its body type:
@@ -117,18 +142,15 @@ defmodule Sovite.DSN do
   internationalized notification), otherwise `:"7bit"`.
   """
   @spec build(report()) :: {binary(), :"7bit" | :"8bitmime"}
-  def build(%{kind: kind, recipients: [_ | _]} = report) when kind in [:failure, :delay] do
+  def build(%{kind: kind, recipients: [_ | _]} = report)
+      when kind in [:failure, :delay, :success] do
     boundary = Map.get_lazy(report, :boundary, &boundary/0)
-    headers = report |> Map.get(:headers) |> Kernel.||("") |> ensure_crlf()
+    full = kind == :failure and is_binary(report[:content])
+    headers = report |> returned() |> ensure_crlf()
     global = global?(report)
     report = Map.put(report, :global, global)
 
-    {text_type, status_type, headers_type} =
-      if global,
-        do:
-          {"text/plain; charset=utf-8", "message/global-delivery-status",
-           "message/global-headers"},
-        else: {"text/plain; charset=us-ascii", "message/delivery-status", "text/rfc822-headers"}
+    {text_type, status_type, headers_type} = part_types(global, full)
 
     message =
       IO.iodata_to_binary([
@@ -142,10 +164,7 @@ defmodule Sovite.DSN do
         part(
           boundary,
           headers_type,
-          if(kind == :failure,
-            do: "Undelivered Message Headers",
-            else: "Delayed Message Headers"
-          ),
+          returned_description(kind, full),
           if(not ascii?(headers), do: "8bit")
         ),
         headers,
@@ -157,6 +176,23 @@ defmodule Sovite.DSN do
     {message, if(ascii?(message), do: :"7bit", else: :"8bitmime")}
   end
 
+  defp part_types(true, false),
+    do: {"text/plain; charset=utf-8", "message/global-delivery-status", "message/global-headers"}
+
+  defp part_types(true, true),
+    do: {"text/plain; charset=utf-8", "message/global-delivery-status", "message/global"}
+
+  defp part_types(false, false),
+    do: {"text/plain; charset=us-ascii", "message/delivery-status", "text/rfc822-headers"}
+
+  defp part_types(false, true),
+    do: {"text/plain; charset=us-ascii", "message/delivery-status", "message/rfc822"}
+
+  defp returned_description(:failure, true), do: "Undelivered Message"
+  defp returned_description(:failure, false), do: "Undelivered Message Headers"
+  defp returned_description(:delay, _full), do: "Delayed Message Headers"
+  defp returned_description(:success, _full), do: "Message Headers"
+
   defp header_fields(report, boundary) do
     date = Map.get_lazy(report, :date, &DateTime.utc_now/0)
 
@@ -167,6 +203,7 @@ defmodule Sovite.DSN do
       case report.kind do
         :failure -> "Undelivered Mail Returned to Sender"
         :delay -> "Delayed Mail (still being retried)"
+        :success -> "Successful Mail Delivery Report"
       end
 
     [
@@ -231,6 +268,14 @@ defmodule Sovite.DSN do
             ),
             ".\r\nYou do not need to send the message again.\r\n"
           ]
+
+        :success ->
+          [
+            "Your message was successfully delivered to the destinations listed\r\n",
+            "below. If it was delivered to a mailbox, you will receive no further\r\n",
+            "notifications. Otherwise you may still receive notifications of mail\r\n",
+            "delivery errors from other systems.\r\n"
+          ]
       end
 
     global = report.global
@@ -259,21 +304,23 @@ defmodule Sovite.DSN do
   defp reason_suffix(_rcpt), do: ""
 
   defp status_fields(report) do
-    action = if report.kind == :failure, do: "failed", else: "delayed"
     global = report.global
 
     message_fields = [
+      field("Original-Envelope-Id", report[:envid]),
       field("Reporting-MTA", "dns; " <> report.reporting_mta),
       field("X-Sovite-Queue-ID", report[:queue_id]),
-      field("Arrival-Date", report[:arrival_date] && Date.format(report.arrival_date))
+      field("Arrival-Date", report[:arrival_date] && Date.format(report.arrival_date)),
+      field("Future-Release-Request", report[:future_release])
     ]
 
     recipient_fields =
       Enum.map(report.recipients, fn rcpt ->
         [
           "\r\n",
+          field("Original-Recipient", original_recipient(rcpt[:original_recipient]), global),
           field("Final-Recipient", address_type(rcpt.recipient), global),
-          field("Action", action),
+          field("Action", action(report.kind, rcpt)),
           field("Status", rcpt.status),
           field("Remote-MTA", rcpt[:remote_mta] && "dns; " <> rcpt.remote_mta),
           field("Diagnostic-Code", rcpt[:diagnostic] && "smtp; " <> rcpt.diagnostic, global),
@@ -288,6 +335,13 @@ defmodule Sovite.DSN do
 
     [message_fields, recipient_fields]
   end
+
+  defp action(:failure, _rcpt), do: "failed"
+  defp action(:delay, _rcpt), do: "delayed"
+  defp action(:success, rcpt), do: rcpt |> Map.get(:action, :delivered) |> Atom.to_string()
+
+  defp original_recipient(nil), do: nil
+  defp original_recipient({type, address}), do: type <> "; " <> address
 
   # RFC 6533 §3: the utf-8 address type for internationalized addresses.
   defp address_type(address) do

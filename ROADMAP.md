@@ -211,13 +211,13 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 11 — Additional ESMTP Extensions
 
-- [ ] `CHUNKING` / `BDAT` and `BINARYMIME`
-- [ ] `DSN` extension (NOTIFY, RET, ENVID, ORCPT) — full support
-- [ ] `ETRN` (queue run for a domain)
-- [ ] `FUTURERELEASE` (optional)
-- [ ] `DELIVERBY` (optional)
-- [ ] `MT-PRIORITY` (optional)
-- [ ] `RRVS` (optional)
+- [x] `CHUNKING` / `BDAT` and `BINARYMIME`
+- [x] `DSN` extension (NOTIFY, RET, ENVID, ORCPT) — full support
+- [x] `ETRN` (queue run for a domain)
+- [x] `FUTURERELEASE` (optional)
+- [x] `DELIVERBY` (optional)
+- [x] `MT-PRIORITY` (optional)
+- [x] `RRVS` (optional)
 
 **Standards:** RFC 3030, RFC 3461, RFC 1985, RFC 4865, RFC 2852, RFC 6710, RFC 7293
 

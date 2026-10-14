@@ -17,6 +17,7 @@ defmodule Sovite.Core.Postfix.Settings do
     {"maximal_backoff_time", "queue", "max_backoff", {:duration, "s"}},
     {"delay_warning_time", "queue", "delay_warning", {:duration, "h"}},
     {"message_size_limit", "smtp", "max_message_size", :size},
+    {"bounce_size_limit", "bounce", "size_limit", :size},
     {"smtpd_recipient_limit", "smtp", "max_recipients", {:integer, 1, 100_000}},
     {"smtpd_client_connection_count_limit", "smtp", "max_connections_per_ip",
      {:integer, 1, 1_000_000}},
@@ -892,6 +893,8 @@ defmodule Sovite.Core.Postfix.Settings do
     "notify_classes" =>
       "Sovite reports double bounces to bounce.double_bounce_recipient, if set.",
     "smtputf8_enable" => "Sovite supports SMTPUTF8.",
+    "fast_flush_domains" =>
+      "Sovite answers ETRN for its relay domains, as Postfix does by default.",
     "smtpd_sasl_authenticated_header" =>
       "Sovite's Received: field shows ESMTPSA, not the login name.",
     "disable_dns_lookups" => "Sovite always uses DNS.",

@@ -38,6 +38,21 @@ defmodule Sovite.Core.Repo.Tables.Mailboxes do
   @spec list(Repo.t()) :: [Mailbox.t()]
   def list(repo), do: Repo.run(repo, & &1.all(from(m in Mailbox, order_by: m.address)))
 
+  @doc """
+  When the mailbox at exactly `address` was added, for `RRVS` (RFC
+  7293), or `:error` if there is none.
+  """
+  @spec added_at(Repo.t(), String.t()) :: {:ok, DateTime.t()} | :error
+  def added_at(repo, address) do
+    query =
+      from(m in Mailbox, where: m.address == ^Data.fold(address), select: m.inserted_at)
+
+    case Repo.run(repo, & &1.one(query)) do
+      %DateTime{} = time -> {:ok, time}
+      nil -> :error
+    end
+  end
+
   @impl Sovite.Core.Lookup
   def lookup(%{repo: repo}, key) do
     query =

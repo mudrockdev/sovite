@@ -78,7 +78,7 @@ defmodule Sovite.SMTP.CommandTest do
     assert parse("FOO bar") == {:error, nil, :unrecognized}
     assert parse("") == {:error, nil, :unrecognized}
     assert parse("EXPN staff") == {:error, nil, :not_implemented}
-    assert parse("BDAT 100 LAST") == {:error, nil, :not_implemented}
+    assert parse("TURN") == {:error, nil, :not_implemented}
     assert parse("GET / HTTP/1.1") == {:error, nil, :non_smtp}
     assert parse("POST /form HTTP/1.1") == {:error, nil, :non_smtp}
   end
@@ -124,7 +124,32 @@ defmodule Sovite.SMTP.CommandTest do
     assert parse("RCPT TO:<用户@例子.广告>") == {:ok, {:rcpt, "用户@例子.广告", []}}
     assert parse(~s(RCPT TO:<"ü ü"@example.com>)) == {:ok, {:rcpt, ~s("ü ü"@example.com), []}}
     assert parse("RCPT TO:<a@☃.example>") == {:error, :rcpt, :invalid_recipient}
-    assert parse("MAIL FROM:<a@example.com> SIZE=ü") == {:error, :mail, :invalid_parameter}
+    # Parameter values may be UTF-8 too (ORCPT); each parameter checks its own.
+    assert parse("RCPT TO:<b@example.com> ORCPT=utf-8;ü@example.com") ==
+             {:ok, {:rcpt, "b@example.com", [{"ORCPT", "utf-8;ü@example.com"}]}}
+
+    assert parse("MAIL FROM:<a@example.com> SIZE=\u0085") == {:error, :mail, :invalid_characters}
+  end
+
+  test "parses BDAT" do
+    assert parse("BDAT 100") == {:ok, {:bdat, 100, false}}
+    assert parse("bdat 0 last") == {:ok, {:bdat, 0, true}}
+    assert parse("BDAT 100 LAST") == {:ok, {:bdat, 100, true}}
+    assert parse("BDAT") == {:error, :bdat, :syntax}
+    assert parse("BDAT -1") == {:error, :bdat, :syntax}
+    assert parse("BDAT 10 FIRST") == {:error, :bdat, :syntax}
+    assert parse("BDAT 10 LAST x") == {:error, :bdat, :syntax}
+    assert parse("BDAT " <> String.duplicate("9", 16)) == {:error, :bdat, :syntax}
+  end
+
+  test "parses ETRN" do
+    assert parse("ETRN Example.COM") == {:ok, {:etrn, {:domain, "example.com"}}}
+    assert parse("ETRN @example.com") == {:ok, {:etrn, {:subdomains, "example.com"}}}
+    assert parse("ETRN #queue1") == {:ok, {:etrn, {:queue, "queue1"}}}
+    assert parse("ETRN") == {:error, :etrn, :syntax}
+    assert parse("ETRN @") == {:error, :etrn, :syntax}
+    assert parse("ETRN #") == {:error, :etrn, :syntax}
+    assert parse("ETRN a..b") == {:error, :etrn, :syntax}
   end
 
   property "never raises" do

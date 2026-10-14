@@ -111,4 +111,38 @@ defmodule Sovite.SMTP.DataDecoderTest do
       assert decode(chunks) == {:done, content, rest}
     end
   end
+
+  describe "BDAT content (dots: false)" do
+    defp chunks(chunks, policy \\ :reject) do
+      Enum.reduce_while(chunks, {DataDecoder.new(policy, dots: false), []}, fn chunk, {d, acc} ->
+        case DataDecoder.decode(d, chunk) do
+          {:more, content, d} -> {:cont, {d, [acc, content]}}
+          {:error, reason, _} -> {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:error, reason} ->
+          {:error, reason}
+
+        {d, acc} ->
+          case DataDecoder.finish(d) do
+            {:ok, rest} -> {:ok, IO.iodata_to_binary([acc, rest])}
+            {:error, reason, _} -> {:error, reason}
+          end
+      end
+    end
+
+    test "keeps dots, and never ends" do
+      assert chunks([".\r\n..x\r\n.", "\r\n.\r\n"]) == {:ok, ".\r\n..x\r\n.\r\n.\r\n"}
+    end
+
+    test "checks bare line endings, also across chunks" do
+      assert chunks(["a\r", "\nb"]) == {:ok, "a\r\nb"}
+      assert chunks(["a\nb"]) == {:error, :bare_lf}
+      assert chunks(["a\rb"]) == {:error, :bare_cr}
+      assert chunks(["a\r"]) == {:error, :bare_cr}
+      assert chunks(["a\r", "b\n."], :normalize) == {:ok, "a\r\nb\r\n."}
+      assert chunks(["a\r"], :normalize) == {:ok, "a\r\n"}
+    end
+  end
 end

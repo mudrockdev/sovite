@@ -76,6 +76,26 @@ defmodule Sovite.Core.Delivery do
   servers that offer `REQUIRETLS`; otherwise it fails with `5.7.30`. A
   message with `TLS-Required: No` ignores the DANE and MTA-STS policies.
 
+  ## Extensions
+
+  With `delivery.chunking` (the default), messages go to servers that
+  offer `CHUNKING` in `BDAT` chunks (RFC 3030). A binary message
+  (`BINARYMIME`) can only go to servers that offer `BINARYMIME`; to
+  others it fails with `5.6.3`, as it is not converted. The message's
+  DSN parameters (RFC 3461) go to servers that offer `DSN`; a recipient
+  delivered to another server is then reported to the sender as
+  "relayed" when it asked for success notifications, except where that
+  server got the parameters and reports itself.
+
+  The `MT-PRIORITY` (RFC 6710) of a message goes to servers that offer
+  it. So does a `DELIVERBY` deadline (RFC 2852), with the time left; a
+  message that must be returned when it passes (`R`) only goes to such
+  servers, and fails with `5.4.7` when no MX host offers it, while one
+  with `N` that goes to another server is reported as "relayed" (also
+  with `T`, trace). A recipient with `RRVS` (RFC 7293) goes with it to
+  servers that offer it; to others, it fails with `5.7.19` (`R`) or goes
+  without it (`C`).
+
   With `tls_rpt.reports`, each session to an MX host is recorded for
   TLS-RPT (RFC 8460): the policy that applied and whether TLS worked.
 
@@ -110,14 +130,19 @@ defmodule Sovite.Core.Delivery do
           destination: Router.destination(),
           recipients: [String.t(), ...],
           sender: String.t(),
-          body_type: :"7bit" | :"8bitmime" | nil,
+          body_type: :"7bit" | :"8bitmime" | :binarymime | nil,
           path: Path.t(),
           message_offset: non_neg_integer(),
           message_size: non_neg_integer(),
           prefix: binary(),
           requiretls: boolean(),
           smtputf8: boolean(),
-          xforward: Sovite.SMTP.Server.Session.xforward() | nil
+          xforward: Sovite.SMTP.Server.Session.xforward() | nil,
+          dsn: Sovite.SMTP.Client.dsn() | nil,
+          chunking: boolean(),
+          priority: -9..9,
+          deliver_by: Sovite.Queue.Envelope.deliver_by() | nil,
+          rrvs: %{String.t() => Sovite.SMTP.Params.rrvs()}
         }
 
   @type result :: {String.t(), Record.status(), Record.details()}
@@ -307,7 +332,8 @@ defmodule Sovite.Core.Delivery do
 
           with {:ok, client} <- opened,
                {:ok, client} <- relay_auth(client, job.destination.auth, remote),
-               {:ok, client} <- requiretls(job, client, remote) do
+               {:ok, client} <- requiretls(job, client, remote),
+               {:ok, client} <- deliverby(job, client, remote) do
             connected(job, client, remote, opts)
           end
 
@@ -333,6 +359,18 @@ defmodule Sovite.Core.Delivery do
   end
 
   defp requiretls(_job, client, _remote), do: {:ok, client}
+
+  # RFC 2852 §4.1.4.2: with R, only to servers that support DELIVERBY.
+  defp deliverby(%{deliver_by: %{mode: :return}}, client, remote) do
+    if Map.has_key?(Client.extensions(client), "DELIVERBY") do
+      {:ok, client}
+    else
+      Client.quit(client)
+      {:retry, {"5.4.7", "DELIVERBY required, but host #{remote} does not offer it"}}
+    end
+  end
+
+  defp deliverby(_job, client, _remote), do: {:ok, client}
 
   # Connect from the destination's source address for this family, if any.
   defp source_option(client, %{source: source}, ip) do
