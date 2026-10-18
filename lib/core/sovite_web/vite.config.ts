@@ -7,6 +7,12 @@ import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 
 export default defineConfig({
+	server: {
+		proxy: {
+			'/api': { target: 'http://127.0.0.1:9025', changeOrigin: false },
+			'/metrics': { target: 'http://127.0.0.1:9025', changeOrigin: false }
+		}
+	},
 	plugins: [
 		enhancedImages(),
 		tailwindcss(),
@@ -18,7 +24,6 @@ export default defineConfig({
 			},
 			adapter: adapter()
 		}),
-
 		paraglideVitePlugin({
 			project: './project.inlang',
 			outdir: './src/lib/paraglide',
