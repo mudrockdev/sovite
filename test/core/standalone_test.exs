@@ -38,7 +38,7 @@ defmodule Sovite.Core.StandaloneTest do
   @tag :tmp_dir
   test "reads the parent process", %{tmp_dir: dir} do
     assert {:ok, ppid} = Standalone.parent_pid()
-    assert is_integer(ppid) and ppid > 0
+    assert ppid > 0
 
     path = Path.join(dir, "stat")
     File.write!(path, "4242 (odd) name) S 77 4242 4242 0 -1\n")

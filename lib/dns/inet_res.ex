@@ -45,7 +45,7 @@ defmodule Sovite.DNS.InetRes do
 
       timeout = Keyword.get(opts, :timeout, 5_000)
 
-      case :inet_res.resolve(String.to_charlist(name), :in, type, res_opts, timeout) do
+      case resolve(String.to_charlist(name), type, res_opts, timeout) do
         {:ok, msg} -> {:ok, extract(msg, type)}
         {:error, {reason, _msg}} -> {:error, normalize_error(reason)}
         {:error, reason} -> {:error, normalize_error(reason)}
@@ -53,6 +53,15 @@ defmodule Sovite.DNS.InetRes do
     else
       {:error, :invalid_name}
     end
+  end
+
+  # :inet_dns raises on some malformed replies (records of another class
+  # with data it cannot read): what a nameserver sends must not crash
+  # the caller.
+  defp resolve(name, type, res_opts, timeout) do
+    :inet_res.resolve(name, :in, type, res_opts, timeout)
+  rescue
+    _ in [FunctionClauseError, MatchError, CaseClauseError, ArgumentError] -> {:error, :formerr}
   end
 
   @impl true
@@ -180,10 +189,16 @@ defmodule Sovite.DNS.InetRes do
     end
   end
 
-  defp answer(<<_::binary-3, flags, _::binary>> = packet, type) do
+  @doc false
+  # Decodes a reply to lookup_secure/3: the records, and whether the AD
+  # bit was set.
+  @spec answer(binary(), Sovite.DNS.Resolver.record_type()) ::
+          {:ok, [term()], boolean()} | {:error, atom()}
+  # A reply shorter than the 12-byte header would crash :inet_dns.
+  def answer(<<_::binary-3, flags, _::binary>> = packet, type) when byte_size(packet) >= 12 do
     authenticated = Bitwise.band(flags, @ad_bit) != 0
 
-    case :inet_dns.decode(packet) do
+    case decode(packet) do
       {:ok, msg} ->
         case msg |> :inet_dns.msg(:header) |> :inet_dns.header(:rcode) do
           0 -> {:ok, extract(msg, type), authenticated}
@@ -198,39 +213,59 @@ defmodule Sovite.DNS.InetRes do
     end
   end
 
+  def answer(_packet, _type), do: {:error, :other}
+
+  defp decode(packet) do
+    :inet_dns.decode(packet)
+  rescue
+    _ in [FunctionClauseError, MatchError, CaseClauseError, ArgumentError] -> {:error, :formerr}
+  end
+
   @doc false
   # Returns the data of the answer records of `type`. CNAME records that
-  # lead to the answer are skipped unless CNAMEs were requested.
+  # lead to the answer are skipped unless CNAMEs were requested. Records
+  # with names that are not printable ASCII are left out: they cannot be
+  # looked up, and would end up in logs, queue files, and replies.
   @spec extract(dns_msg :: term(), Sovite.DNS.Resolver.record_type()) :: [term()]
   def extract(msg, type) do
     wire = wire_type(type)
 
     for rr <- :inet_dns.msg(msg, :anlist),
         :inet_dns.rr(rr, :type) == wire,
+        :inet_dns.rr(rr, :class) == :in,
         data <- [convert(type, :inet_dns.rr(rr, :data))],
         data != nil,
         do: data
   end
 
-  defp convert(type, ip) when type in [:a, :aaaa], do: ip
-  defp convert(:mx, {preference, exchange}), do: {preference, name_to_string(exchange)}
-  defp convert(:txt, strings), do: IO.iodata_to_binary(strings)
-  defp convert(type, name) when type in [:ptr, :cname, :ns], do: name_to_string(name)
+  # :inet_dns gives malformed data as it is: only the expected shapes.
+  defp convert(:a, {_, _, _, _} = ip), do: ip
+  defp convert(:aaaa, {_, _, _, _, _, _, _, _} = ip), do: ip
+
+  defp convert(:mx, {preference, exchange}) when is_list(exchange) do
+    with name when is_binary(name) <- name_to_string(exchange), do: {preference, name}
+  end
+
+  defp convert(:txt, strings) when is_list(strings), do: IO.iodata_to_binary(strings)
+
+  defp convert(type, name) when type in [:ptr, :cname, :ns] and is_list(name),
+    do: name_to_string(name)
 
   defp convert(:tlsa, <<usage, selector, matching, data::binary>>),
     do: {usage, selector, matching, data}
 
-  defp convert(:tlsa, _malformed), do: nil
+  defp convert(_type, _malformed), do: nil
 
   defp name_to_string(name) do
-    name |> :erlang.list_to_binary() |> String.trim_trailing(".")
+    name = name |> :erlang.list_to_binary() |> String.trim_trailing(".")
+    if printable?(name), do: name, else: nil
   end
+
+  defp printable?(name), do: for(<<c <- name>>, reduce: true, do: (acc -> acc and c in 33..126))
 
   # Queries go out as raw octets, so only allow printable ASCII without
   # spaces. Internationalized names must be converted to A-labels first.
-  defp valid_query_name?(name) when byte_size(name) in 1..@max_name do
-    for <<c <- name>>, reduce: true, do: (acc -> acc and c in 33..126)
-  end
+  defp valid_query_name?(name) when byte_size(name) in 1..@max_name, do: printable?(name)
 
   defp valid_query_name?(_), do: false
 

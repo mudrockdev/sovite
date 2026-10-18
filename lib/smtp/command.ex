@@ -245,10 +245,13 @@ defmodule Sovite.SMTP.Command do
       else: {:error, :etrn, :syntax}
   end
 
+  # Decoded values go into Received: fields and queue files: no control
+  # characters, and UTF-8.
   defp attribute(attribute) do
     with [name, value] <- :binary.split(attribute, "="),
          true <- String.match?(name, ~r/\A[A-Za-z]{1,20}\z/),
-         {:ok, value} <- XText.decode(value) do
+         {:ok, value} <- XText.decode(value),
+         true <- String.valid?(value) and not String.match?(value, ~r/[\x00-\x1f\x7f]/) do
       value = if value in ["[UNAVAILABLE]", "[TEMPUNAVAIL]"], do: nil, else: value
       {:ok, {String.upcase(name, :ascii), value}}
     else

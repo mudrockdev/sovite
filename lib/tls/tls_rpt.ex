@@ -188,9 +188,9 @@ defmodule Sovite.TLS.TLSRPT do
   end
 
   # RFC 8460 §3: only mailto: and https: are defined; others are ignored.
-  # URI.new/1 lower-cases the scheme.
+  # URI.new/1 lower-cases the scheme, and raises on bytes outside ASCII.
   defp usable_uri?(uri) do
-    case URI.new(uri) do
+    case String.match?(uri, ~r/\A[\x21-\x7e]+\z/) && URI.new(uri) do
       {:ok, %URI{scheme: "mailto", path: path}} -> path not in [nil, ""]
       {:ok, %URI{scheme: "https", host: host}} -> host not in [nil, ""]
       _ -> false

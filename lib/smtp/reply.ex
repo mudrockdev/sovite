@@ -77,7 +77,9 @@ defmodule Sovite.SMTP.Reply do
     * `{:error, reason}` - not a valid reply, or over a limit.
 
   Lines end in CRLF; a bare LF is tolerated. Every line must have the same
-  code. When the first line starts with an enhanced status code of the
+  code. The text is made safe to store and show: control characters
+  other than tab become spaces, and bytes that are not UTF-8 become `?`
+  (servers do send Latin-1). When the first line starts with an enhanced status code of the
   same class (RFC 2034), it is moved to `enhanced` and stripped from every
   line that carries it.
 
@@ -132,7 +134,7 @@ defmodule Sovite.SMTP.Reply do
     with {code, ""} when code in 200..599 <- Integer.parse(digits),
          true <- expected in [nil, code],
          {kind, text} <- separator(rest) do
-      {kind, code, text}
+      {kind, code, safe_text(text)}
     else
       _ -> :error
     end
@@ -144,6 +146,12 @@ defmodule Sovite.SMTP.Reply do
   defp separator(<<" ", text::binary>>), do: {:last, text}
   defp separator(<<"-", text::binary>>), do: {:continue, text}
   defp separator(_), do: :error
+
+  defp safe_text(text) do
+    text
+    |> String.replace_invalid("?")
+    |> String.replace(~r/[\x00-\x08\x0a-\x1f\x7f]/, " ")
+  end
 
   @enhanced ~r/\A([245])\.(\d{1,3})\.(\d{1,3})(?: |\z)/
 

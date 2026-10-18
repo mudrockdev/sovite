@@ -274,6 +274,8 @@ defmodule Sovite.Queue.SpoolTest do
     test "detects truncation", %{path: path, contents: contents} do
       File.write!(path, binary_part(contents, 0, byte_size(contents) - 1))
       assert Spool.read(path) == {:error, :checksum_mismatch}
+      # Without the checksum too.
+      assert Spool.load(path, verify: false) == {:error, :checksum_mismatch}
 
       File.write!(path, binary_part(contents, 0, @header_size + 5))
       assert Spool.read(path) == {:error, :checksum_mismatch}
@@ -302,10 +304,15 @@ defmodule Sovite.Queue.SpoolTest do
             String.replace(header, " 0000", " 00x0", global: false),
             String.replace(header, "\n", " "),
             String.duplicate(" ", @header_size),
-            String.duplicate("\0", @header_size)
+            String.duplicate("\0", @header_size),
+            # A message size no file can have.
+            String.replace(header, " 0000000000000000", " 9000000000000000", global: false)
           ] do
         File.write!(path, bad <> body)
-        assert Spool.read(path) == {:error, :invalid_header}, "header: #{inspect(bad)}"
+
+        for opts <- [[], [verify: false]] do
+          assert Spool.load(path, opts) == {:error, :invalid_header}, "header: #{inspect(bad)}"
+        end
       end
     end
 

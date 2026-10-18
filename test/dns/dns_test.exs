@@ -145,6 +145,28 @@ defmodule Sovite.DNSTest do
       assert DNS.lookup_secure(resolver, "x.example", :tlsa) == {:error, :timeout}
     end
 
+    test "a reply :inet_dns cannot read is an error, not a crash" do
+      # An AAAA record in class CH, which crashes :inet_dns.decode/1.
+      reply =
+        <<1::16, 0x81, 0x80, 1::16, 1::16, 0::32, 7, "example", 3, "com", 0, 28::16, 1::16, 0xC0,
+          12, 28::16, 3::16, 300::32, 16::16, 0x20, 0x01, 0x0D, 0xB8, 0::96>>
+
+      {:ok, socket} = :gen_udp.open(0, [:binary, ip: {127, 0, 0, 1}, active: false])
+      {:ok, port} = :inet.port(socket)
+
+      Task.start_link(fn ->
+        for _ <- 1..2 do
+          {:ok, {ip, from, <<id::16, _::binary>>}} = :gen_udp.recv(socket, 0)
+          <<_::16, rest::binary>> = reply
+          :gen_udp.send(socket, ip, from, <<id::16, rest::binary>>)
+        end
+      end)
+
+      opts = [nameservers: [{{127, 0, 0, 1}, port}], timeout: 1_000, retry: 1]
+      assert InetRes.lookup("example.com", :aaaa, opts) == {:error, :other}
+      assert InetRes.lookup_secure("example.com", :aaaa, opts) == {:error, :other}
+    end
+
     defmodule PlainResolver do
       @moduledoc false
       @behaviour Sovite.DNS.Resolver

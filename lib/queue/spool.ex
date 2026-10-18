@@ -60,6 +60,8 @@ defmodule Sovite.Queue.Spool do
   # Versions 1 and 2 have no prefix size.
   @old_header_size @header_size - 11
   @queues [:incoming, :active, :deferred, :hold, :corrupt]
+  # Sizes in a damaged header can point past any file.
+  @max_offset Bitwise.bsl(1, 62)
 
   @enforce_keys [:fd, :tmp_path, :path, :envelope, :hash]
   defstruct [:fd, :tmp_path, :path, :envelope, :hash, envelope_size: 0, message_size: 0]
@@ -382,11 +384,12 @@ defmodule Sovite.Queue.Spool do
          {:ok, version, sizes, digest} <- parse_header(header),
          {envelope_size, message_size, prefix_size} = sizes,
          header_size = if(version == 3, do: @header_size, else: @old_header_size),
-         {:ok, _} <- :file.position(fd, header_size),
-         {:ok, envelope_line} <- read_exactly(fd, envelope_size),
          message_offset = header_size + envelope_size,
          end_offset = message_offset + message_size,
-         :ok <- verify_message(fd, verify?, envelope_line, message_size, digest),
+         true <- end_offset <= @max_offset || {:error, :invalid_header},
+         {:ok, _} <- :file.position(fd, header_size),
+         {:ok, envelope_line} <- read_exactly(fd, envelope_size),
+         :ok <- verify_message(fd, verify?, envelope_line, end_offset, message_size, digest),
          {:ok, prefix} <- read_prefix(fd, end_offset, prefix_size),
          {:ok, map} <- decode_envelope(envelope_line),
          {:ok, envelope} <- Envelope.from_map(map),
@@ -427,12 +430,21 @@ defmodule Sovite.Queue.Spool do
     end
   end
 
-  defp verify_message(fd, true, envelope_line, message_size, digest) do
+  defp verify_message(fd, true, envelope_line, _end_offset, message_size, digest) do
     hash = :crypto.hash_update(:crypto.hash_init(:sha256), envelope_line)
     verify(fd, hash, message_size, digest)
   end
 
-  defp verify_message(_fd, false, _envelope_line, _message_size, _digest), do: :ok
+  # Without the checksum, at least the whole message must be there.
+  defp verify_message(_fd, false, _envelope_line, _end_offset, 0, _digest), do: :ok
+
+  defp verify_message(fd, false, _envelope_line, end_offset, _message_size, _digest) do
+    case :file.pread(fd, end_offset - 1, 1) do
+      {:ok, <<_>>} -> :ok
+      {:error, reason} -> {:error, reason}
+      _short -> {:error, :checksum_mismatch}
+    end
+  end
 
   defp header(writer, prefix_size, digest) do
     [

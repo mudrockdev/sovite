@@ -115,7 +115,7 @@ defmodule Sovite.Message.AddressList do
   defp unit_addresses(pieces) do
     if Enum.any?(pieces, &match?({:angle, _}, &1)) do
       for {:angle, inside} <- pieces,
-          {:ok, _route, address} <- [angle_address(inside)],
+          {:ok, _before, address, _after} <- [angle_address(inside)],
           do: address
     else
       case bare_parts(pieces) do
@@ -127,23 +127,29 @@ defmodule Sovite.Message.AddressList do
 
   defp rewrite_angle({:angle, inside}, fun) do
     case angle_address(inside) do
-      {:ok, route, address} -> ["<", route, fun.(address), ">"]
+      {:ok, before, address, after_address} -> ["<", before, fun.(address), after_address, ">"]
       :error -> ["<", inside, ">"]
     end
   end
 
   defp rewrite_angle(piece, _fun), do: encode_piece(piece)
 
+  # Returns what comes before the address (an obsolete source route, as
+  # in <@relay:user@domain>, and whitespace), the address, and the
+  # whitespace after it, which are kept as they are.
   defp angle_address(inside) do
-    # An obsolete source route (<@relay:user@domain>) is kept as it is.
     {route, address} =
       case :binary.split(inside, ":") do
         [route, address] -> {route <> ":", address}
         [address] -> {"", address}
       end
 
-    trimmed = String.trim(address)
-    if trimmed != "" and String.contains?(trimmed, "@"), do: {:ok, route, trimmed}, else: :error
+    {lead_ws, address} = split_leading_ws(address)
+    {address, trail_ws} = split_trailing_ws(address)
+
+    if address != "" and String.contains?(address, "@"),
+      do: {:ok, route <> lead_ws, address, trail_ws},
+      else: :error
   end
 
   defp rewrite_bare(pieces, fun) do

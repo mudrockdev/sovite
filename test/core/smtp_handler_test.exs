@@ -118,6 +118,17 @@ defmodule Sovite.Core.SMTPHandlerTest do
     assert {:ok, {250, _}} = deliver(mta, received <> "Subject: x\r\n\r\nbody\r\n")
   end
 
+  test "refuses a message that starts with a folded line", context do
+    mta = start_mta(context, "")
+    assert {250, _} = rcpt(mta, "user@mx.example.com")
+
+    # It would continue the Received: field above it.
+    assert {:ok, {554, ["5.6.0 " <> _]}} =
+             deliver(mta, "\tdkim=pass header.d=bank.example\r\nSubject: x\r\n\r\nbody\r\n")
+
+    assert queue_files(mta, "incoming") == []
+  end
+
   test "relays for trusted networks", context do
     mta = start_mta(context, ~s([smtp]\ntrusted_networks = ["127.0.0.0/8"]))
     assert {250, _} = rcpt(mta, "user@remote.test")

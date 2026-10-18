@@ -59,9 +59,9 @@ defmodule Sovite.DKIM.Signature do
   @spec parse(String.t(), keyword()) :: {:ok, t()} | {:error, String.t()}
   def parse(raw, opts \\ []) do
     kind = Keyword.get(opts, :kind, :dkim)
-    [_name, value] = :binary.split(raw, ":")
 
-    with {:ok, tags} <- tags(value),
+    with {:ok, value} <- field_value(raw),
+         {:ok, tags} <- tags(value),
          :ok <- version(kind, tags),
          {:ok, required} <- required(tags, kind),
          {:ok, algorithm} <- algorithm(tags["a"]),
@@ -98,6 +98,13 @@ defmodule Sovite.DKIM.Signature do
   end
 
   defp now, do: System.os_time(:second)
+
+  defp field_value(raw) do
+    case :binary.split(raw, ":") do
+      [_name, value] -> {:ok, value}
+      [_] -> {:error, "not a header field"}
+    end
+  end
 
   defp tags(value) do
     case Tags.parse(value) do

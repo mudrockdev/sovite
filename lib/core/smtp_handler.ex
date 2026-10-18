@@ -1122,8 +1122,15 @@ defmodule Sovite.Core.SMTPHandler do
     end
   end
 
-  # Refuses a looping message, fixes the header section if needed, and
-  # plans the authentication checks.
+  # Refuses a looping message, and one that starts with a folded line,
+  # which would continue the Received: field this server puts above it.
+  # Fixes the header section if needed, and plans the authentication
+  # checks.
+  defp checked_header(<<c, _::binary>>, state) when c in [?\s, ?\t] do
+    reply = Reply.new(554, "5.6.0", "Message header section starts with a folded line")
+    {:reply, reply, abort(state)}
+  end
+
   defp checked_header(header, state) do
     received = Headers.parse(header)
 

@@ -493,6 +493,7 @@ defmodule Sovite.DKIMTest do
              Signature.parse(String.replace(raw, "c=relaxed/relaxed", "c=a/b/c"))
 
     assert {:error, "malformed b= tag"} = Signature.parse(String.replace(raw, "b=", "b=!"))
+    assert {:error, "not a header field"} = Signature.parse("v=1; a=rsa-sha256")
 
     assert {:error, "malformed l= tag"} =
              Signature.parse(String.replace(raw, "s=rsa", "s=rsa; l=x"))

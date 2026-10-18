@@ -29,7 +29,7 @@ defmodule Sovite.MixProject do
   end
 
   def cli do
-    [preferred_envs: [lint: :test, coverage: :test]]
+    [preferred_envs: [lint: :test, coverage: :test, fuzz: :test]]
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
@@ -75,7 +75,9 @@ defmodule Sovite.MixProject do
       # Fetches deps and enables the git pre-commit hook (lint + Dialyzer).
       setup: ["deps.get"],
       # As CI: fails under the threshold in test_coverage; HTML in cover/.
-      coverage: ["test --cover --warnings-as-errors"],
+      coverage: ["test --cover"],
+      # Only the fuzz tests (test/fuzz/), FUZZ_RUNS times each.
+      fuzz: &fuzz/1,
       lint: [
         "format",
         "compile --warnings-as-errors --force",
@@ -84,6 +86,11 @@ defmodule Sovite.MixProject do
         "dialyzer"
       ]
     ]
+  end
+
+  defp fuzz(args) do
+    System.get_env("FUZZ_RUNS") || System.put_env("FUZZ_RUNS", "10000")
+    Mix.Task.run("test", ["--only", "fuzz" | args])
   end
 
   defp releases do

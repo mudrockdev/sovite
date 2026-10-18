@@ -48,6 +48,13 @@ defmodule Sovite.SMTP.ReplyTest do
                Reply.decode("451-4.2.0 busy\r\n451 4.7.1 other\r\n")
     end
 
+    test "replaces control characters and bytes that are not UTF-8 in the text" do
+      assert {:ok, %Reply{code: 550, lines: ["caf? \t a b", "ünïcode"]}, ""} =
+               Reply.decode(<<"550-caf", 0xE9, " \t a\rb\r\n550 ünïcode\r\n">>)
+
+      assert {:ok, %Reply{lines: ["a b"]}, ""} = Reply.decode(<<"250 a", 0, "b\r\n">>)
+    end
+
     test "rejects malformed replies" do
       for bad <- [
             "hello\r\n",

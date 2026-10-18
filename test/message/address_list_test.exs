@@ -28,8 +28,9 @@ defmodule Sovite.Message.AddressListTest do
     assert up("Doe, John <j@x>") == "Doe, John <J@X>"
   end
 
-  test "keeps source routes" do
+  test "keeps source routes, and folding and spaces inside angle brackets" do
     assert up("<@r1,@r2:u@d>") == "<@r1,@r2:U@D>"
+    assert up("Al <\r\n a@b >") == "Al <\r\n A@B >"
   end
 
   test "rewrites whole fields" do

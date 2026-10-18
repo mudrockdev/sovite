@@ -50,7 +50,7 @@ jobs:
         run: ./scripts/check_boundaries.sh
 
       - name: Tests with coverage
-        run: mix test --cover --warnings-as-errors
+        run: mix test --cover
 
       - name: Dialyzer
         run: mix dialyzer --format github

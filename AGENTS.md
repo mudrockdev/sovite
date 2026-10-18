@@ -6,6 +6,10 @@ Rules for AI coding agents working on Sovite. `CLAUDE.md` is a symlink to this f
 
 - Never run `git commit` or `git push`, in any form (including `--amend` and `--force`). The maintainer commits and pushes. Leave changes in the working tree.
 
+## CI
+
+- Never add scheduled jobs (`on: schedule`, cron) to GitHub workflows. Workflows run on pushes, pull requests, tags, or by hand (`workflow_dispatch`).
+
 ## Database
 
 Sovite's own data lives in its database through Ecto (`Sovite.Core.Repo`). SQLite is the default; PostgreSQL and MySQL are chosen with `[database] adapter`.

@@ -6,7 +6,7 @@ defmodule Sovite.Core.OperationsTest do
 
   import ExUnit.CaptureIO
 
-  alias Sovite.Core.{CLI, Control, Telemetry, Web}
+  alias Sovite.Core.{CLI, Control, Telemetry}
   alias Sovite.Core.Logging.FileHandler
   alias Sovite.Queue.Spool
   alias Sovite.Test.{FakeDNS, FakeHTTP, SMTPClient, TelemetryForwarder}

@@ -105,6 +105,7 @@ defmodule Sovite.IDNATest do
             {"xn--abc.example", :invalid_a_label},
             {"xn--bcher-kva-.example", :invalid_a_label},
             {"☃.net", :disallowed},
+            {<<"caf", 0xE9, ".example">>, :disallowed},
             {"a b.example", :disallowed},
             {"a​b.example", :disallowed},
             {"\u1100.kr", :disallowed},

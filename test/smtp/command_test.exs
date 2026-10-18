@@ -94,6 +94,10 @@ defmodule Sovite.SMTP.CommandTest do
     assert parse("XCLIENT ADDR") == {:error, :xclient, :syntax}
     assert parse("XFORWARD IDENT=a+2") == {:error, :xforward, :syntax}
     assert parse("XFORWARD 1A=b") == {:error, :xforward, :syntax}
+    # Decoded values may not hold control characters or invalid UTF-8.
+    assert parse("XFORWARD HELO=a+0D+0AX-Injected:+20yes") == {:error, :xforward, :syntax}
+    assert parse("XCLIENT LOGIN=a+FF") == {:error, :xclient, :syntax}
+    assert parse("XCLIENT LOGIN=j+C3+B6rg") == {:ok, {:xclient, [{"LOGIN", "jörg"}]}}
   end
 
   test "parses STARTTLS and AUTH" do

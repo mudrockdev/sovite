@@ -105,12 +105,13 @@ defmodule Sovite.IDNA do
 
   # RFC 5895 mapping: lower case, NFC, and other full stops.
   defp labels(name) do
-    mapped = name |> String.replace(@dots, ".") |> String.downcase() |> String.normalize(:nfc)
-
-    cond do
-      not String.valid?(name) -> {:error, :disallowed}
-      mapped == "" -> {:error, :empty_label}
-      true -> {:ok, String.split(mapped, ".")}
+    if String.valid?(name) do
+      case name |> String.replace(@dots, ".") |> String.downcase() |> String.normalize(:nfc) do
+        "" -> {:error, :empty_label}
+        mapped -> {:ok, String.split(mapped, ".")}
+      end
+    else
+      {:error, :disallowed}
     end
   end
 
