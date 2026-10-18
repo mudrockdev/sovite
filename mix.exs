@@ -29,7 +29,7 @@ defmodule Sovite.MixProject do
   end
 
   def cli do
-    [preferred_envs: [lint: :test]]
+    [preferred_envs: [lint: :test, coverage: :test]]
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
@@ -74,6 +74,8 @@ defmodule Sovite.MixProject do
     [
       # Fetches deps and enables the git pre-commit hook (lint + Dialyzer).
       setup: ["deps.get"],
+      # As CI: fails under the threshold in test_coverage; HTML in cover/.
+      coverage: ["test --cover --warnings-as-errors"],
       lint: [
         "format",
         "compile --warnings-as-errors --force",
