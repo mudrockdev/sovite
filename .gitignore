@@ -32,3 +32,5 @@ sovite.toml
 
 # The web UI build, copied in by scripts/package.sh.
 /priv/web/
+
+spool/**
