@@ -308,6 +308,8 @@ The release ships units in `share/systemd/` (the packages install them):
 
 The build runs in a container (`packaging/Containerfile.release`) with podman, or docker with buildx (`--engine docker`), so the host needs neither Zig nor nfpm, and both targets build on either architecture.
 
+Pushing a tag `vVERSION` (matching the version in `mix.exs`) runs this in CI (`.github/workflows/ci.yml`): after the tests, both targets are built, run on their own architecture (the binary, then the `.deb` installed and its service started under systemd), and published as a GitHub release with a `SHA256SUMS` file. Tags with a `-`, such as `v1.0.0-rc.1`, are published as pre-releases.
+
 One executable is the server and every command:
 
 ```sh
