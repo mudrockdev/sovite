@@ -1,8 +1,9 @@
 defmodule Sovite.Core.Web.Pages do
   @moduledoc false
   # Serves the UI (see Sovite.Core.Web). Its pages are HTML files from a
-  # static build: a request for a page that does not exist gets
-  # index.html, for the paths the app routes itself. Each page gets a
+  # static build: a request for a page that does not exist gets the
+  # app's fallback page, 200.html (or index.html without one), for the
+  # paths the app routes itself. Each page gets a
   # Content-Security-Policy that allows its inline scripts by their
   # SHA-256 hash (SvelteKit starts the app from one), and nothing else
   # inline. Other files are served by Plug.Static.
@@ -58,7 +59,12 @@ defmodule Sovite.Core.Web.Pages do
     candidates =
       if Path.extname(path) == ".html",
         do: [path],
-        else: [Path.join(path, "index.html"), path <> ".html", Path.join(root, "index.html")]
+        else: [
+          Path.join(path, "index.html"),
+          path <> ".html",
+          Path.join(root, "200.html"),
+          Path.join(root, "index.html")
+        ]
 
     case Enum.find_value(candidates, &read/1) do
       nil -> Security.error(conn, 404, "not found")

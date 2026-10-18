@@ -106,6 +106,11 @@ defmodule Sovite.Core.WebTest do
 
       assert request(context, :get, "/about").resp_body == "<h1>about</h1>"
       assert request(context, :get, "/queue/8CrIr95AD2x90M").resp_body =~ "<h1>status</h1>"
+
+      # The app's fallback page, when the build has one.
+      File.write!(Path.join(context.web, "200.html"), "<h1>app</h1>")
+      assert request(context, :get, "/queue/8CrIr95AD2x90M").resp_body == "<h1>app</h1>"
+      assert request(context, :get, "/").resp_body =~ "<h1>status</h1>"
     end
 
     test "refuses hidden and missing files", context do

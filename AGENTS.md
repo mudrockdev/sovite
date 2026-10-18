@@ -45,7 +45,9 @@ scripts/check_boundaries.sh
 
 - **Language**: TypeScript
 - **Package Manager**: bun
-- **Add-ons**: prettier, eslint, tailwindcss, vitest, enhanced-img, sveltekit-adapter, paraglide, ai-tools
+- **Add-ons**: prettier, eslint, tailwindcss with daisyUI, enhanced-img, sveltekit-adapter, paraglide, ai-tools
+- **Tests**: `bun test` (`bun:test`, files named `*.spec.ts`). Vitest is not used.
+- **Messages**: keys in `messages/*.json` become module names, so never use reserved words (`default`) or names SvelteKit treats as server-only (`server`).
 
 ---
 
