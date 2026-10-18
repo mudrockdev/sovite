@@ -6,12 +6,21 @@
 #     -v sovite-data:/var/lib/sovite -v sovite-queue:/var/spool/sovite sovite
 #   podman exec sovite sovitectl status
 #
-# Logs go to standard output. The admin API listens inside the container
-# only (127.0.0.1:9025), for sovitectl.
+# Logs go to standard output. The web UI and admin API listen inside the
+# container only (127.0.0.1:9025), for sovitectl; to reach the UI from
+# outside, set [admin] address and allowed_networks, and publish 9025.
 
 ARG ELIXIR_VERSION=1.20.4
 ARG OTP_VERSION=29.0
 ARG DEBIAN_VERSION=trixie-slim
+ARG BUN_VERSION=1.4
+
+# The web UI: a static build, served from priv/web.
+FROM docker.io/oven/bun:${BUN_VERSION} AS web
+WORKDIR /build
+COPY package.json bun.lock bunfig.toml ./
+COPY lib/core/sovite_web lib/core/sovite_web
+RUN bun install --frozen-lockfile && bun run build
 
 FROM docker.io/hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION} AS build
 
@@ -29,6 +38,7 @@ RUN mix deps.get --only prod && mix deps.compile
 COPY config config
 COPY lib lib
 COPY rel rel
+COPY --from=web /build/lib/core/sovite_web/build priv/web
 RUN mix release
 
 FROM docker.io/library/debian:${DEBIAN_VERSION}

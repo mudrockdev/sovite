@@ -40,7 +40,7 @@ defmodule Sovite.Core.Supervisor do
 
   Then, when enabled: the metrics (`Sovite.Core.Metrics`), the trace
   exporter (`Sovite.Core.Tracing`), the admin API listener
-  (`Sovite.Core.Admin`), the systemd watchdog, and last
+  (`Sovite.Core.Web`, the UI and admin API), the systemd watchdog, and last
   `Sovite.Core.Control`, which reloads the configuration on `SIGHUP` and
   drains the server when it stops.
 
@@ -72,7 +72,6 @@ defmodule Sovite.Core.Supervisor do
 
   alias Sovite.Core.{
     ACME,
-    Admin,
     Config,
     Control,
     DMARCReports,
@@ -87,7 +86,8 @@ defmodule Sovite.Core.Supervisor do
     SMTPHandler,
     Telemetry,
     TLSReports,
-    Tracing
+    Tracing,
+    Web
   }
 
   alias Sovite.Queue.Spool
@@ -129,7 +129,7 @@ defmodule Sovite.Core.Supervisor do
 
   @impl true
   def init(%{config: config} = args) do
-    Config.put(config)
+    Config.put(config, args.instance)
     Logging.configure(config.log)
     Telemetry.attach_logger()
 
@@ -140,7 +140,9 @@ defmodule Sovite.Core.Supervisor do
         %{
           control: name(args.name, Control),
           metrics: name(args.name, Metrics),
-          tracing: name(args.name, Tracing)
+          tracing: name(args.name, Tracing),
+          web: name(args.name, Web),
+          web_penalty: name(args.name, Web.Penalty)
         }
       end)
 
@@ -257,42 +259,8 @@ defmodule Sovite.Core.Supervisor do
         do: [Tracing.child_spec(config.tracing, runtime.tracing, config.server.hostname)],
         else: []
       ) ++
-      admin_specs(config, runtime) ++
+      Web.child_specs(config, runtime) ++
       [{Sovite.Systemd.Watchdog, check: fn -> is_map(QueueManager.stats(manager)) end}]
-  end
-
-  defp admin_specs(%{admin: %{enabled: false}}, _runtime), do: []
-
-  defp admin_specs(config, runtime) do
-    admin = config.admin
-
-    case Admin.token(admin.token_file) do
-      {:ok, token} ->
-        listener_opts = [
-          id: "admin/#{:inet.ntoa(admin.address)}:#{admin.port}",
-          ip: admin.address,
-          port: admin.port,
-          max_connections: 100,
-          max_connections_per_ip: 20,
-          handler: Sovite.HTTP.Server,
-          handler_opts: [
-            handler: Admin.handler(Admin.opts(config, runtime, token)),
-            tls:
-              if(admin.tls and runtime.cert_store,
-                do: fn -> CertStore.server_options(@cert_store) end
-              )
-          ]
-        ]
-
-        [
-          {Sovite.Listener,
-           Keyword.merge(listener_opts, inherited(runtime, admin.address, admin.port))}
-        ]
-
-      {:error, reason} ->
-        Logger.error("admin API disabled: cannot use #{admin.token_file}: #{reason}")
-        []
-    end
   end
 
   # The failed-login counter, the anti-abuse processes, the certificate

@@ -61,8 +61,8 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :config, :reload_failed]` | | `path`, `reason` |
   | `[:sovite, :server, :drain, :start]` | `connections` | |
   | `[:sovite, :server, :drain, :stop]` | `duration`, `connections` | `deliveries` |
-  | `[:sovite, :http, :request, :stop]` | `duration` | `listener`, `remote_ip`, `method`, `path`, `status` |
-  | `[:sovite, :http, :request, :exception]` | `duration` | `listener`, `remote_ip`, `method`, `path`, `kind`, `reason` |
+  | `[:sovite, :web, :request, :stop]` | `duration` | `method`, `path`, `status`, `remote_ip` |
+  | `[:sovite, :web, :request, :exception]` | | `method`, `path`, `kind`, `reason` |
   | `[:sovite, :tracing, :export, :error]` | `spans` | `name`, `reason` |
   | `[:sovite, :tracing, :spans, :dropped]` | `spans` | `name` |
   | `[:sovite, :systemd, :watchdog, :skipped]` | | `reason` |
@@ -85,7 +85,7 @@ defmodule Sovite.Core.Telemetry do
   `:info`. Corrupt messages, discarded notifications, failed logins,
   bans, suspended users, certificate errors, failed ACME orders,
   `WARN` results of restrictions, failed policy server requests, failed
-  config reloads, admin API requests that crashed, failed trace exports,
+  config reloads, web requests that crashed, failed trace exports,
   and skipped watchdog pings are logged at `:warning`.
   All other events are logged at `:debug`.
 
@@ -154,8 +154,8 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :config, :reload_failed],
     [:sovite, :server, :drain, :start],
     [:sovite, :server, :drain, :stop],
-    [:sovite, :http, :request, :stop],
-    [:sovite, :http, :request, :exception],
+    [:sovite, :web, :request, :stop],
+    [:sovite, :web, :request, :exception],
     [:sovite, :tracing, :export, :error],
     [:sovite, :tracing, :spans, :dropped],
     [:sovite, :systemd, :watchdog, :skipped]
@@ -201,7 +201,7 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :mta_sts, :failed],
     [:sovite, :tls_rpt, :report, :post_failed],
     [:sovite, :config, :reload_failed],
-    [:sovite, :http, :request, :exception],
+    [:sovite, :web, :request, :exception],
     [:sovite, :tracing, :export, :error],
     [:sovite, :tracing, :spans, :dropped],
     [:sovite, :systemd, :watchdog, :skipped]

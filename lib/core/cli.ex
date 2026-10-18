@@ -29,7 +29,7 @@ defmodule Sovite.Core.CLI do
   `--config PATH`, or the default one. Commands that act on the running
   server (`queue flush`, `hold`, `release`, `delete`, `requeue`, `config
   reload`, `config diff`, and `status`) use the admin API
-  (`Sovite.Core.Admin`) at the address and with the token the config file
+  (`Sovite.Core.Web.API`) at the address and with the token the config file
   names, so they must run as a user that can read the token file.
   """
 

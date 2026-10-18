@@ -1,7 +1,7 @@
 defmodule Sovite.Core.Metrics do
   @moduledoc """
   The Prometheus metrics of the MTA, served at `/metrics` on the admin
-  listener (see `Sovite.Core.Admin`) with `metrics.enabled`.
+  server (see `Sovite.Core.Web`) with `metrics.enabled`.
 
   Counters and histograms come from the telemetry events of
   `Sovite.Core.Telemetry` (`Sovite.Metrics`); they start from zero at

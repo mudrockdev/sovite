@@ -1,10 +1,10 @@
 defmodule Sovite.Core.CLI.API do
   @moduledoc false
-  # A client of the admin API (Sovite.Core.Admin), for the sovitectl
+  # A client of the admin API (Sovite.Core.Web.API), for the sovitectl
   # commands that act on the running MTA. The address and the token
   # come from the config file.
 
-  alias Sovite.Core.Admin
+  alias Sovite.Core.Web
 
   @timeout 60_000
 
@@ -64,7 +64,7 @@ defmodule Sovite.Core.CLI.API do
   # The token is created by the server, so it must already exist.
   defp read_token(path) do
     if File.exists?(path),
-      do: Admin.token(path) |> token_error(path),
+      do: Web.token(path) |> token_error(path),
       else: {:error, "#{path} does not exist: is sovite running?"}
   end
 

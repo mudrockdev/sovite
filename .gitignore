@@ -29,3 +29,6 @@ sovite.toml
 # Bun workspace dependencies.
 /node_modules/
 /dist/
+
+# The web UI build, copied in by scripts/package.sh.
+/priv/web/

@@ -922,18 +922,18 @@ Delivery status notifications (RFC 3464) are sent from `MAILER-DAEMON@<server.ho
 
 ## `[admin]`
 
-The admin HTTP API, which `sovitectl` uses to act on the running server (queue changes, reloads, status), and which serves the Prometheus metrics. It listens on the loopback address only, and every request needs the token in `token_file`. See [Operations](operations.md#the-admin-api) for the requests.
+The web server: the web UI at `/`, the admin API at `/api`, which `sovitectl` uses to act on the running server (queue changes, reloads, status), and the Prometheus metrics at `/metrics`. It listens on the loopback address only, and every API request needs the token in `token_file`. See [Operations](operations.md#the-web-ui-and-admin-api) for the requests and the protections.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | boolean | `true` | Serve the admin API. Without it, `sovitectl queue` can only read the queue, and `config reload`, `config diff`, and `status` do not work. |
+| `enabled` | boolean | `true` | Run the web server. Without it, `sovitectl queue` can only read the queue, and `config reload`, `config diff`, and `status` do not work. |
 | `address` | IP address | `127.0.0.1` | Address to listen on. |
 | `port` | integer | `9025` | TCP port. |
-| `token_file` | absolute path | `/var/lib/sovite/admin.token` | The bearer token. Created with a random token, mode `0600`, if it does not exist. `sovitectl` reads it, so it must run as root or the user Sovite runs as. |
+| `token_file` | absolute path | `/var/lib/sovite/admin.token` | The bearer token. Created with a random token, mode `0600`, if it does not exist. `sovitectl` reads it, so it must run as root or the user Sovite runs as. Wrong tokens count as failed logins, with `auth.max_failures`, `auth.failure_window`, and `auth.ban_time`. |
 | `allowed_networks` | array of networks | `["127.0.0.0/8", "::1"]` | Clients outside these networks get `403`, token or not. |
 | `tls` | boolean | `false` | Serve HTTPS with the server's certificates (`[tls]`). |
 | `public_metrics` | boolean | `false` | Serve `/metrics` without the token, to clients in `allowed_networks`. |
-| `web_root` | absolute path | unset | Serve the files in this directory, such as a built status UI, for other `GET` requests. They need no token. |
+| `web_root` | absolute path | unset | The web UI's files. Unset: `priv/web` in the release, the build of `lib/core/sovite_web`. They need no token. |
 
 ## `[metrics]`
 

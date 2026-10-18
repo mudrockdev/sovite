@@ -45,6 +45,7 @@ defmodule Sovite.MixProject do
   defp deps do
     [
       {:telemetry, "~> 1.4"},
+      {:plug_cowboy, "~> 2.7"},
       {:toml, "~> 0.7.0"},
       {:ecto_sql, "~> 3.14"},
       {:ecto_sqlite3, "~> 0.25.0"},
@@ -129,7 +130,6 @@ defmodule Sovite.MixProject do
         ],
         "Local delivery": [~r/^Sovite\.Maildir/, ~r/^Sovite\.Pipe/],
         DSN: [~r/^Sovite\.DSN/],
-        HTTP: [~r/^Sovite\.HTTP/],
         Metrics: [~r/^Sovite\.Metrics/],
         Tracing: [~r/^Sovite\.Tracing/],
         Systemd: [~r/^Sovite\.Systemd/],

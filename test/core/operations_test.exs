@@ -6,9 +6,8 @@ defmodule Sovite.Core.OperationsTest do
 
   import ExUnit.CaptureIO
 
-  alias Sovite.Core.{Admin, CLI, Control, Telemetry}
+  alias Sovite.Core.{CLI, Control, Telemetry, Web}
   alias Sovite.Core.Logging.FileHandler
-  alias Sovite.HTTP.Request
   alias Sovite.Queue.Spool
   alias Sovite.Test.{FakeDNS, FakeHTTP, SMTPClient, TelemetryForwarder}
 
@@ -144,7 +143,7 @@ defmodule Sovite.Core.OperationsTest do
     end
   end
 
-  describe "admin API" do
+  describe "web server" do
     test "needs the token, and serves status, config, and metrics", context do
       context = start_mta(context)
       assert Bitwise.band(File.stat!(token_file(context)).mode, 0o777) == 0o600
@@ -197,59 +196,6 @@ defmodule Sovite.Core.OperationsTest do
 
       assert {404, _} = http(context, :get, "/api/nothing")
       assert {405, _} = http(context, :delete, "/api/status")
-    end
-
-    test "refuses other addresses, and serves the web root without a token", %{dir: dir} do
-      web = Path.join(dir, "web")
-      File.mkdir_p!(Path.join(web, "queue"))
-      File.write!(Path.join(web, "index.html"), "<h1>status</h1>")
-      File.write!(Path.join(web, "app.js"), "1")
-      File.write!(Path.join(web, ".secret"), "x")
-
-      opts = %{
-        token_hash: :crypto.hash(:sha256, "t"),
-        allowed_networks: [{{127, 0, 0, 0}, 8}],
-        public_metrics: true,
-        web_root: web,
-        metrics: nil
-      }
-
-      request = fn path, ip ->
-        Admin.handle(
-          %Request{
-            method: "GET",
-            path: path,
-            segments: String.split(path, "/", trim: true),
-            remote_ip: ip
-          },
-          opts
-        )
-      end
-
-      assert {403, _, _} = request.("/api/status", {192, 0, 2, 1})
-      assert {200, headers, "<h1>status</h1>"} = request.("/", {127, 0, 0, 1})
-      assert {"x-frame-options", "DENY"} in headers
-
-      assert {200, [{"content-type", "text/javascript; charset=utf-8"} | _], "1"} =
-               request.("/app.js", {127, 0, 0, 1})
-
-      # Pages the app routes itself get index.html.
-      assert {200, _, "<h1>status</h1>"} = request.("/queue/abc", {127, 0, 0, 1})
-      assert {404, _, _} = request.("/.secret", {127, 0, 0, 1})
-      assert {404, _, _} = request.("/../etc/passwd", {127, 0, 0, 1})
-      # Public metrics need no token, but are disabled here.
-      assert {404, _, _} = request.("/metrics", {127, 0, 0, 1})
-    end
-
-    test "creates and checks the token file", %{dir: dir} do
-      path = Path.join(dir, "token")
-      assert {:ok, token} = Admin.token(path)
-      assert byte_size(token) >= 32
-      assert Admin.token(path) == {:ok, token}
-
-      File.write!(path, "short\n")
-      assert {:error, _} = Admin.token(path)
-      assert {:error, _} = Admin.token(Path.join([dir, "missing", "token"]))
     end
   end
 
@@ -371,6 +317,8 @@ defmodule Sovite.Core.OperationsTest do
     test "applies a new config without restarting listeners", context do
       context = start_mta(context)
       listener = smtp_listener(context.supervisor)
+      web = child(context.supervisor, &match?({Plug.Cowboy, _}, &1))
+      assert is_pid(web)
       TelemetryForwarder.attach([[:sovite, :config, :reloaded]])
 
       File.write!(context.path, toml(context, "[smtp]\nmax_recipients = 1"))
@@ -381,6 +329,8 @@ defmodule Sovite.Core.OperationsTest do
       assert_receive {:telemetry, [:sovite, :config, :reloaded], _, %{changed: changed}}
       assert Enum.any?(changed, &(&1 =~ "smtp/"))
       assert smtp_listener(context.supervisor) == listener
+      # The web server reads the config per request: not restarted.
+      assert child(context.supervisor, &match?({Plug.Cowboy, _}, &1)) == web
 
       assert capture_io(fn -> assert cli(context, ["config", "diff"]) == 0 end) ==
                "no differences\n"

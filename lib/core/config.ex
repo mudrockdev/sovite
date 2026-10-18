@@ -1087,6 +1087,28 @@ defmodule Sovite.Core.Config do
   @spec get() :: t()
   def get, do: :persistent_term.get(__MODULE__)
 
+  @doc """
+  Stores `config` as the running configuration of one server instance
+  (`Sovite.Core.Supervisor`), and as the running configuration. Parts
+  that read it on each use, such as the web server, see reloads at once.
+  """
+  @spec put(t(), term()) :: :ok
+  def put(%__MODULE__{} = config, instance) do
+    :persistent_term.put({__MODULE__, instance}, config)
+    put(config)
+  end
+
+  @doc "Returns the running configuration of a server instance, or `nil`."
+  @spec get(term()) :: t() | nil
+  def get(instance), do: :persistent_term.get({__MODULE__, instance}, nil)
+
+  @doc "Forgets the configuration of a server instance that stopped."
+  @spec erase(term()) :: :ok
+  def erase(instance) do
+    _ = :persistent_term.erase({__MODULE__, instance})
+    :ok
+  end
+
   @doc false
   # Default for server.hostname. Not always an FQDN, so production configs
   # should set the hostname explicitly.

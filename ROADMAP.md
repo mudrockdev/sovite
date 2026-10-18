@@ -228,7 +228,7 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 - [x] Prometheus metrics endpoint; OpenTelemetry traces
 - [x] Structured JSON logs + classic syslog-style output
 - [x] Admin HTTP API (authenticated, local-only by default)
-- [ ] Optional LiveDashboard-based status UI (the admin API serves the API and a static UI from `admin.web_root`; the UI itself is `lib/core/sovite_web`)
+- [ ] Optional LiveDashboard-based status UI (the web server on Plug and Cowboy serves the static build of `lib/core/sovite_web` at `/` and the admin API at `/api`; the UI pages themselves are still to be written)
 - [x] Graceful shutdown and drain; zero-downtime config reload
 - [x] systemd integration: socket activation, `sd_notify`, hardening directives
 - [x] Packaging: container image, `.deb` / `.rpm`, release tarballs

@@ -49,7 +49,7 @@ defmodule Sovite.Core.Control do
   @version Mix.Project.config()[:version]
 
   # The listeners that are drained: those that receive mail.
-  @not_drained ["admin/", "mta-sts/"]
+  @not_drained ["mta-sts/"]
 
   @poll_interval 100
 
@@ -162,6 +162,7 @@ defmodule Sovite.Core.Control do
       _ = do_drain(state, state.listeners)
       Signals.remove(self())
       tree(state).erase_specs(state.runtime.instance)
+      Config.erase(state.runtime.instance)
     end
 
     :ok
@@ -282,7 +283,7 @@ defmodule Sovite.Core.Control do
     new = tree(state).children(config, runtime)
     new_ids = MapSet.new(new, & &1.id)
 
-    Config.put(config)
+    Config.put(config, instance)
     Logging.configure(config.log)
     tree(state).put_specs(instance, new)
 

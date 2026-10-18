@@ -1,10 +1,10 @@
 # Operations
 
-Running Sovite: the queue, the configuration, message traces and log reports, the admin API, metrics and traces, stopping and reloading, systemd, and packages.
+Running Sovite: the queue, the configuration, message traces and log reports, the web UI and admin API, metrics and traces, stopping and reloading, systemd, and packages.
 
 ## `sovitectl`
 
-`sovitectl` reads the config file (`--config PATH`, `$SOVITE_CONFIG`, or `/etc/sovite/sovite.toml`). Commands that only read files work whether or not the server runs. Commands that change the running server go through the [admin API](#the-admin-api), with the token in `admin.token_file`, so run them as root or as the user Sovite runs as.
+`sovitectl` reads the config file (`--config PATH`, `$SOVITE_CONFIG`, or `/etc/sovite/sovite.toml`). Commands that only read files work whether or not the server runs. Commands that change the running server go through the [admin API](#the-web-ui-and-admin-api), with the token in `admin.token_file`, so run them as root or as the user Sovite runs as.
 
 | Command | Reads | Needs the server |
 |---|---|---|
@@ -123,9 +123,11 @@ sovitectl report --top 20 /var/log/sovite/sovite.2026-10-0*.log
 
 Compressed (`.gz`) files are read too.
 
-## The admin API
+## The web UI and admin API
 
-An HTTP API on `127.0.0.1:9025` (`[admin]`), for `sovitectl`, monitoring, and status pages. Requests must come from `admin.allowed_networks` and carry the token from `admin.token_file`, which the server creates on its first start:
+One web server, built on Plug and Cowboy, listens on `127.0.0.1:9025` (`[admin]`). `/` serves the web UI, the static build of `lib/core/sovite_web` (shipped in the release as `priv/web`, or from `admin.web_root`); `/api` serves the admin API, for `sovitectl`, monitoring, and the UI; `/metrics` the Prometheus metrics. Ports 80 and 443 stay with ACME and the MTA-STS policy server.
+
+Requests must come from `admin.allowed_networks`. API requests carry the token from `admin.token_file`, which the server creates on its first start:
 
 ```sh
 curl -H "Authorization: Bearer $(cat /var/lib/sovite/admin.token)" http://127.0.0.1:9025/api/status
@@ -144,7 +146,19 @@ curl -H "Authorization: Bearer $(cat /var/lib/sovite/admin.token)" http://127.0.
 | `GET /api/trace?id=ID` | As `sovitectl trace`, with `[log] directory` |
 | `GET /metrics` | Prometheus metrics |
 
-Responses are JSON; errors are `{"error": "..."}`. With `admin.web_root` set, other `GET` requests serve the files in that directory, so a status UI built as static files can be served next to the API it calls.
+Responses are JSON; errors are `{"error": "..."}`.
+
+The UI will have users of its own, so the web server treats clients as untrusted:
+
+- Clients outside `admin.allowed_networks` get `403`.
+- The token is compared in constant time. A wrong token is a failed login: it is logged as `auth.failure` with `mechanism=TOKEN`, ready for fail2ban, and after `auth.max_failures` within `auth.failure_window` the client gets `429` for `auth.ban_time`.
+- `POST` requests from another site (by `Origin` or `Sec-Fetch-Site`) get `403`, and no CORS access is granted.
+- Responses carry a strict `Content-Security-Policy` (the UI's own files, its inline scripts by their hash, no framing), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy: no-referrer`, same-origin opener and resource policies, a `Permissions-Policy` that turns off device access, and with `admin.tls`, `Strict-Transport-Security`. API responses are never cached.
+- Request lines, headers, and connections are limited; slow clients time out.
+
+The web server reads the configuration on each request, so a reload applies at once without restarting it; changing `[admin]` `address`, `port`, `tls`, or `token_file` restarts it.
+
+To reach the UI from other machines, set `admin.address` (and `admin.tls = true`) and add their networks to `admin.allowed_networks`.
 
 ## Metrics and traces
 
@@ -191,7 +205,7 @@ The release ships units in `share/systemd/` (the packages install them):
 
 Releases are built with `mix release`; `scripts/package.sh` builds:
 
-- `dist/sovite-VERSION-linux-ARCH.tar.gz`: the release, with the Erlang runtime. Unpack it in `/opt/sovite`.
+- `dist/sovite-VERSION-linux-ARCH.tar.gz`: the release, with the Erlang runtime and the web UI (built with bun first). Unpack it in `/opt/sovite`.
 - `.deb` and `.rpm` packages, when [nfpm](https://nfpm.goreleaser.com) is installed (`packaging/nfpm.yaml`). They install the release in `/opt/sovite`, the systemd units, `/usr/bin/sovitectl`, and `/etc/sovite/sovite.toml`, and create the `sovite` user. Build them on the distribution release they are for: the runtime links to its OpenSSL.
 
 The `Containerfile` builds an image that runs the release as the `sovite` user, with the config in `/etc/sovite/sovite.toml`, and volumes for `/var/lib/sovite` and `/var/spool/sovite`. Logs go to standard output, and the health check runs `sovitectl status`. `Container/docker-compose.yaml` runs it with Compose:

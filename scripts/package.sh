@@ -1,6 +1,6 @@
 #!/bin/sh
-# Builds the release tarball and, with nfpm installed, the .deb and .rpm
-# packages, into dist/. Run on the distribution release the packages are
+# Builds the web UI (with bun), the release tarball and, with nfpm
+# installed, the .deb and .rpm packages, into dist/. Run on the distribution release the packages are
 # for: the release bundles the Erlang runtime built on this host.
 #
 #   scripts/package.sh
@@ -14,6 +14,12 @@ case "$ARCH" in
   aarch64) DEB_ARCH=arm64 ;;
   *) DEB_ARCH=$ARCH ;;
 esac
+
+# The web UI, served from priv/web in the release.
+bun install --frozen-lockfile
+bun run build
+rm -rf priv/web
+cp -r lib/core/sovite_web/build priv/web
 
 export MIX_ENV=prod
 mix deps.get --only prod

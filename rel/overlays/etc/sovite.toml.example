@@ -378,10 +378,11 @@ syslog_facility = "mail"
 syslog_format = "rfc3164"
 
 [admin]
-# The admin HTTP API, for sovitectl (queue changes, reloads, status) and
-# the Prometheus metrics. Every request needs the token in token_file,
-# created if missing; sovitectl reads it, so run it as root or as the
-# user Sovite runs as.
+# The web server: the web UI at /, the admin API at /api for sovitectl
+# (queue changes, reloads, status), and the Prometheus metrics. Every API
+# request needs the token in token_file, created if missing; sovitectl
+# reads it, so run it as root or as the user Sovite runs as. Wrong tokens
+# count as failed logins (auth.max_failures, auth.ban_time).
 enabled = true
 address = "127.0.0.1"
 port = 9025
@@ -391,11 +392,11 @@ allowed_networks = ["127.0.0.0/8", "::1"]
 tls = false
 # Serve /metrics without the token.
 public_metrics = false
-# Serve a status UI built as static files from this directory.
-# web_root = "/opt/sovite/web"
+# The web UI's files. Unset: priv/web in the release.
+# web_root = "/srv/sovite-web"
 
 [metrics]
-# Prometheus metrics at /metrics on the admin API.
+# Prometheus metrics at /metrics on the web server.
 enabled = true
 
 [tracing]
