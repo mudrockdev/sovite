@@ -298,6 +298,32 @@ The release ships units in `share/systemd/` (the packages install them):
 
 ## Packages and images
 
+### The single binary
+
+`mix build.release.x86` and `mix build.release.aarch64` build Sovite as one executable for Linux on x86_64 or aarch64, with [Burrito](https://github.com/burrito-elixir/burrito), and its `.deb` and `.rpm` packages, into `release/`:
+
+- `sovite-VERSION-linux-ARCH`: the executable. It holds the Erlang runtime (built against musl, with its own OpenSSL), the web UI, and everything else, and runs on any Linux distribution of its architecture, glibc or musl. It unpacks itself on its first run, into `~/.local/share/.burrito` (or `$XDG_DATA_HOME/.burrito`).
+- `sovite_VERSION_ARCH.deb` and `sovite-VERSION-1.ARCH.rpm`: the executable in `/usr/lib/sovite`, unpacked there once at install time for every user, `/usr/bin/sovite` and `/usr/bin/sovitectl`, `sendmail`, `mailq`, and `newaliases` in `/usr/lib/sovite/bin`, the systemd units, and `/etc/sovite/sovite.toml`. They only need CA certificates from the system.
+- `sovite-VERSION-linux-ARCH.sha256`: their SHA-256 sums.
+
+The build runs in a container (`packaging/Containerfile.release`) with podman, or docker with buildx (`--engine docker`), so the host needs neither Zig nor nfpm, and both targets build on either architecture.
+
+One executable is the server and every command:
+
+```sh
+sovite                       # the server (config: $SOVITE_CONFIG or /etc/sovite/sovite.toml)
+sovite ctl status            # sovitectl status
+sovite sendmail -t < message
+sovite mailq
+sovite version
+```
+
+The executable runs the Erlang VM as its child. systemd stops both; run by hand, stop it with Ctrl+C, or signal it: the VM drains and stops when the executable goes away.
+
+The Erlang runtime loads the musl C library from a fixed path in `/tmp`, which the executable writes there when it is missing. On a machine with untrusted local users, another user could put their own file there first. The packages handle it: systemd-tmpfiles creates the file as root at boot, the service has a private `/tmp`, and the commands refuse to run if the file there belongs to another user, can be changed by another user, or is not the packaged one. Run the bare executable only as a user that owns its `/tmp`, or with a private one.
+
+### The release
+
 Releases are built with `mix release`; `scripts/package.sh` builds:
 
 - `dist/sovite-VERSION-linux-ARCH.tar.gz`: the release, with the Erlang runtime and the web UI (built with bun first). Unpack it in `/opt/sovite`.

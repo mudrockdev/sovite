@@ -1,0 +1,72 @@
+# Builds the Sovite single binary for one target (x86_64 or aarch64) with
+# Burrito, and its .deb and .rpm packages, and exports them. Run by
+# `mix build.release.x86` and `mix build.release.aarch64`:
+#
+#   podman build -f packaging/Containerfile.release --build-arg TARGET=x86_64 \
+#     --output type=local,dest=release .
+#
+# Both targets build on either architecture: Burrito fetches a precompiled
+# Erlang runtime (built against musl) for the target, and Zig compiles the
+# native code (SQLite) for it.
+
+ARG ELIXIR_VERSION=1.20.4
+ARG OTP_VERSION=29.0.6
+ARG DEBIAN_VERSION=trixie-20261005-slim
+ARG BUN_VERSION=1.4
+
+# The web UI: a static build, served from priv/web.
+FROM docker.io/oven/bun:${BUN_VERSION} AS web
+WORKDIR /build
+COPY package.json bun.lock bunfig.toml ./
+COPY lib/core/sovite_web lib/core/sovite_web
+RUN bun install --frozen-lockfile && bun run build
+
+FROM docker.io/hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION} AS build
+
+# Zig as Burrito requires it, and nfpm for the packages.
+ARG ZIG_VERSION=0.16.0
+ARG NFPM_VERSION=2.48.0
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential git ca-certificates curl xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN arch=$(uname -m) \
+ && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${arch}-linux-${ZIG_VERSION}.tar.xz" \
+    | tar -xJ -C /opt \
+ && ln -s "/opt/zig-${arch}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig \
+ && case "$arch" in x86_64) nfpm_arch=x86_64 ;; aarch64) nfpm_arch=arm64 ;; esac \
+ && curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_${nfpm_arch}.tar.gz" \
+    | tar -xz -C /usr/local/bin nfpm
+
+WORKDIR /build
+ENV MIX_ENV=prod
+RUN mix local.hex --force && mix local.rebar --force
+
+COPY mix.exs mix.lock ./
+RUN mix deps.get --only prod
+
+# Burrito's launcher opens the release cookie for writing, which fails for
+# users who cannot write the unpacked copy, and on a read-only /usr (the
+# packages unpack it once, as root, for every user). Sovite does not use
+# distribution, so the cookie is only read.
+RUN f=deps/burrito/src/erlang_launcher.zig \
+ && grep -q 'openFileAbsolute(io, release_cookie_path, .{ .mode = .read_write })' "$f" \
+ && sed -i 's/openFileAbsolute(io, release_cookie_path, .{ .mode = .read_write })/openFileAbsolute(io, release_cookie_path, .{ .mode = .read_only })/' "$f" \
+ && grep -q 'release_cookie_path, .{ .mode = .read_only }' "$f"
+
+RUN mix deps.compile
+
+COPY config config
+COPY lib lib
+COPY rel rel
+COPY packaging packaging
+COPY --from=web /build/lib/core/sovite_web/build priv/web
+
+ARG TARGET
+RUN case "$TARGET" in x86_64|aarch64) ;; *) echo "TARGET must be x86_64 or aarch64" >&2; exit 64 ;; esac \
+ && BURRITO_TARGET="linux_${TARGET}" mix release --overwrite \
+ && packaging/standalone/package.sh "$TARGET" /out
+
+FROM scratch
+COPY --from=build /out/ /

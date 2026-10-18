@@ -56,6 +56,8 @@ defmodule Sovite.MixProject do
       # Started only with [cluster] enabled (Sovite.Cluster.start/1): on
       # its own it would accept unauthenticated peers.
       {:partisan, "~> 6.3", runtime: false},
+      # The single binary (mix build.release.x86, build.release.aarch64).
+      {:burrito, "~> 1.6", runtime: false, optional: true},
       {:toml, "~> 0.7.0"},
       {:ecto_sql, "~> 3.14"},
       {:ecto_sqlite3, "~> 0.25.0"},
@@ -87,10 +89,25 @@ defmodule Sovite.MixProject do
       sovite: [
         include_executables_for: [:unix],
         applications: [sovite: :permanent, partisan: :load],
-        # Also _build/prod/sovite-VERSION.tar.gz, for scripts/package.sh.
-        steps: [:assemble, :tar]
+        steps: release_steps(),
+        # With BURRITO_TARGET set (by mix build.release.x86 and
+        # build.release.aarch64), a single executable for that target.
+        burrito: [
+          targets: [
+            linux_x86_64: [os: :linux, cpu: :x86_64],
+            linux_aarch64: [os: :linux, cpu: :aarch64]
+          ]
+        ]
       ]
     ]
+  end
+
+  # The release directory and _build/prod/sovite-VERSION.tar.gz (for
+  # scripts/package.sh and the container image), or a single binary.
+  defp release_steps do
+    if System.get_env("BURRITO_TARGET"),
+      do: [:assemble, &Burrito.wrap/1],
+      else: [:assemble, :tar]
   end
 
   defp dialyzer do

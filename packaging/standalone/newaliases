@@ -1,0 +1,5 @@
+#!/bin/sh
+# newaliases(1).
+set -e
+. /usr/lib/sovite/env.sh
+exec /usr/lib/sovite/sovite newaliases "$@"

@@ -1,0 +1,82 @@
+# .deb and .rpm packages of the Sovite single binary, built by
+# packaging/standalone/package.sh (run by mix build.release.x86 and
+# build.release.aarch64) with nfpm (https://nfpm.goreleaser.com), which
+# fills in ${BINARY}, ${MUSL_RUNTIME}, and ${STAGE} first. The
+# binary carries its own Erlang runtime and OpenSSL, built against musl,
+# so the packages work on any glibc or musl distribution of their
+# architecture, and need nothing but CA certificates from the system.
+name: sovite
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: mail
+priority: optional
+# Set to a real "Name <email>" before publishing packages.
+maintainer: Sovite maintainers
+description: |
+  A modern, secure mail server written in Elixir/OTP, as one executable.
+vendor: Sovite
+homepage: https://github.com/mudrockdev/sovite
+license: AGPL-3.0
+
+contents:
+  - src: ${BINARY}
+    dst: /usr/lib/sovite/sovite
+    file_info:
+      mode: 0755
+  - src: ${MUSL_RUNTIME}
+    dst: /usr/lib/sovite/libc-musl.so
+    file_info:
+      mode: 0755
+  - src: ${STAGE}/env.sh
+    dst: /usr/lib/sovite/env.sh
+    file_info:
+      mode: 0644
+  - src: packaging/standalone/sovite
+    dst: /usr/bin/sovite
+    file_info:
+      mode: 0755
+  - src: packaging/standalone/sovitectl
+    dst: /usr/bin/sovitectl
+    file_info:
+      mode: 0755
+  - src: packaging/standalone/sendmail
+    dst: /usr/lib/sovite/bin/sendmail
+    file_info:
+      mode: 0755
+  - src: packaging/standalone/mailq
+    dst: /usr/lib/sovite/bin/mailq
+    file_info:
+      mode: 0755
+  - src: packaging/standalone/newaliases
+    dst: /usr/lib/sovite/bin/newaliases
+    file_info:
+      mode: 0755
+  - src: packaging/standalone/sovite.service
+    dst: /usr/lib/systemd/system/sovite.service
+  - src: rel/overlays/share/systemd/sovite.socket
+    dst: /usr/lib/systemd/system/sovite.socket
+  - src: rel/overlays/share/systemd/sovite-sysusers.conf
+    dst: /usr/lib/sysusers.d/sovite.conf
+  - src: rel/overlays/share/systemd/sovite-tmpfiles.conf
+    dst: /usr/lib/tmpfiles.d/sovite.conf
+  - src: ${STAGE}/sovite-runtime.conf
+    dst: /usr/lib/tmpfiles.d/sovite-runtime.conf
+  - src: rel/overlays/etc/sovite.toml.example
+    dst: /etc/sovite/sovite.toml
+    type: config|noreplace
+    file_info:
+      mode: 0640
+
+scripts:
+  postinstall: packaging/standalone/postinstall.sh
+  preremove: packaging/preremove.sh
+  postremove: packaging/standalone/postremove.sh
+
+overrides:
+  deb:
+    depends:
+      - ca-certificates
+  rpm:
+    depends:
+      - ca-certificates

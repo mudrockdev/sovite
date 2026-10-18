@@ -1,0 +1,5 @@
+#!/bin/sh
+# Sovite: the server without arguments, or a command (sovite help).
+set -e
+. /usr/lib/sovite/env.sh
+exec /usr/lib/sovite/sovite "$@"

@@ -47,6 +47,13 @@ _build/prod/rel/sovite/bin/sovitectl config check _build/prod/rel/sovite/etc/sov
 SOVITE_CONFIG=/etc/sovite/sovite.toml _build/prod/rel/sovite/bin/sovite start
 ```
 
+Build the single binary, with the Erlang runtime inside, and its `.deb` and `.rpm` packages, into `release/` (in a container, with podman or docker):
+
+```sh
+mix build.release.x86       # Linux x86_64
+mix build.release.aarch64   # Linux aarch64 (ARM64), also from an x86_64 host
+```
+
 ## Documentation
 
 - [Configuration](docs/configuration.md)

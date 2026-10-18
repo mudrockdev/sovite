@@ -29,9 +29,13 @@ mkdir -p dist
 cp "_build/prod/sovite-$VERSION.tar.gz" "dist/sovite-$VERSION-linux-$ARCH.tar.gz"
 
 if command -v nfpm >/dev/null 2>&1; then
-  export VERSION RELEASE_DIR="_build/prod/rel/sovite"
-  ARCH=$DEB_ARCH nfpm package --config packaging/nfpm.yaml --packager deb --target dist/
-  ARCH=$ARCH nfpm package --config packaging/nfpm.yaml --packager rpm --target dist/
+  # nfpm expands variables in version and arch, not in file paths.
+  config=$(mktemp)
+  sed "s|\${RELEASE_DIR}|$PWD/_build/prod/rel/sovite|" packaging/nfpm.yaml > "$config"
+  export VERSION
+  ARCH=$DEB_ARCH nfpm package --config "$config" --packager deb --target dist/
+  ARCH=$ARCH nfpm package --config "$config" --packager rpm --target dist/
+  rm -f "$config"
 else
   echo "nfpm not found: built the tarball only" >&2
 fi

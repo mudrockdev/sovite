@@ -10,19 +10,34 @@ defmodule Sovite do
 
   To run the MTA inside another application's supervision tree, see
   `Sovite.Core.Supervisor`.
+
+  In the single-binary build, the command line picks between the server
+  and the commands (see `Sovite.Core.Standalone`).
   """
 
   use Application
 
-  alias Sovite.Core.Control
+  alias Sovite.Core.{Control, Standalone}
 
   @impl true
   def start(_type, _args) do
-    children =
-      if Application.get_env(:sovite, :start_mta, false),
-        do: [Sovite.Core.Supervisor],
-        else: []
+    case Standalone.command() do
+      # Before the VM's own command line would run: it would take the
+      # command for a script.
+      {:run, command} ->
+        command.() |> System.halt()
 
+      :server ->
+        Standalone.keep_running()
+        start_tree(Application.get_env(:sovite, :start_mta, false))
+
+      nil ->
+        start_tree(Application.get_env(:sovite, :start_mta, false))
+    end
+  end
+
+  defp start_tree(start_mta) do
+    children = if start_mta, do: [Sovite.Core.Supervisor], else: []
     Supervisor.start_link(children, strategy: :one_for_one, name: Sovite.Supervisor)
   end
 

@@ -1,0 +1,5 @@
+#!/bin/sh
+# sendmail(1) for local programs. Link it where programs look for it, such as /usr/sbin/sendmail.
+set -e
+. /usr/lib/sovite/env.sh
+exec /usr/lib/sovite/sovite sendmail "$@"

@@ -10,3 +10,5 @@ priv/plts
 **/node_modules
 lib/core/sovite_web/.svelte-kit
 lib/core/sovite_web/build
+release
+burrito_out

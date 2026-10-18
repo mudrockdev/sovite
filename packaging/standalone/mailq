@@ -1,0 +1,5 @@
+#!/bin/sh
+# mailq(1): the queue.
+set -e
+. /usr/lib/sovite/env.sh
+exec /usr/lib/sovite/sovite mailq "$@"

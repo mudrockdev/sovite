@@ -34,3 +34,7 @@ sovite.toml
 /priv/web/
 
 spool/**
+
+# Single binaries and packages (mix build.release.x86, build.release.aarch64).
+/release/
+/burrito_out/
