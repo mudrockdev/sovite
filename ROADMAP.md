@@ -1,6 +1,15 @@
 # Sovite Roadmap
 
-Sovite is a Mail Transfer Agent (MTA) written in Elixir/OTP, meant as a modern alternative to Postfix.
+Sovite is a mail server written in Elixir/OTP: a whole stack in one application, with three parts that can each be turned on or off:
+
+| Part | Replaces | Version |
+|---|---|---|
+| **MTA**: receiving, queuing, routing, and delivering mail | Postfix | 1.0 |
+| **Filter**: spam, phishing, and malware filtering | Rspamd | 2.0 |
+| **Mailbox**: mail storage, IMAP, POP3, Sieve | Dovecot | 3.0 |
+
+All three are on by default. Each is optional: a part that is off can be replaced by the program it stands in for (Rspamd over milter, Dovecot over LMTP and its auth protocol), so Sovite can run as the whole stack, or as any one or two parts of it next to existing servers.
+
 This document lists the features to build, the standards to implement, and the order to build them in.
 
 ---
@@ -13,13 +22,14 @@ This document lists the features to build, the standards to implement, and the o
 - **OTP-native.** One supervised process per connection / delivery attempt, isolated failures, hot config reload, built-in clustering as a long-term differentiator.
 - **Ecosystem compatible.** Speak the protocols the existing mail ecosystem already uses (milter, Postfix policy delegation, LMTP, `sendmail(1)`) so users can migrate without replacing their filters, spam scanners, and mailbox servers.
 - **Observable.** Every message has a traceable lifecycle; metrics and structured logs come built in.
-- **Simple configuration.** One readable config file with validation and clear error messages, plus a migration helper for Postfix `main.cf` / `master.cf`.
+- **Simple configuration.** One readable config file with validation and clear error messages, plus migration helpers for Postfix, Rspamd, and Dovecot configurations.
+- **Modular whole stack.** The MTA, filter, and mailbox parts live in one application, share one config file, one CLI, one web UI, and one cluster, and are each optional (all on by default). Parts talk to each other through defined internal interfaces, so each can also run on its own nodes.
+- **Isolation between parts.** Each part has its own database (its own connection, credentials, tables, and migrations), so a part that is compromised or misconfigured cannot read another's data: the filter never sees passwords, and the MTA hands mail to the mailbox part but never reads the mail store.
 
 ### Non-goals
 
-- IMAP / POP3 / JMAP server (use Dovecot, Stalwart, etc.; Sovite delivers to them via LMTP).
-- Webmail or a GUI mail client.
-- A built-in content-based spam classifier (integrate Rspamd / SpamAssassin via milter instead).
+- Webmail or a GUI mail client (the web UI is for administration, and for users' own settings from 3.0 on).
+- Calendars and contacts (CalDAV, CardDAV) before 3.0; reconsidered afterwards.
 - Mailing list management (Mailman-style). Only list-related header standards are in scope.
 
 ---
@@ -37,6 +47,29 @@ This document lists the features to build, the standards to implement, and the o
 | Bounce service | DSN generation, delay warnings | `bounce` |
 | Routing data | Domains, aliases, mailboxes, transports, access rules: typed tables in Sovite's database, managed with `sovitectl` | `*_maps`, `postmap` |
 | CLI | Queue inspection, flush, hold, delete, config check | `postqueue`, `postsuper`, `postconf`, `mailq` |
+
+The filter part (2.0):
+
+| Component | Role | Rspamd equivalent |
+|---|---|---|
+| Message analyzer | MIME, HTML, URL, and attachment extraction with hard limits | message parser, `lua_mime` |
+| Rule engine | Symbols, scores, composites, actions; per-tenant and per-user settings | rules, composites, `settings` |
+| Statistics | Bayesian classifier, autolearning | `classifier_bayes` |
+| Fuzzy storage | Fuzzy hashes of known spam, shared by the cluster | `fuzzy_check`, `rspamd_fuzzy` |
+| Reputation | IP, domain, URL, and sender reputation; RBL/URIBL lookups | `reputation`, `rbl`, `surbl` |
+| Scanners | Antivirus (clamd) and attachment policies | `antivirus`, `mime_types` |
+| Filter API | Rspamd-compatible HTTP protocol and milter server, for other MTAs | `rspamd_proxy`, `/checkv2` |
+
+The mailbox part (3.0):
+
+| Component | Role | Dovecot equivalent |
+|---|---|---|
+| Mail store | Crash-safe mailbox storage with indexes, quotas, optional encryption at rest | `mdbox`/`maildir`, indexes, quota |
+| IMAP server | IMAP4rev2 with the extensions clients use | `imap` |
+| POP3 server | POP3 for legacy clients | `pop3` |
+| Sieve | Server-side filters, vacation replies, ManageSieve | Pigeonhole |
+| Replication & proxy | Mailboxes replicated across cluster nodes; users routed to their node | `dsync`, `director`/proxy |
+| Auth | Users and app passwords for SMTP, IMAP, POP3, and the web UI | `auth` |
 
 ---
 
@@ -253,11 +286,140 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 - [ ] Stable config format and queue format with documented upgrade path
 - [ ] Interop test matrix against Postfix, Exim, Microsoft Exchange/365, Gmail, Stalwart, OpenSMTPD
 
+### Phase 15 — Modular Stack (groundwork for 2.0)
+
+- [ ] `[stack]` switches for the three parts, `mta`, `filter`, and `mailbox`, all on by default; a part that is off starts nothing and opens no port
+- [ ] One database per part (`[mta.database]`, `[filter.database]`, `[mailbox.database]`): own repo, credentials, tables, and migrations; least-privilege database users documented for PostgreSQL and MySQL; SQLite files with separate ownership
+- [ ] Internal interfaces between parts (MTA → filter: scan; MTA → mailbox: deliver, quota, user lookup; mailbox → MTA: submit), in-process when parts share a node, over the cluster's mutual TLS when they do not
+- [ ] Fallbacks when a part is off: the MTA uses milters (Rspamd) instead of the filter, and LMTP and the Dovecot auth protocol instead of the mailbox part
+- [ ] Node roles in a cluster: which parts each node runs (for example MTA-only edge nodes, filter nodes, mailbox nodes)
+- [ ] Shared identity: one user directory (database, LDAP, or OAuth) for every part, kept in the mailbox part's database, readable by the others only through the internal interface
+- [ ] `sovitectl` and the web UI show and manage only the parts that are on
+- [ ] Repository layout and boundary checks for the new parts (`lib/core/filter/`, `lib/core/mailbox/`, reusable components below them)
+
+**Done when:** each part can be turned off without the others breaking, the MTA runs with external Rspamd and Dovecot in their place, and no part can read another part's database.
+
+### Phase 16 — Filter Engine Core
+
+- [ ] Message analyzer: MIME tree with nesting, part-count, and size limits; charset decoding; HTML to text with a bounded, safe parser; URL and email extraction (text, HTML, redirects, obfuscation); attachment metadata and file types by content (magic numbers), not by name
+- [ ] Rule engine: symbols with scores and groups, regular expression rules on headers, body, MIME parts, and URLs (with a safe regex engine and time limits), composites, conditions, maps (lists of IPs, domains, addresses, hashes) reloaded without restart
+- [ ] Actions: reject, soft reject (`451`), greylist, add header, rewrite subject, quarantine, no action; thresholds per tenant and per user
+- [ ] Existing checks as symbols: SPF, DKIM, DMARC, ARC, DNSBL/DNSWL/RHSBL, reverse DNS, greylisting, rate limits, sender and recipient rules
+- [ ] Header checks: missing or malformed `Date:`, `Message-ID:`, `From:`; forged `Received:` chains; mismatched display names; suspicious `Reply-To:`
+- [ ] Scanning in the MTA's SMTP session (before `250`) and for outbound mail of authenticated users
+- [ ] `X-Spam-*` and `Authentication-Results`-style result headers; per-symbol explanations in the message trace
+- [ ] Rspamd-compatible HTTP protocol (`/checkv2`, `/symbols`, `/ping`) and a milter server mode, so other MTAs (Postfix, Exim) can use the filter
+- [ ] Default rule set equivalent to Rspamd's common modules
+
+**Done when:** the filter scores a reference corpus close to Rspamd with its default configuration, and Postfix can use it in place of Rspamd.
+
+### Phase 17 — Statistics & Reputation
+
+- [ ] Bayesian classifier (OSB tokenization, as Rspamd and CRM114): global, per-tenant, and per-user statistics; token storage in the filter database with expiry
+- [ ] Learning: `sovitectl filter learn spam|ham`, the web UI, autolearning by score, and from users moving mail to and from Junk (with the mailbox part, Phase 23)
+- [ ] Fuzzy hashes: shingles of text and images, hashes of attachments; fuzzy storage shared by the cluster; compatible import of public fuzzy feeds
+- [ ] Reputation: IP, ASN, domain, URL, DKIM domain, and sender reputation from local history, with decay; shared by the cluster
+- [ ] URIBL/SURBL/DBL lookups (Spamhaus DBL, SURBL, URIBL), with the RFC 5782 conventions and result caching
+- [ ] Phishing checks: link text versus target, look-alike domains (IDN homographs, typosquatting), known phishing feeds (OpenPhish, PhishTank)
+- [ ] Replies and known correspondents: lower scores for replies to mail the user sent (as Rspamd's `replies` module)
+- [ ] Neural scoring (optional): a small model trained on the local corpus, as Rspamd's `neural` module
+
+**Done when:** after training on a corpus, spam detection and false positives are at least on par with Rspamd with the same training data.
+
+### Phase 18 — Content Protection
+
+- [ ] Antivirus: clamd protocol (ClamAV) client, ICAP client, and results as symbols and actions
+- [ ] Attachment policies: blocked and allowed types by content, archives inspected (zip, rar, 7z, tar, gzip) with depth and size limits, encrypted archives flagged, Office macros and PDF JavaScript detected
+- [ ] Outbound protection: scanning of authenticated users' mail, combined with the MTA's suspension of compromised accounts
+- [ ] Quarantine: messages held by the filter, released or deleted from the web UI and `sovitectl`, with notifications to recipients (optional)
+- [ ] Feedback loops: Abuse Reporting Format (ARF, RFC 5965) reports received and sent, mailbox provider FBL processing
+
+**Done when:** malware test files (EICAR and real samples in a sandbox) are caught in every supported container, and quarantined mail can be reviewed and released.
+
+### Phase 19 — Filter Operations & Hardening for 2.0
+
+- [ ] Web UI: scan history with symbols, learning, maps and rules editor, thresholds per tenant, quarantine, statistics
+- [ ] `sovitectl filter scan|learn|stats|maps`
+- [ ] Metrics and traces for every scan: duration per check, symbol hits, actions
+- [ ] Rspamd configuration migration (`sovitectl migrate rspamd`): actions, scores, maps, settings, and statistics import (Bayes tokens, fuzzy hashes where possible)
+- [ ] Corpus testing tools: replay a mailbox through the filter and compare with Rspamd
+- [ ] Fuzzing of the MIME, HTML, URL, and archive parsers; external security audit of the filter
+- [ ] Benchmarks against Rspamd: messages per second, latency, memory
+
+**Done when:** an Rspamd installation can be migrated, and the filter has been audited, fuzzed, and benchmarked.
+
+### Phase 20 — Mail Store (groundwork for 3.0)
+
+- [ ] Storage engine: one file per message (Maildir-compatible layout) plus indexes and caches per mailbox, `fsync` discipline as strict as the queue's, crash recovery
+- [ ] Mailbox metadata in the mailbox database: mailboxes, UIDs, `UIDVALIDITY`, flags, keywords, `MODSEQ`, sizes
+- [ ] Quotas per user, per domain, and per tenant (storage and message count), checked by the MTA at `RCPT` time
+- [ ] Delivery from the MTA part in-process (no LMTP hop), with the LMTP server kept for other MTAs
+- [ ] Optional encryption at rest per user (keys derived from the user's password, as Dovecot's `mail_crypt`)
+- [ ] Deduplication of identical attachments (single-instance storage), optional
+- [ ] Import from Maildir, mbox, and Dovecot mdbox; export to Maildir
+- [ ] Expunge, retention, and trash policies; per-user backups
+
+**Done when:** mail delivered by the MTA is stored durably, survives crashes and `kill -9` at any point, and can be imported from and exported to Dovecot.
+
+### Phase 21 — IMAP Server
+
+- [ ] IMAP4rev2 (RFC 9051) and IMAP4rev1 (RFC 3501) for older clients, with strict, bounded parsing of commands and literals
+- [ ] TLS: STARTTLS and implicit TLS on port 993 (RFC 8314), with the MTA's certificate store and ACME
+- [ ] Authentication with the shared SASL mechanisms, app passwords, and OAUTHBEARER; failed-login bans shared with SMTP
+- [ ] Core extensions: IDLE, NAMESPACE, UIDPLUS, LITERAL+/LITERAL-, MOVE, SPECIAL-USE, ENABLE, ID, UNSELECT, CHILDREN, LIST-EXTENDED, LIST-STATUS, ESEARCH, SEARCHRES, SORT, THREAD, BINARY, APPENDLIMIT, COMPRESS=DEFLATE, UTF8=ACCEPT
+- [ ] Mailbox hierarchy, subscriptions, and special-use mailboxes (Sent, Drafts, Junk, Trash, Archive) created automatically
+- [ ] Interoperability with Thunderbird, Apple Mail (macOS and iOS), Outlook, Gmail's mobile app, K-9/Thunderbird for Android, mutt, and aerc
+
+**Done when:** the client matrix can read, search, move, and send mail through Sovite alone, and an IMAP compliance test suite (such as imaptest) passes.
+
+### Phase 22 — IMAP Synchronization & Search
+
+- [ ] CONDSTORE and QRESYNC (RFC 7162) for fast resynchronization
+- [ ] NOTIFY (RFC 5465), OBJECTID (RFC 8474), SAVEDATE (RFC 8514), STATUS=SIZE (RFC 8438), PREVIEW (RFC 8970)
+- [ ] Full-text search with a built-in index (headers, bodies, and text from attachments), SEARCH=FUZZY (RFC 6203)
+- [ ] METADATA (RFC 5464) and ACL (RFC 4314) for shared mailboxes and shared folders between users of a tenant
+- [ ] QUOTA (RFC 9208)
+- [ ] Performance: large mailboxes (a million messages), many concurrent clients, index caching
+
+**Done when:** clients resynchronize large mailboxes in under a second after reconnecting, and search is fast enough for mailboxes of years of mail.
+
+### Phase 23 — Sieve & Filtering for Users
+
+- [ ] Sieve (RFC 5228) with extensions: fileinto, envelope, reject and ereject (RFC 5429), vacation (RFC 5230) and vacation-seconds (RFC 6131), relational (RFC 5231), subaddress (RFC 5233), body (RFC 5173), variables (RFC 5229), imap4flags (RFC 5232), date (RFC 5260), editheader (RFC 5293), mailbox (RFC 5490), duplicate (RFC 7352), include (RFC 6609), spamtest and virustest (RFC 5235) fed by the filter part
+- [ ] ManageSieve (RFC 5804)
+- [ ] IMAP Sieve (RFC 6785): moving mail to and from Junk teaches the filter part
+- [ ] Global, per-tenant, and per-user scripts, with execution limits
+- [ ] Vacation replies with the MTA's loop protection (RFC 3834)
+
+**Done when:** users manage their filters from Thunderbird or Roundcube, and Junk folder moves train the classifier.
+
+### Phase 24 — POP3 & Client Setup
+
+- [ ] POP3 (RFC 1939) with CAPA (RFC 2449), STLS, SASL (RFC 5034), UIDL, and implicit TLS on port 995
+- [ ] Automatic client setup: Thunderbird autoconfig, Outlook Autodiscover, Apple configuration profiles, DNS SRV records (RFC 6186, RFC 8314), served by the web server and printed by `sovitectl dns records`
+- [ ] User self-service in the web UI: password, app passwords, two-factor authentication for the web, Sieve rules and vacation replies, quota usage, quarantine
+- [ ] Submission referencing IMAP (BURL, RFC 4468), optional
+
+**Done when:** a user can set up a client by entering only their address and password, and manage their own account in the web UI.
+
+### Phase 25 — Mailbox Clustering & Hardening for 3.0
+
+- [ ] Mailbox replication between cluster nodes (as Dovecot's `dsync` replication), with conflict resolution by UID and `MODSEQ`
+- [ ] User placement: each user's mailbox has a home node; IMAP, POP3, and LMTP connections to any node are proxied to it (as Dovecot's director)
+- [ ] Moving users between nodes without downtime; rebalancing
+- [ ] Backups and point-in-time restore of mailboxes
+- [ ] Dovecot migration (`sovitectl migrate dovecot`): configuration, users, passwords, Sieve scripts, and mailboxes (through IMAP or directly from Maildir/mdbox)
+- [ ] Fuzzing of the IMAP, POP3, ManageSieve, and Sieve parsers; external security audit of the mailbox part
+- [ ] Benchmarks against Dovecot: concurrent connections, memory per connection, search and synchronization times
+- [ ] JMAP (RFC 8620, RFC 8621): evaluated for a later release
+
+**Done when:** a Dovecot installation can be migrated without data loss, a mailbox node can fail without users losing access, and the mailbox part has been audited, fuzzed, and benchmarked.
+
 ---
 
 ## 4. Standards Compliance Matrix
 
-**Level:** MUST = required for 1.0, SHOULD = planned for 1.0, MAY = optional / later.
+**Level:** MUST = required for the release its phase belongs to (1.0 for Phases 1–14, 1.x for Phase 15, 2.0 for Phases 16–19, 3.0 for Phases 20–25), SHOULD = planned for that release, MAY = optional / later.
 
 ### Core SMTP & Message Format
 
@@ -370,6 +532,65 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 | XCLIENT / XFORWARD | Proxy and content filter attribute passing | MAY | 9 |
 | ACME (RFC 8555) | Automatic certificates | MAY | 3 |
 
+### Filtering (2.0)
+
+| Standard / Spec | Title | Level | Phase |
+|---|---|---|---|
+| RFC 2045–2049 | MIME (analysis of every part) | MUST | 16 |
+| RFC 2231 | MIME parameter encoding | MUST | 16 |
+| RFC 3986 | URI syntax (URL extraction) | MUST | 16 |
+| Rspamd HTTP protocol | `/checkv2` scanning API, for other MTAs | SHOULD | 16 |
+| Sendmail Milter protocol v6 (server side) | Filter for Postfix and other MTAs | SHOULD | 16 |
+| RFC 5782 | DNS lists for URLs (URIBL/SURBL/DBL) | MUST | 17 |
+| clamd protocol | Antivirus scanning (ClamAV) | SHOULD | 18 |
+| RFC 3507 | ICAP | MAY | 18 |
+| RFC 5965 / RFC 6650 | Abuse Reporting Format and its use | SHOULD | 18 |
+
+### Mailbox Access (3.0)
+
+| Standard | Title | Level | Phase |
+|---|---|---|---|
+| RFC 9051 | IMAP4rev2 | MUST | 21 |
+| RFC 3501 | IMAP4rev1 (older clients) | MUST | 21 |
+| RFC 8314 | Implicit TLS for mail access | MUST | 21 |
+| RFC 2177 | IDLE | MUST | 21 |
+| RFC 2342 | NAMESPACE | MUST | 21 |
+| RFC 4315 | UIDPLUS | MUST | 21 |
+| RFC 7888 | LITERAL+ / LITERAL- | MUST | 21 |
+| RFC 6851 | MOVE | MUST | 21 |
+| RFC 6154 | SPECIAL-USE | MUST | 21 |
+| RFC 5161 | ENABLE | MUST | 21 |
+| RFC 2971 | ID | SHOULD | 21 |
+| RFC 3691 | UNSELECT | SHOULD | 21 |
+| RFC 5258 / RFC 5819 | LIST-EXTENDED / LIST-STATUS | SHOULD | 21 |
+| RFC 4731 / RFC 5182 | ESEARCH / SEARCHRES | SHOULD | 21 |
+| RFC 5256 | SORT and THREAD | SHOULD | 21 |
+| RFC 3516 | BINARY | SHOULD | 21 |
+| RFC 7889 | APPENDLIMIT | SHOULD | 21 |
+| RFC 4978 | COMPRESS=DEFLATE | SHOULD | 21 |
+| RFC 6855 | UTF8=ACCEPT | SHOULD | 21 |
+| RFC 7162 | CONDSTORE and QRESYNC | MUST | 22 |
+| RFC 5465 | NOTIFY | SHOULD | 22 |
+| RFC 8474 | OBJECTID | SHOULD | 22 |
+| RFC 8514 / RFC 8438 / RFC 8970 | SAVEDATE / STATUS=SIZE / PREVIEW | MAY | 22 |
+| RFC 6203 | SEARCH=FUZZY | SHOULD | 22 |
+| RFC 5464 | METADATA | SHOULD | 22 |
+| RFC 4314 | ACL | SHOULD | 22 |
+| RFC 9208 | QUOTA | MUST | 22 |
+| RFC 5228 | Sieve | MUST | 23 |
+| RFC 5230 / RFC 6131 | Vacation / vacation-seconds | MUST | 23 |
+| RFC 5229 / RFC 5231 / RFC 5232 / RFC 5233 | Variables, relational, imap4flags, subaddress | SHOULD | 23 |
+| RFC 5173 / RFC 5260 / RFC 5293 / RFC 5429 | Body, date, editheader, reject | SHOULD | 23 |
+| RFC 5490 / RFC 7352 / RFC 6609 / RFC 5235 | Mailbox, duplicate, include, spamtest | SHOULD | 23 |
+| RFC 5804 | ManageSieve | MUST | 23 |
+| RFC 6785 | IMAP Sieve | SHOULD | 23 |
+| RFC 1939 | POP3 | MUST | 24 |
+| RFC 2449 | POP3 extensions (CAPA) | MUST | 24 |
+| RFC 5034 | POP3 SASL | MUST | 24 |
+| RFC 6186 | SRV records for mail clients | SHOULD | 24 |
+| RFC 4468 | BURL | MAY | 24 |
+| RFC 8620 / RFC 8621 | JMAP / JMAP for Mail | MAY | 25 |
+
 ---
 
 ## 5. Security Requirements (cross-cutting)
@@ -391,10 +612,11 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 - **Unit + property tests** for every parser (SMTP commands, addresses, headers, MIME, DNS records, SPF/DMARC records).
 - **Conformance tests** derived from RFC examples and test suites (e.g. the SPF test suite (pyspf YAML), DKIM test vectors).
-- **Interop tests** in CI using containers: Postfix, Exim, OpenSMTPD, Dovecot, Rspamd.
+- **Interop tests** in CI using containers: Postfix, Exim, OpenSMTPD, Dovecot, Rspamd; for the filter, the same corpus through Rspamd and Sovite; for the mailbox part, imaptest and the client matrix.
 - **Chaos tests**: kill nodes and processes during delivery; corrupt queue files; DNS timeouts and SERVFAIL.
 - **Load tests**: sustained throughput, connection storms, large messages, many recipients.
-- **Fuzzing** of all network-facing parsers.
+- **Fuzzing** of all network-facing parsers, and of every parser of message content (MIME, HTML, archives, Sieve scripts).
+- **Part isolation tests**: each combination of parts on and off; database users that cannot reach other parts' tables.
 
 ---
 
@@ -408,4 +630,7 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 | **0.4 — "It replaces Postfix"** | 8, 9 | Anti-abuse, milter, policy servers, migration tool |
 | **0.5 — "It's complete"** | 10, 11, 12 | SMTPUTF8, full ESMTP, operations tooling |
 | **0.6 — "It scales"** | 13 | Clustering, multi-tenant |
-| **1.0 — "Production ready"** | 14 | Audited, benchmarked, documented, stable formats |
+| **1.0 — "Production ready"** | 14 | Audited, benchmarked, documented, stable formats: a Postfix replacement |
+| **1.x — "It's modular"** | 15 | Parts that turn on and off, a database per part, node roles |
+| **2.0 — "It replaces Rspamd"** | 16, 17, 18, 19 | Built-in spam, phishing, and malware filtering, usable by other MTAs too |
+| **3.0 — "It replaces Dovecot"** | 20, 21, 22, 23, 24, 25 | Mail storage, IMAP, POP3, Sieve, replication: the whole stack |
