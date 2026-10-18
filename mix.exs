@@ -41,14 +41,17 @@ defmodule Sovite.MixProject do
     [
       licenses: ["AGPL-3.0"],
       links: %{"GitHub" => "https://github.com/mudrockdev/sovite"},
-      files: ~w(lib mix.exs README.md LICENSE*)
+      files: ~w(lib mix.exs README.md LICENSE*),
+      # The web UI's sources, packages, and build: releases ship the
+      # build as priv/web; the library does not need them.
+      exclude_patterns: [~r"^lib/core/sovite_web"]
     ]
   end
 
   defp deps do
     [
-      # Partisan asks for ~> 1.1.0; 1.4 has the same API.
-      {:telemetry, "~> 1.4", override: true},
+      # Partisan pins ~> 1.1.0, and Hex packages cannot override it.
+      {:telemetry, "~> 1.1"},
       {:plug_cowboy, "~> 2.7"},
       # Started only with [cluster] enabled (Sovite.Cluster.start/1): on
       # its own it would accept unauthenticated peers.

@@ -35,7 +35,7 @@
   "quickrand": {:hex, :quickrand, "2.0.7", "d2bd76676a446e6a058d678444b7fda1387b813710d1af6d6e29bb92186c8820", [:rebar3], [], "hexpm", "b8acbf89a224bc217c3070ca8bebc6eb236dbe7f9767993b274084ea044d35f0"},
   "ranch": {:hex, :ranch, "2.3.0", "7de7b041a9a6a5091a3aa5898d66c0564be671d87db4f9d63b1b5ee775b097df", [:make, :rebar3], [], "hexpm", "6168ec49409d982f7cfbd83dd083144f6cbe67caa4036551d2f0a3ad67c9d023"},
   "stream_data": {:hex, :stream_data, "1.4.0", "026f929db613aabea6208012ae9b8970d3fd5f88b3bdf26831bc536f98c42036", [:mix], [], "hexpm", "2b0ee3a340dcce1c8cf6302a763ee757d1e01c54d6e16d9069062509d68b1dc9"},
-  "telemetry": {:hex, :telemetry, "1.4.2", "a0cb522801dffb1c49fe6e30561badffc7b6d0e180db1300df759faa22062855", [:rebar3], [], "hexpm", "928f6495066506077862c0d1646609eed891a4326bee3126ba54b60af61febb1"},
+  "telemetry": {:hex, :telemetry, "1.1.0", "a589817034a27eab11144ad24d5c0f9fab1f58173274b1e9bae7074af9cbee51", [:rebar3], [], "hexpm", "b727b2a1f75614774cff2d7565b64d0dfa5bd52ba517f16543e6fc7efcc0df48"},
   "toml": {:hex, :toml, "0.7.0", "fbcd773caa937d0c7a02c301a1feea25612720ac3fa1ccb8bfd9d30d822911de", [:mix], [], "hexpm", "0690246a2478c1defd100b0c9b89b4ea280a22be9a7b313a8a058a2408a2fa70"},
   "types": {:hex, :types, "0.1.8", "5782b67231e8c174fe2835395e71e669fe0121076779d2a09f1c0d58ee0e2f13", [:rebar3], [], "hexpm", "04285239f4954c5ede56f78ed7778ede24e3f2e997f7b16402a167af0cc2658a"},
   "uuid": {:hex, :uuid_erl, "2.0.7", "b2078d2cc814f53afa52d36c91e08962c7e7373585c623f4c0ea6dfb04b2af94", [:rebar3], [{:quickrand, ">= 2.0.7", [hex: :quickrand, repo: "hexpm", optional: false]}], "hexpm", "4e4c5ca3461dc47c5e157ed42aa3981a053b7a186792af972a27b14a9489324e"},
