@@ -44,9 +44,16 @@ defmodule Sovite.Core.Metrics do
   | `sovite_vm_memory_bytes` | gauge | `kind` |
   | `sovite_vm_processes` | gauge | |
   | `sovite_vm_run_queue` | gauge | |
+  | `sovite_cluster_nodes_down_total` | counter | |
+  | `sovite_cluster_messages_taken_over_total` | counter | |
+  | `sovite_cluster_nodes` | gauge | `state` (`known`, `connected`) |
+  | `sovite_tenant_limited_total` | counter | `tenant`, `limit` |
+  | `sovite_ip_pool_exhausted_total` | counter | `pool` |
+  | `sovite_ip_pool_sent_today` | gauge | `pool`, `address` |
+  | `sovite_ip_pool_limit_today` | gauge | `pool`, `address` |
   """
 
-  alias Sovite.Core.{Control, QueueInfo, QueueManager}
+  alias Sovite.Core.{Cluster, Control, IPPools, QueueInfo, QueueManager}
   alias Sovite.Metrics
 
   @version Mix.Project.config()[:version]
@@ -69,7 +76,31 @@ defmodule Sovite.Core.Metrics do
 
   @doc false
   def metrics do
-    smtp_metrics() ++ queue_metrics() ++ abuse_metrics()
+    smtp_metrics() ++ queue_metrics() ++ abuse_metrics() ++ cluster_metrics()
+  end
+
+  defp cluster_metrics do
+    [
+      Metrics.counter("sovite_cluster_nodes_down_total",
+        event: [:sovite, :cluster, :node, :down],
+        help: "Connections to other cluster nodes lost."
+      ),
+      Metrics.sum("sovite_cluster_messages_taken_over_total",
+        event: [:sovite, :cluster, :queue, :taken_over],
+        measurement: :messages,
+        help: "Messages of cluster nodes that stayed down, queued here from their copies."
+      ),
+      Metrics.counter("sovite_tenant_limited_total",
+        event: [:sovite, :tenant, :limited],
+        tags: [:tenant, :limit],
+        help: "Messages and recipients refused by tenant limits."
+      ),
+      Metrics.counter("sovite_ip_pool_exhausted_total",
+        event: [:sovite, :ip_pool, :exhausted],
+        tags: [:pool],
+        help: "Deliveries deferred because an IP pool reached its daily limit."
+      )
+    ]
   end
 
   defp smtp_metrics do
@@ -223,8 +254,55 @@ defmodule Sovite.Core.Metrics do
     [
       fn -> queue_gauges(runtime) end,
       fn -> connection_gauges(runtime) end,
-      fn -> vm_gauges(runtime) end
+      fn -> vm_gauges(runtime) end,
+      fn -> cluster_gauges() end
     ]
+  end
+
+  # With a cluster, its nodes; with IP pools, what each address sent.
+  defp cluster_gauges do
+    nodes =
+      if Process.whereis(Cluster) != nil and Sovite.Cluster.started?() do
+        [
+          gauge("sovite_cluster_nodes", "Cluster nodes, this one included.", [
+            {%{"state" => "known"}, length(Sovite.Cluster.members())},
+            {%{"state" => "connected"}, length(Sovite.Cluster.connected()) + 1}
+          ])
+        ]
+      else
+        []
+      end
+
+    pools =
+      if Process.whereis(IPPools) != nil do
+        status = IPPools.status(IPPools)
+
+        [
+          gauge(
+            "sovite_ip_pool_sent_today",
+            "Messages sent today (UTC) from each IP pool address.",
+            for(
+              pool <- status,
+              address <- pool.addresses,
+              do: {%{"pool" => pool.name, "address" => address.address}, address.sent_today}
+            )
+          ),
+          gauge(
+            "sovite_ip_pool_limit_today",
+            "Today's limit of each IP pool address that has one.",
+            for(
+              pool <- status,
+              address <- pool.addresses,
+              address.limit_today != nil,
+              do: {%{"pool" => pool.name, "address" => address.address}, address.limit_today}
+            )
+          )
+        ]
+      else
+        []
+      end
+
+    nodes ++ pools
   end
 
   defp queue_gauges(runtime) do

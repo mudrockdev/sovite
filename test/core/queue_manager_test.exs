@@ -718,6 +718,59 @@ defmodule Sovite.Core.QueueManagerTest do
       refute_received {:fake_mta, ^mta, :connected}
     end
 
+    test "keeps an idle connection open for a while, for the next message", context do
+      context = start_mta(context)
+
+      context =
+        start_manager(context,
+          toml: ~s([delivery]\nmax_deliveries = 2\nconnection_cache_time = "1s")
+        )
+
+      mta = context.mta
+      first = enqueue(context, "alice@sender.example", ["bob@example.net"])
+      assert_removed(first, :delivered)
+      Process.sleep(200)
+      second = enqueue(context, "alice@sender.example", ["carol@example.net"])
+      assert_removed(second, :delivered)
+      assert_received {:fake_mta, ^mta, :connected}
+      refute_received {:fake_mta, ^mta, :connected}
+
+      # A worker idle for one destination makes room for another.
+      third = enqueue(context, "alice@sender.example", ["dave@other.example"])
+      fourth = enqueue(context, "alice@sender.example", ["erin@admin.example"])
+      assert_removed(third, :delivered)
+      assert_removed(fourth, :delivered)
+
+      # Closed once idle for long enough.
+      Process.sleep(1_200)
+      assert QueueManager.stats(context.manager).deliveries == 0
+      fifth = enqueue(context, "alice@sender.example", ["bob@example.net"])
+      assert_removed(fifth, :delivered)
+      assert_receive {:fake_mta, ^mta, :connected}
+    end
+
+    test "without the connection cache, idle connections close", context do
+      context = start_mta(context)
+      context = start_manager(context, toml: "[delivery]\nconnection_cache = false")
+      mta = context.mta
+
+      for rcpt <- ["bob@example.net", "carol@example.net"] do
+        id = enqueue(context, "alice@sender.example", [rcpt])
+        assert_removed(id, :delivered)
+        assert_received {:fake_mta, ^mta, :connected}
+        Process.sleep(100)
+      end
+    end
+
+    test "draining closes idle connections", context do
+      context = start_mta(context) |> start_manager()
+      id = enqueue(context, "alice@sender.example", ["bob@example.net"])
+      assert_removed(id, :delivered)
+      assert QueueManager.stats(context.manager).deliveries == 1
+      assert QueueManager.drain(context.manager, 1_000) == :ok
+      assert QueueManager.stats(context.manager).deliveries == 0
+    end
+
     test "waits destination_rate_delay between deliveries to a destination", context do
       context = start_mta(context)
       ids = for _ <- 1..2, do: spool(context, "alice@sender.example", ["bob@example.net"])

@@ -7,6 +7,7 @@ defmodule Sovite.MixProject do
       version: "0.2.0",
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
+      compilers: [:partisan_otp | Mix.compilers()],
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
@@ -46,8 +47,12 @@ defmodule Sovite.MixProject do
 
   defp deps do
     [
-      {:telemetry, "~> 1.4"},
+      # Partisan asks for ~> 1.1.0; 1.4 has the same API.
+      {:telemetry, "~> 1.4", override: true},
       {:plug_cowboy, "~> 2.7"},
+      # Started only with [cluster] enabled (Sovite.Cluster.start/1): on
+      # its own it would accept unauthenticated peers.
+      {:partisan, "~> 6.3", runtime: false},
       {:toml, "~> 0.7.0"},
       {:ecto_sql, "~> 3.14"},
       {:ecto_sqlite3, "~> 0.25.0"},
@@ -78,7 +83,7 @@ defmodule Sovite.MixProject do
     [
       sovite: [
         include_executables_for: [:unix],
-        applications: [sovite: :permanent],
+        applications: [sovite: :permanent, partisan: :load],
         # Also _build/prod/sovite-VERSION.tar.gz, for scripts/package.sh.
         steps: [:assemble, :tar]
       ]
@@ -89,7 +94,7 @@ defmodule Sovite.MixProject do
     [
       plt_local_path: "priv/plts",
       plt_core_path: "priv/plts",
-      plt_add_apps: [:mix, :ex_unit, :iex]
+      plt_add_apps: [:mix, :ex_unit, :iex, :partisan]
     ]
   end
 
@@ -138,5 +143,28 @@ defmodule Sovite.MixProject do
         Core: [~r/^Sovite\.Core/, Sovite]
       ]
     ]
+  end
+end
+
+defmodule Mix.Tasks.Compile.PartisanOtp do
+  @moduledoc false
+  # Partisan makes its OTP behaviours (partisan_gen_server and the like)
+  # from OTP's own modules in a rebar3 hook, which Mix's rebar3 build of
+  # dependencies skips. This makes them, once, into Partisan's ebin.
+
+  use Mix.Task.Compiler
+
+  @impl Mix.Task.Compiler
+  def run(_args) do
+    ebin = Path.join(Mix.Project.build_path(), "lib/partisan/ebin")
+
+    if File.exists?(Path.join(ebin, "partisan_gen_server.beam")) do
+      {:noop, []}
+    else
+      case :partisan_gen_transform.generate_all(String.to_charlist(ebin)) do
+        :ok -> {:ok, []}
+        {:error, errors} -> Mix.raise("cannot make Partisan's OTP modules: #{inspect(errors)}")
+      end
+    end
   end
 end

@@ -2,6 +2,8 @@
 
 import { session } from './session.svelte.ts';
 import type {
+	ClusterStatus,
+	IPPool,
 	MessageAction,
 	MessageDetails,
 	QueueMessage,
@@ -24,23 +26,32 @@ export class ApiError extends Error {
 	}
 }
 
-async function request<T>(method: 'GET' | 'POST', path: string, token = session.token): Promise<T> {
+async function request<T>(
+	method: 'GET' | 'POST',
+	path: string,
+	token = session.token,
+	body?: Record<string, unknown>
+): Promise<T> {
+	const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
+	if (body) headers['content-type'] = 'application/json';
+
 	const response = await fetch(`/api${path}`, {
 		method,
-		headers: token ? { authorization: `Bearer ${token}` } : {},
+		headers,
+		body: body && JSON.stringify(body),
 		credentials: 'omit',
 		cache: 'no-store'
 	});
 
-	const body = await response.json().catch(() => ({}));
+	const reply = await response.json().catch(() => ({}));
 
 	if (!response.ok) {
 		// The token was revoked or replaced: sign in again.
 		if (response.status === 401 && token === session.token) session.signOut();
-		throw new ApiError(response.status, body.error ?? response.statusText, body);
+		throw new ApiError(response.status, reply.error ?? response.statusText, reply);
 	}
 
-	return body as T;
+	return reply as T;
 }
 
 const id = (value: string) => encodeURIComponent(value);
@@ -66,7 +77,12 @@ export const api = {
 			`/route?${new URLSearchParams(sender ? { address, sender } : { address })}`
 		),
 	trace: (traceId: string) =>
-		request<Trace>('GET', `/trace?${new URLSearchParams({ id: traceId })}`)
+		request<Trace>('GET', `/trace?${new URLSearchParams({ id: traceId })}`),
+	cluster: () => request<ClusterStatus>('GET', '/cluster'),
+	pushConfig: (content: string) =>
+		request<{ ok: true; version: number }>('POST', '/cluster/config', session.token, { content }),
+	join: (peer: string) => request<{ ok: true }>('POST', '/cluster/join', session.token, { peer }),
+	ipPools: () => request<{ pools: IPPool[] }>('GET', '/ip_pools').then((body) => body.pools)
 };
 
 export function isUnreadable(

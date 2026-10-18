@@ -41,6 +41,10 @@ defmodule Sovite.Queue.Envelope do
   2852): the deadline, and whether to return the message (`:return`) or
   notify the sender (`:notify`) when it passes. `rrvs` has the `RRVS`
   of recipients (RFC 7293), for the next hop to check.
+
+  `tenant` names the customer the message belongs to, on servers that
+  host several. `forwarded_from` is set on a message another node of a
+  cluster handed over for delivery: the name of that node.
   """
 
   alias Sovite.SMTP.{DSNParams, Params}
@@ -64,6 +68,8 @@ defmodule Sovite.Queue.Envelope do
     :envid,
     :hold,
     :deliver_by,
+    :tenant,
+    :forwarded_from,
     requiretls: false,
     smtputf8: false,
     dsn: %{},
@@ -101,7 +107,9 @@ defmodule Sovite.Queue.Envelope do
           priority: -9..9,
           hold: Params.hold() | nil,
           deliver_by: deliver_by() | nil,
-          rrvs: %{String.t() => Params.rrvs()}
+          rrvs: %{String.t() => Params.rrvs()},
+          tenant: String.t() | nil,
+          forwarded_from: String.t() | nil
         }
 
   @doc "When the message may be delivered: its `hold`'s release time, or `nil` without one."
@@ -138,7 +146,9 @@ defmodule Sovite.Queue.Envelope do
       "hold" => envelope.hold && Params.format_hold(envelope.hold),
       "deliver_by" => envelope.deliver_by && deliver_by_to_map(envelope.deliver_by),
       "rrvs" =>
-        Map.new(envelope.rrvs, fn {address, rrvs} -> {address, Params.encode_rrvs(rrvs)} end)
+        Map.new(envelope.rrvs, fn {address, rrvs} -> {address, Params.encode_rrvs(rrvs)} end),
+      "tenant" => envelope.tenant,
+      "forwarded_from" => envelope.forwarded_from
     }
   end
 
@@ -168,6 +178,8 @@ defmodule Sovite.Queue.Envelope do
          true <- is_nil(map["auth_user"]) or is_binary(map["auth_user"]),
          true <- is_nil(map["content_filter"]) or is_binary(map["content_filter"]),
          true <- is_nil(map["envid"]) or is_binary(map["envid"]),
+         true <- is_nil(map["tenant"]) or is_binary(map["tenant"]),
+         true <- is_nil(map["forwarded_from"]) or is_binary(map["forwarded_from"]),
          {:ok, ret} <- optional(map["ret"], &parse_ret/1),
          {:ok, dsn} <- parse_dsn(Map.get(map, "dsn", %{})),
          expanded = Map.get(map, "expanded", []),
@@ -205,7 +217,9 @@ defmodule Sovite.Queue.Envelope do
          priority: priority,
          hold: hold,
          deliver_by: deliver_by,
-         rrvs: rrvs
+         rrvs: rrvs,
+         tenant: map["tenant"],
+         forwarded_from: map["forwarded_from"]
        }}
     else
       _ -> {:error, :invalid_envelope}

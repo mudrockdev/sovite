@@ -78,14 +78,20 @@ defmodule Sovite.Core.QueueManager do
       destination.
 
   A worker that finishes a job may get the next job for the same
-  destination and send it over the same connection.
+  destination and send it over the same connection. With
+  `delivery.connection_cache`, a worker with no next job keeps its
+  connection open for `delivery.connection_cache_time` (2 seconds), in
+  case one comes, as Postfix's connection cache does; it still counts
+  towards the limits meanwhile, but makes room when another destination
+  is waiting for a free slot.
   """
 
   use GenServer
 
   require Logger
 
-  alias Sovite.Core.{Bounce, Config, Delivery, Outbound, Recipients, Router, Routing}
+  alias Sovite.Core.{Bounce, Config, Delivery, IPPools, Outbound, Recipients, Router, Routing}
+  alias Sovite.Core.Cluster.Placement
   alias Sovite.Queue.{Backoff, Entry, Envelope, ID, Spool}
   alias Sovite.SMTP.Client
 
@@ -106,6 +112,7 @@ defmodule Sovite.Core.QueueManager do
     ready: %{},
     running: %{},
     workers: %{},
+    idle: %{},
     destination_running: %{},
     destination_last: %{},
     backlog: false,
@@ -149,7 +156,11 @@ defmodule Sovite.Core.QueueManager do
       bounce_size_limit: config.bounce.size_limit,
       maildir: config.maildir,
       pipes: config.pipe,
-      delimiter: config.routing.extension_delimiter
+      delimiter: config.routing.extension_delimiter,
+      ip_pools: if(config.ip_pool != [], do: IPPools),
+      cluster: Placement.placement_opts(config),
+      tenant_pools:
+        for(%{ip_pool: pool} = t <- config.tenant, pool != nil, into: %{}, do: {t.name, pool})
     ] ++ Map.to_list(config.delivery)
   end
 
@@ -270,6 +281,8 @@ defmodule Sovite.Core.QueueManager do
       |> Map.new()
       |> Map.put_new(:scan_interval, 60_000)
       |> Map.put_new(:max_active, 10_000)
+      |> Map.put_new(:connection_cache, false)
+      |> Map.put_new(:connection_cache_time, 2_000)
       |> Map.put_new_lazy(:routing, fn ->
         %Routing{
           hostname: hostname,
@@ -296,6 +309,7 @@ defmodule Sovite.Core.QueueManager do
       delimiter: Map.get(opts, :delimiter, ""),
       mta_sts: Map.get(opts, :mta_sts),
       tls_reports: Map.get(opts, :tls_reports),
+      ip_pools: Map.get(opts, :ip_pools),
       # The spool's private tmp/, emptied by Spool.init/1.
       tmp_dir: Path.join(opts.directory, "tmp")
     }
@@ -345,6 +359,10 @@ defmodule Sovite.Core.QueueManager do
         state = put_in(state.running[ref].job, job)
         state = put_in(state.destination_last[worker.destination], now)
         {:reply, {:next, job}, state}
+
+      _ when reusable and not state.draining and state.opts.connection_cache ->
+        state = put_in(state.running[ref].job, nil)
+        {:reply, :wait, idle(state, ref, worker.destination)}
 
       _ ->
         {:reply, :stop, put_in(state.running[ref].job, nil)}
@@ -485,7 +503,7 @@ defmodule Sovite.Core.QueueManager do
   end
 
   def handle_call(:drain, from, state) do
-    state = %{state | draining: true}
+    state = stop_idle(%{state | draining: true})
 
     if map_size(state.running) == 0,
       do: {:reply, :ok, state},
@@ -504,6 +522,9 @@ defmodule Sovite.Core.QueueManager do
   end
 
   def handle_info(:dispatch, state), do: {:noreply, dispatch(%{state | rate_timer: nil})}
+
+  # A worker kept its connection open long enough.
+  def handle_info({:idle_expired, ref}, state), do: {:noreply, stop_idle(state, ref)}
 
   # A worker returned normally.
   def handle_info({ref, _result}, state) when is_map_key(state.running, ref) do
@@ -549,14 +570,23 @@ defmodule Sovite.Core.QueueManager do
   def work(manager, job, opts, connection \\ nil) do
     {results, connection} = Delivery.run(job, connection, opts)
 
-    case GenServer.call(manager, {:job_done, results, connection != nil}, :infinity) do
-      {:next, job} ->
-        work(manager, job, opts, connection)
+    manager
+    |> GenServer.call({:job_done, results, connection != nil}, :infinity)
+    |> next(manager, opts, connection)
+  end
 
-      :stop ->
-        if connection, do: connection |> elem(0) |> Client.quit()
-        :ok
+  defp next({:next, job}, manager, opts, connection), do: work(manager, job, opts, connection)
+
+  # Idle, with the connection open: the manager says what comes next.
+  defp next(:wait, manager, opts, connection) do
+    receive do
+      {__MODULE__, reply} -> next(reply, manager, opts, connection)
     end
+  end
+
+  defp next(:stop, _manager, _opts, connection) do
+    if connection, do: connection |> elem(0) |> Client.quit()
+    :ok
   end
 
   ## Administration
@@ -846,10 +876,12 @@ defmodule Sovite.Core.QueueManager do
         filter -> fn _rcpt -> Router.filter(filter) end
       end
 
+    pool = pool(state, envelope)
+
     {remote, immediate} =
       message.entry
       |> Entry.pending()
-      |> Enum.map(&{&1, route.(&1)})
+      |> Enum.map(&{&1, &1 |> route.() |> with_pool(pool, state) |> placed(state, envelope)})
       |> Enum.split_with(&match?({_rcpt, {:deliver, _}}, &1))
 
     message = record_results(message, Enum.map(immediate, &immediate_result/1))
@@ -873,6 +905,29 @@ defmodule Sovite.Core.QueueManager do
       Enum.reduce(jobs, state, &add_job(&2, &1))
     end
   end
+
+  # The IP pool of the message's tenant, else the default one.
+  defp pool(%{opts: %{ip_pools: pools} = opts}, envelope) when pools != nil,
+    do: Map.get(opts.tenant_pools, envelope.tenant) || Map.get(opts, :ip_pool)
+
+  defp pool(_state, _envelope), do: nil
+
+  # A pool replaces delivery.source_address, not a sender's own source
+  # address from the sender relays table.
+  defp with_pool({:deliver, %{transport: :smtp, source: source} = destination}, pool, state)
+       when pool != nil do
+    if source == state.opts.routing.source_address,
+      do: {:deliver, Map.merge(destination, %{source: %{}, pool: pool})},
+      else: {:deliver, destination}
+  end
+
+  defp with_pool(route, _pool, _state), do: route
+
+  # In a cluster, another node may deliver it.
+  defp placed(route, %{opts: %{cluster: %{} = cluster}}, envelope),
+    do: Placement.place(route, cluster, envelope)
+
+  defp placed(route, _state, _envelope), do: route
 
   defp job(state, id, message, destination, sender, recipients) do
     envelope = message.entry.envelope
@@ -987,9 +1042,17 @@ defmodule Sovite.Core.QueueManager do
   # Starts workers while there are free slots, serving the destination
   # that started a delivery least recently first.
   defp dispatch(%{draining: true} = state), do: state
-  defp dispatch(state) when map_size(state.running) >= state.opts.max_deliveries, do: state
+  defp dispatch(state), do: state |> resume_idle(now_ms()) |> start_workers()
 
-  defp dispatch(state) do
+  # No free slot: an idle worker makes room for a destination waiting.
+  defp start_workers(state) when map_size(state.running) >= state.opts.max_deliveries do
+    case {startable(state, now_ms()), oldest_idle(state)} do
+      {{[_ | _], _waiting}, ref} when ref != nil -> stop_idle(state, ref)
+      _ -> state
+    end
+  end
+
+  defp start_workers(state) do
     now = now_ms()
     {allowed, waiting} = startable(state, now)
 
@@ -998,9 +1061,87 @@ defmodule Sovite.Core.QueueManager do
            &{head_priority(state, &1), Map.get(state.destination_last, &1, 0)}
          ) do
       [] -> schedule_rate_timer(state, waiting, now)
-      [destination | _] -> state |> start_worker(destination, now) |> dispatch()
+      [destination | _] -> state |> start_worker(destination, now) |> start_workers()
     end
   end
+
+  ## Idle workers
+
+  defp idle(state, ref, destination) do
+    timer = Process.send_after(self(), {:idle_expired, ref}, state.opts.connection_cache_time)
+    entry = {ref, timer, now_ms()}
+    %{state | idle: Map.update(state.idle, destination, [entry], &(&1 ++ [entry]))}
+  end
+
+  # Ready jobs go to idle workers of their destination first.
+  defp resume_idle(state, now) do
+    Enum.reduce(state.idle, state, fn {destination, _workers}, state ->
+      resume_idle(state, destination, now)
+    end)
+  end
+
+  defp resume_idle(state, destination, now) do
+    with [{ref, timer, _since} | rest] <- Map.get(state.idle, destination),
+         {job, state} <- next_job(state, destination, now) do
+      Process.cancel_timer(timer)
+      send(state.running[ref].pid, {__MODULE__, {:next, job}})
+
+      state = put_in(state.running[ref].job, job)
+
+      state = %{
+        state
+        | idle: put_idle(state.idle, destination, rest),
+          destination_last: Map.put(state.destination_last, destination, now)
+      }
+
+      resume_idle(state, destination, now)
+    else
+      _ -> state
+    end
+  end
+
+  defp oldest_idle(state) do
+    state.idle
+    |> Enum.flat_map(fn {_destination, workers} -> workers end)
+    |> Enum.min_by(fn {_ref, _timer, since} -> since end, fn -> nil end)
+    |> case do
+      nil -> nil
+      {ref, _timer, _since} -> ref
+    end
+  end
+
+  defp stop_idle(state) do
+    refs = for {_destination, workers} <- state.idle, {ref, _timer, _since} <- workers, do: ref
+    Enum.reduce(refs, state, &stop_idle(&2, &1))
+  end
+
+  # Tells an idle worker to close its connection and stop.
+  defp stop_idle(state, ref) do
+    case unidle(state, ref) do
+      {:ok, state} ->
+        send(state.running[ref].pid, {__MODULE__, :stop})
+        state
+
+      :error ->
+        state
+    end
+  end
+
+  defp unidle(state, ref) do
+    Enum.find_value(state.idle, :error, fn {destination, workers} ->
+      case List.keytake(workers, ref, 0) do
+        {{^ref, timer, _since}, rest} ->
+          Process.cancel_timer(timer)
+          {:ok, %{state | idle: put_idle(state.idle, destination, rest)}}
+
+        nil ->
+          nil
+      end
+    end)
+  end
+
+  defp put_idle(idle, destination, []), do: Map.delete(idle, destination)
+  defp put_idle(idle, destination, workers), do: Map.put(idle, destination, workers)
 
   # Destinations with ready jobs and a free slot: those the rate delay
   # allows now, and those that have to wait.
@@ -1075,6 +1216,12 @@ defmodule Sovite.Core.QueueManager do
   end
 
   defp worker_exited(state, ref) do
+    state =
+      case unidle(state, ref) do
+        {:ok, state} -> state
+        :error -> state
+      end
+
     {worker, running} = Map.pop!(state.running, ref)
 
     destination_running =

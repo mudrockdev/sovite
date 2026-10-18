@@ -17,6 +17,11 @@ defmodule Sovite.Core.Web.API do
   | `POST /api/config/reload` | Reload the config file |
   | `GET /api/route?address=A&sender=S` | How `A` is routed (`Sovite.Core.RouteInfo`) |
   | `GET /api/trace?id=ID` | A message's log lines (`Sovite.Core.Trace`), with `[log] directory` |
+  | `GET /api/cluster` | The cluster's nodes and the copies of their queues (`Sovite.Core.Cluster`) |
+  | `POST /api/cluster/config` | Send `{"content": TOML}` to every node as the shared configuration |
+  | `POST /api/cluster/join` | Join the cluster of `{"peer": "name@host:port"}` |
+  | `POST /api/cluster/leave` | Hand the queue to the other nodes, and leave the cluster |
+  | `GET /api/ip_pools` | The IP pools: messages sent today from each address, and today's limits (`Sovite.Core.IPPools`) |
   | `GET /metrics` | Prometheus metrics (`Sovite.Core.Metrics`), with `metrics.enabled` |
 
   Responses are JSON (`/metrics` is the Prometheus text format). Errors
@@ -26,12 +31,15 @@ defmodule Sovite.Core.Web.API do
 
   use Plug.Router
 
+  alias Sovite.Core.Cluster.Queue
   alias Sovite.Core.Config.Settings
   alias Sovite.Core.Web.Security
 
   alias Sovite.Core.{
+    Cluster,
     Config,
     Control,
+    IPPools,
     LogReader,
     QueueInfo,
     QueueManager,
@@ -127,6 +135,57 @@ defmodule Sovite.Core.Web.API do
     end
   end
 
+  get "/cluster" do
+    if cluster?(conn) do
+      status = Cluster.status(remote: true)
+      ok(conn, Map.merge(status, %{enabled: true, queue: Queue.status()}))
+    else
+      ok(conn, %{enabled: false})
+    end
+  end
+
+  post "/cluster/config" do
+    with :ok <- need_cluster(conn),
+         {:ok, %{"content" => content}} when is_binary(content) <- body(conn) do
+      case Cluster.push_config(content) do
+        {:ok, version} -> ok(conn, %{ok: true, version: version})
+        {:error, errors} -> json(conn, 422, %{error: "invalid configuration", errors: errors})
+      end
+    else
+      {:error, status, message} -> Security.error(conn, status, message)
+      _ -> Security.error(conn, 400, ~s(expected {"content": "..."}))
+    end
+  end
+
+  post "/cluster/join" do
+    with :ok <- need_cluster(conn),
+         {:ok, %{"peer" => peer}} when is_binary(peer) <- body(conn) do
+      case Cluster.join(peer) do
+        :ok -> ok(conn, %{ok: true})
+        {:error, message} -> Security.error(conn, 422, message)
+      end
+    else
+      {:error, status, message} -> Security.error(conn, status, message)
+      _ -> Security.error(conn, 400, ~s(expected {"peer": "name@host:port"}))
+    end
+  end
+
+  post "/cluster/leave" do
+    with :ok <- need_cluster(conn),
+         {:ok, result} <- Cluster.leave() do
+      ok(conn, Map.put(result, :ok, true))
+    else
+      {:error, :no_peers} -> Security.error(conn, 409, "no other node is connected")
+      {:error, status, message} -> Security.error(conn, status, message)
+    end
+  end
+
+  get "/ip_pools" do
+    if config(conn).ip_pool == [],
+      do: ok(conn, %{pools: []}),
+      else: ok(conn, %{pools: IPPools.status(IPPools)})
+  end
+
   get "/trace" do
     log = config(conn).log
 
@@ -171,6 +230,20 @@ defmodule Sovite.Core.Web.API do
         |> put_resp_header("content-type", Prometheus.content_type())
         |> put_resp_header("cache-control", "no-store")
         |> send_resp(200, metrics |> Sovite.Metrics.collect() |> Prometheus.format())
+    end
+  end
+
+  defp cluster?(conn), do: config(conn).cluster.enabled and Process.whereis(Cluster) != nil
+
+  defp need_cluster(conn) do
+    if cluster?(conn), do: :ok, else: {:error, 409, "the cluster is not enabled"}
+  end
+
+  # A JSON request body, of up to 1 MB.
+  defp body(conn) do
+    case read_body(conn, length: 1_048_576) do
+      {:ok, body, _conn} -> JSON.decode(body)
+      _ -> {:error, 413, "the request body is too large"}
     end
   end
 

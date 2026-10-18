@@ -31,6 +31,10 @@ defmodule Sovite.Core.Config.Schema do
   #   :hide_subdomain          - a domain, or "!domain" for an exception
   #   :maildir_template        - an absolute path with {user}, {domain}, {address} placeholders
   #   :pipe_name               - letters, digits, "_", "-"; see Sovite.Core.Transport.pipe_name?/1
+  #   :name                    - a name for a [[tenant]] or [[ip_pool]]: letters, digits, "_", "-"
+  #   :node_name               - a cluster node name, "name@host", kept as text
+  #   :cluster_peer            - a cluster peer, "name@host" or "name@host:port", kept as text
+  #   :date                    - a Date, from a TOML date or "2026-10-01"
   #   :env_name                - an environment variable name
   #   :command                 - a non-empty array of strings, the first an absolute path
   #   :header_name             - a header field name, lower-cased
@@ -521,6 +525,53 @@ defmodule Sovite.Core.Config.Schema do
         {:error, "#{inspect(value)} is not a valid name: use letters, digits, \"_\", and \"-\""}
   end
 
+  defp cast(:name, value) when is_binary(value) do
+    if value =~ ~r/\A[A-Za-z0-9_-]{1,64}\z/,
+      do: {:ok, value},
+      else:
+        {:error, "#{inspect(value)} is not a valid name: use letters, digits, \"_\", and \"-\""}
+  end
+
+  defp cast(:name, value), do: type_error("a name", value)
+
+  defp cast(:node_name, value) when is_binary(value) do
+    if node_name?(value),
+      do: {:ok, value},
+      else: {:error, "#{inspect(value)} is not a node name, such as \"mx1@10.0.0.1\""}
+  end
+
+  defp cast(:node_name, value), do: type_error("a node name", value)
+
+  defp cast(:cluster_peer, value) when is_binary(value) do
+    # The port is optional; IPv6 hosts are in brackets.
+    peer =
+      case Regex.run(~r/\A([^@]+@)(?:\[([^\]]+)\]|([^:\[\]]+))(?::(\d{1,5}))?\z/, value) do
+        [_, name, v6, host | port] ->
+          node_name?(name <> if(v6 == "", do: host, else: v6)) and
+            Enum.all?(port, &(String.to_integer(&1) in 1..65_535))
+
+        nil ->
+          false
+      end
+
+    if peer,
+      do: {:ok, value},
+      else: {:error, "#{inspect(value)} is not a cluster peer, such as \"mx2@10.0.0.2:4370\""}
+  end
+
+  defp cast(:cluster_peer, value), do: type_error("a cluster peer", value)
+
+  defp cast(:date, %Date{} = date), do: {:ok, date}
+
+  defp cast(:date, value) when is_binary(value) do
+    case Date.from_iso8601(value) do
+      {:ok, date} -> {:ok, date}
+      {:error, _} -> type_error(~s(a date like "2026-10-01"), value)
+    end
+  end
+
+  defp cast(:date, value), do: type_error(~s(a date like "2026-10-01"), value)
+
   defp cast(:env_name, value) when is_binary(value) do
     if value =~ ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/,
       do: {:ok, value},
@@ -644,6 +695,16 @@ defmodule Sovite.Core.Config.Schema do
         if Sovite.Validators.hostname?(host),
           do: {:ok, String.downcase(host, :ascii)},
           else: :error
+    end
+  end
+
+  defp node_name?(value) do
+    case String.split(value, "@", parts: 2) do
+      [name, host] ->
+        name =~ ~r/\A[A-Za-z0-9_-]{1,64}\z/ and host =~ ~r/\A[A-Za-z0-9.:_-]{1,253}\z/
+
+      _ ->
+        false
     end
   end
 

@@ -236,12 +236,12 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 13 — Scale & Clustering (differentiator)
 
-- [ ] Multiple nodes sharing configuration
-- [ ] Distributed queue / queue handover when a node goes down
-- [ ] Cluster-wide rate limits and greylisting state
-- [ ] Shared connection caching per destination across nodes
-- [ ] Per-tenant isolation (multi-tenant hosting): separate limits, keys, IP pools
-- [ ] Outbound IP pool management and warm-up schedules
+- [x] Multiple nodes sharing configuration
+- [x] Distributed queue / queue handover when a node goes down
+- [x] Cluster-wide rate limits and greylisting state
+- [x] Shared connection caching per destination across nodes
+- [x] Per-tenant isolation (multi-tenant hosting): separate limits, keys, IP pools
+- [x] Outbound IP pool management and warm-up schedules
 
 ### Phase 14 — Hardening for 1.0
 

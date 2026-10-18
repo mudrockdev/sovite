@@ -241,6 +241,9 @@ defmodule Sovite.Core.ConfigTest do
              relayhost_username: nil,
              relayhost_password: nil,
              source_address: [],
+             ip_pool: nil,
+             connection_cache: true,
+             connection_cache_time: 2_000,
              chunking: true
            }
 

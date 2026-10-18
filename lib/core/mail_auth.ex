@@ -45,7 +45,7 @@ defmodule Sovite.Core.MailAuth do
   require Logger
 
   alias Sovite.{ARC, AuthResults, DKIM, DMARC, SPF}
-  alias Sovite.Core.Config
+  alias Sovite.Core.{Config, Tenants}
   alias Sovite.Core.Repo.Tables.DMARCReportEntries
   alias Sovite.DKIM.{Body, Verifier}
   alias Sovite.SMTP.Reply
@@ -56,8 +56,9 @@ defmodule Sovite.Core.MailAuth do
   @typedoc """
   The SMTP transaction the message came in: the client address and
   `HELO` name, the `MAIL FROM` address, the authentication identity and
-  whether the client is trusted, and whether some recipient is
-  forwarded to another domain.
+  whether the client is trusted, whether some recipient is forwarded to
+  another domain, and the message's tenant (see `Sovite.Core.Tenants`),
+  which may be left out.
   """
   @type context :: %{
           session_id: String.t(),
@@ -68,7 +69,8 @@ defmodule Sovite.Core.MailAuth do
           recipients: [String.t()],
           inbound: boolean(),
           forwarded: boolean(),
-          spf: spf() | nil
+          spf: spf() | nil,
+          tenant: String.t() | nil
         }
 
   @typedoc "SPF results from `MAIL`: the `MAIL FROM` identity and, if checked, `HELO`."
@@ -90,6 +92,15 @@ defmodule Sovite.Core.MailAuth do
         if(config.dkim.sign,
           do: keys |> Enum.filter(& &1.sign) |> Enum.group_by(& &1.domain, & &1.signing_key),
           else: %{}
+        ),
+      # The tenant whose domain each key is for, if any (see
+      # Sovite.Core.Tenants): only that tenant's mail is signed with it.
+      key_owners:
+        for(
+          key <- keys,
+          owner = Tenants.owner(config.tenant, key.domain),
+          into: %{},
+          do: {key.domain, owner}
         ),
       sign_opts:
         [
@@ -171,7 +182,7 @@ defmodule Sovite.Core.MailAuth do
     plan =
       if context.inbound,
         do: inbound_plan(opts, received, context),
-        else: outbound_plan(opts, fields)
+        else: outbound_plan(opts, fields, Map.get(context, :tenant))
 
     specs =
       Enum.uniq(
@@ -195,11 +206,14 @@ defmodule Sovite.Core.MailAuth do
     }
   end
 
-  defp outbound_plan(opts, fields) do
+  defp outbound_plan(opts, fields, tenant) do
     keys =
-      case DMARC.from_domain(fields) do
-        {:ok, domain} -> keys_for(opts.signing_keys, domain)
-        {:error, _} -> []
+      with {:ok, domain} <- DMARC.from_domain(fields),
+           {key_domain, keys} <- find_keys(opts.signing_keys, domain),
+           owner when owner in [nil, tenant] <- Map.get(opts, :key_owners, %{})[key_domain] do
+        keys
+      else
+        _ -> []
       end
 
     %{dkim: nil, arc: nil, seal: nil, sign: keys}
@@ -222,17 +236,25 @@ defmodule Sovite.Core.MailAuth do
   end
 
   # The keys of the domain, or of its closest parent with keys.
-  defp keys_for(keys, _domain) when map_size(keys) == 0, do: []
-
   defp keys_for(keys, domain) do
+    case find_keys(keys, domain) do
+      {_domain, found} -> found
+      nil -> []
+    end
+  end
+
+  # {domain, keys}: the domain the keys are for.
+  defp find_keys(keys, _domain) when map_size(keys) == 0, do: nil
+
+  defp find_keys(keys, domain) do
     case Map.fetch(keys, domain) do
       {:ok, found} ->
-        found
+        {domain, found}
 
       :error ->
         case String.split(domain, ".", parts: 2) do
-          [_label, parent] -> keys_for(keys, parent)
-          [_tld] -> []
+          [_label, parent] -> find_keys(keys, parent)
+          [_tld] -> nil
         end
     end
   end

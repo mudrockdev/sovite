@@ -10,7 +10,16 @@ defmodule Sovite.Core.Config do
   `get/0`.
   """
 
-  alias Sovite.Core.Config.{AbuseRules, AuthRules, Error, RoutingRules, Schema, TransportRules}
+  alias Sovite.Core.Config.{
+    AbuseRules,
+    AuthRules,
+    ClusterRules,
+    Error,
+    RoutingRules,
+    Schema,
+    TransportRules
+  }
+
   alias Sovite.Core.{Repo, Restrictions}
 
   @default_path "/etc/sovite/sovite.toml"
@@ -169,6 +178,9 @@ defmodule Sovite.Core.Config do
         {:relayhost_username, :string, []},
         {:relayhost_password, :string, []},
         {:source_address, {:list, :ip_address}, default: []},
+        {:ip_pool, :name, []},
+        {:connection_cache, :boolean, default: true},
+        {:connection_cache_time, :duration, default: "2s"},
         {:chunking, :boolean, default: true}
       ]}, []},
     {:maildir, {:section, [{:local, :maildir_template, []}, {:mailbox, :maildir_template, []}]},
@@ -409,6 +421,55 @@ defmodule Sovite.Core.Config do
         {:web_root, :absolute_path, []}
       ]}, []},
     {:metrics, {:section, [{:enabled, :boolean, default: true}]}, []},
+    {:cluster,
+     {:section,
+      [
+        {:enabled, :boolean, default: false},
+        {:node_name, :node_name, []},
+        {:address, :ip_address, []},
+        {:port, {:integer, 1, 65_535}, default: 4370},
+        {:seeds, {:list, :cluster_peer}, default: []},
+        {:cert_file, :absolute_path, []},
+        {:key_file, :absolute_path, []},
+        {:ca_file, :absolute_path, []},
+        {:join_interval, :duration, default: "10s"},
+        {:sync_interval, :duration, default: "1s"},
+        {:shared_config, :absolute_path, []},
+        {:queue_replicas, {:integer, 0, 2}, default: 1},
+        {:handover_after, :duration, default: "10m"},
+        {:destination_affinity, :boolean, default: false}
+      ]}, []},
+    {:tenant,
+     {:list,
+      {:section,
+       [
+         {:name, :name, required: true},
+         {:domains, {:list, :domain}, default: []},
+         {:users, {:list, :string}, default: []},
+         {:ip_pool, :name, []},
+         {:messages, :rate, []},
+         {:recipients, :rate, []},
+         {:max_message_size, :byte_size, []},
+         {:max_recipients, {:integer, 1, 100_000}, []}
+       ]}}, default: []},
+    {:ip_pool,
+     {:list,
+      {:section,
+       [
+         {:name, :name, required: true},
+         {:overflow, :name, []},
+         {:address,
+          {:list,
+           {:section,
+            [
+              {:address, :ip_address, required: true},
+              {:helo, :hostname, []},
+              {:node, :node_name, []},
+              {:warmup_start, :date, []},
+              {:warmup, {:list, {:integer, 1, 1_000_000_000}}, default: []},
+              {:daily_limit, {:integer, 1, 1_000_000_000}, []}
+            ]}}, default: []}
+       ]}}, default: []},
     {:tracing,
      {:section,
       [
@@ -458,6 +519,9 @@ defmodule Sovite.Core.Config do
     :admin,
     :metrics,
     :tracing,
+    :cluster,
+    :tenant,
+    :ip_pool,
     # The decoded file, for `sovitectl config show` and `diff`.
     raw: %{}
   ]
@@ -568,6 +632,9 @@ defmodule Sovite.Core.Config do
             relayhost_username: String.t() | nil,
             relayhost_password: String.t() | nil,
             source_address: [:inet.ip_address()],
+            ip_pool: String.t() | nil,
+            connection_cache: boolean(),
+            connection_cache_time: pos_integer(),
             chunking: boolean()
           },
           maildir: %{local: String.t() | nil, mailbox: String.t() | nil},
@@ -716,7 +783,53 @@ defmodule Sovite.Core.Config do
             sample_ratio: float(),
             service_name: String.t()
           },
+          cluster: %{
+            enabled: boolean(),
+            node_name: String.t() | nil,
+            address: :inet.ip_address() | nil,
+            port: :inet.port_number(),
+            seeds: [String.t()],
+            cert_file: Path.t() | nil,
+            key_file: Path.t() | nil,
+            ca_file: Path.t() | nil,
+            join_interval: pos_integer(),
+            sync_interval: pos_integer(),
+            shared_config: Path.t() | nil,
+            queue_replicas: 0..2,
+            handover_after: pos_integer(),
+            destination_affinity: boolean()
+          },
+          tenant: [tenant()],
+          ip_pool: [ip_pool()],
           raw: map()
+        }
+
+  @typedoc "A `[[tenant]]`: see `Sovite.Core.Tenants`."
+  @type tenant :: %{
+          name: String.t(),
+          domains: [String.t()],
+          users: [String.t()],
+          ip_pool: String.t() | nil,
+          messages: rate() | nil,
+          recipients: rate() | nil,
+          max_message_size: pos_integer() | nil,
+          max_recipients: pos_integer() | nil
+        }
+
+  @typedoc "An `[[ip_pool]]`: see `Sovite.Core.IPPools`."
+  @type ip_pool :: %{
+          name: String.t(),
+          overflow: String.t() | nil,
+          address: [
+            %{
+              address: :inet.ip_address(),
+              helo: String.t() | nil,
+              node: String.t() | nil,
+              warmup_start: Date.t() | nil,
+              warmup: [pos_integer()],
+              daily_limit: pos_integer() | nil
+            }
+          ]
         }
 
   @doc """
@@ -726,24 +839,81 @@ defmodule Sovite.Core.Config do
   @spec default_path() :: Path.t()
   def default_path, do: System.get_env("SOVITE_CONFIG") || @default_path
 
-  @doc "Reads, parses, and validates the config file at `path`."
+  @doc """
+  Reads, parses, and validates the config file at `path`.
+
+  When it sets `cluster.shared_config`, the settings of that file (the
+  cluster's shared configuration, see `Sovite.Core.Cluster.SharedConfig`)
+  come first, and those of `path` override them: tables are merged key
+  by key, other values replaced. A shared file that does not exist yet
+  is skipped.
+  """
   @spec load(Path.t()) :: {:ok, t()} | {:error, [Error.t()]}
   def load(path) do
+    with {:ok, map} <- read(path),
+         {:ok, map} <- with_shared(map) do
+      validate(map)
+    end
+  end
+
+  defp read(path) do
     case File.read(path) do
       {:ok, contents} ->
-        parse(contents)
+        decode(contents)
 
       {:error, reason} ->
         {:error, [%Error{reason: "cannot read #{path}: #{:file.format_error(reason)}"}]}
     end
   end
 
+  defp with_shared(%{"cluster" => %{"shared_config" => path}} = map) when is_binary(path) do
+    if File.exists?(path),
+      do: merge_shared(map, read(path), path),
+      else: {:ok, map}
+  end
+
+  defp with_shared(map), do: {:ok, map}
+
+  defp merge_shared(_map, {:ok, %{"cluster" => _}}, source),
+    do: {:error, [%Error{reason: "#{source}: the shared config cannot have a [cluster] table"}]}
+
+  defp merge_shared(map, {:ok, shared}, _source), do: {:ok, deep_merge(shared, map)}
+
+  defp merge_shared(_map, {:error, errors}, source),
+    do: {:error, Enum.map(errors, &%{&1 | reason: "#{source}: #{&1.reason}"})}
+
+  @doc """
+  Like `load/1`, with `shared` (TOML) as the shared configuration
+  instead of the file `cluster.shared_config` names: whether the server
+  could run with a new shared configuration.
+  """
+  @spec load_with_shared(Path.t(), String.t()) :: {:ok, t()} | {:error, [Error.t()]}
+  def load_with_shared(path, shared) do
+    with {:ok, map} <- read(path),
+         {:ok, map} <- merge_shared(map, decode(shared), "the shared config") do
+      validate(map)
+    end
+  end
+
+  @doc false
+  # Tables merged key by key, other values replaced by those of `local`.
+  def deep_merge(shared, local) do
+    Map.merge(shared, local, fn
+      _key, %{} = a, %{} = b -> deep_merge(a, b)
+      _key, _a, b -> b
+    end)
+  end
+
   @doc "Parses and validates TOML config `contents`."
   @spec parse(String.t()) :: {:ok, t()} | {:error, [Error.t()]}
   def parse(contents) do
+    with {:ok, map} <- decode(contents), do: validate(map)
+  end
+
+  defp decode(contents) do
     case Toml.decode(contents) do
       {:ok, map} ->
-        validate(map)
+        {:ok, map}
 
       {:error, {:invalid_toml, reason}} ->
         {:error, [%Error{reason: "invalid TOML: " <> String.trim(reason)}]}
@@ -914,6 +1084,7 @@ defmodule Sovite.Core.Config do
       |> Kernel.++(AuthRules.errors(values))
       |> Kernel.++(TransportRules.errors(values))
       |> Kernel.++(AbuseRules.errors(values))
+      |> Kernel.++(ClusterRules.errors(values))
       |> Enum.filter(& &1)
 
     if errors == [], do: :ok, else: {:error, errors}

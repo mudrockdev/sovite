@@ -262,12 +262,20 @@ defmodule Sovite.Core.Control do
   defp reload_reason(:no_config_file), do: "started without a config file"
   defp reload_reason(reason), do: inspect(reason)
 
+  # Partisan keeps running with the settings it started with.
+  @cluster_restart [:enabled, :node_name, :address, :port, :cert_file, :key_file, :ca_file]
+
   defp check_restart(old, new) do
     keys =
       [
         old.database != new.database && "database",
         old.queue.directory != new.queue.directory && "queue.directory"
       ]
+      |> Kernel.++(
+        for key <- @cluster_restart,
+            Map.fetch!(old.cluster, key) != Map.fetch!(new.cluster, key),
+            do: "cluster.#{key}"
+      )
       |> Enum.filter(& &1)
 
     if keys == [], do: :ok, else: {:error, {:restart_required, keys}}

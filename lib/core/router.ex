@@ -62,6 +62,7 @@ defmodule Sovite.Core.Router do
           | %{transport: :lmtp, nexthop: {:unix, Path.t()} | {:host, Transport.host()}}
           | %{transport: :local | :mailbox}
           | %{transport: :pipe, name: String.t()}
+          | %{transport: :cluster, node: String.t(), destination: map()}
 
   @type route ::
           {:deliver, destination()}
@@ -275,6 +276,7 @@ defmodule Sovite.Core.Router do
     do: "#{host}:#{port}"
 
   def name(%{transport: :pipe, name: name}), do: "pipe:" <> name
+  def name(%{transport: :cluster, node: node}), do: "cluster:" <> node
   def name(%{transport: transport}) when transport in [:local, :mailbox], do: "#{transport}"
   def name(%{nexthop: nexthop}), do: name(nexthop)
   def name({:mx, domain}), do: domain

@@ -167,7 +167,8 @@ defmodule Sovite.Core.SMTPHandler do
     Router,
     Routing,
     Screen,
-    SenderCheck
+    SenderCheck,
+    Tenants
   }
 
   alias Sovite.Core.Repo.Tables.{AccessRules, Mailboxes, Users}
@@ -232,7 +233,8 @@ defmodule Sovite.Core.SMTPHandler do
       content_filter: runtime[:content_filter],
       reinjection: Keyword.get(runtime, :reinjection, false),
       milter_configs: Milters.opts(config, Keyword.get(runtime, :milters, [])),
-      policy: policy_opts(config.policy)
+      policy: policy_opts(config.policy),
+      tenants: Tenants.opts(config, runtime[:rate_limit])
     }
   end
 
@@ -348,6 +350,8 @@ defmodule Sovite.Core.SMTPHandler do
         transactions: 0,
         next_id: nil,
         size: nil,
+        tenant: nil,
+        tenant_recipients: 0,
         effects: [],
         session_effects: [],
         received: nil,
@@ -458,6 +462,8 @@ defmodule Sovite.Core.SMTPHandler do
         spf: nil,
         effects: [],
         size: params.size,
+        tenant: nil,
+        tenant_recipients: 0,
         transactions: state.transactions + 1,
         next_id: ID.generate()
     }
@@ -465,6 +471,7 @@ defmodule Sovite.Core.SMTPHandler do
     with {:ok, state} <- check_hold(params, state),
          {:ok, state} <- Screen.mail(sender, state),
          {:ok, state} <- check_sender(sender, state),
+         {:ok, state} <- check_tenant(sender, state),
          {:ok, state} <- restrict(state, :mail),
          {:ok, state} <- check_spf(sender, state),
          {:ok, state} <- rewrite_sender(sender, state) do
@@ -526,6 +533,22 @@ defmodule Sovite.Core.SMTPHandler do
       :error
   end
 
+  defp check_tenant(sender, state) do
+    tenant = Tenants.find(state.tenants, state.identity, sender, state.trusted)
+    state = %{state | tenant: tenant}
+
+    case Tenants.message(state.tenants, tenant, state.size) do
+      :ok ->
+        {:ok, state}
+
+      {:limited, :max_message_size} ->
+        {:reply, Reply.new(552, "5.3.4", "Message size exceeds the limit of your account"), state}
+
+      {:limited, :messages} ->
+        {:reply, Reply.new(450, "4.7.1", "Too many messages from your account, try later"), state}
+    end
+  end
+
   defp rewrite_sender(sender, state) do
     case Rewrite.sender(state.routing, sender) do
       {:ok, rewritten} -> {:ok, %{state | envelope_sender: rewritten}}
@@ -538,12 +561,29 @@ defmodule Sovite.Core.SMTPHandler do
     with {:ok, checked} <- check_rcpt(recipient, params, state) do
       # A refused recipient must not stay among the expansions.
       with {:ok, checked} <- Screen.rcpt(recipient, checked),
+           {:ok, checked} <- check_tenant_rcpt(checked),
            {:ok, checked} <- milters(checked, &Milters.rcpt(&1, recipient)) do
         {:ok, checked}
       else
         {:reply, reply, checked} -> {:reply, reply, %{state | milters: checked.milters}}
         {:close, reply, checked} -> {:close, reply, %{state | milters: checked.milters}}
       end
+    end
+  end
+
+  defp check_tenant_rcpt(state) do
+    count = state.tenant_recipients + 1
+
+    case Tenants.recipient(state.tenants, state.tenant, count) do
+      :ok ->
+        {:ok, %{state | tenant_recipients: count}}
+
+      {:limited, :max_recipients} ->
+        {:reply, Reply.new(452, "4.5.3", "Too many recipients"), state}
+
+      {:limited, :recipients} ->
+        {:reply, Reply.new(450, "4.7.1", "Too many recipients from your account, try later"),
+         state}
     end
   end
 
@@ -947,7 +987,8 @@ defmodule Sovite.Core.SMTPHandler do
       rrvs: Map.take(state.rrvs, recipients),
       priority: priority(transaction.params, state),
       hold: Map.get(transaction.params, :hold),
-      deliver_by: deliver_by(Map.get(transaction.params, :by), received_at)
+      deliver_by: deliver_by(Map.get(transaction.params, :by), received_at),
+      tenant: state.tenant && state.tenant.name
     }
 
     received =
@@ -1017,7 +1058,8 @@ defmodule Sovite.Core.SMTPHandler do
       recipients: state.expansions,
       inbound: inbound?(state),
       forwarded: Enum.any?(state.expansions, &remote?(&1, state)),
-      spf: state.spf
+      spf: state.spf,
+      tenant: state.tenant && state.tenant.name
     }
   end
 
@@ -1149,11 +1191,29 @@ defmodule Sovite.Core.SMTPHandler do
   def handle_data_end(_transaction, state) do
     {prefix, verdict} = MailAuth.finish(state.auth_work, auth_context(state))
     state = %{state | auth_work: nil, prefix: prefix}
+    {_envelope, size} = Spool.info(state.writer)
 
     case verdict do
       {:reject, reply} ->
         finish({:reject, reply}, state)
 
+      _verdict when state.tenant != nil and state.tenant.max_message_size != nil ->
+        if Tenants.too_large?(state.tenant, size),
+          do:
+            finish(
+              {:reject,
+               Reply.new(552, "5.3.4", "Message size exceeds the limit of your account")},
+              state
+            ),
+          else: end_of_data(verdict, state)
+
+      verdict ->
+        end_of_data(verdict, state)
+    end
+  end
+
+  defp end_of_data(verdict, state) do
+    case verdict do
       verdict ->
         action = if verdict == :accept, do: state.action, else: stronger(state.action, verdict)
         checks = Map.get(state.restrictions, :end_of_data, [])

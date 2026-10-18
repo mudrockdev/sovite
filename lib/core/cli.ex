@@ -23,12 +23,14 @@ defmodule Sovite.Core.CLI do
       sovitectl hash-password                     # for auth.backend = "file"
       sovitectl dkim generate example.com s2026 /etc/sovite/dkim/example.com.pem
       sovitectl dns records example.com
+      sovitectl cluster status
+      sovitectl cluster config push /etc/sovite/cluster.toml
       sovitectl migrate postfix /etc/postfix --output /root/sovite
 
   Commands that use the database read the config file given with
   `--config PATH`, or the default one. Commands that act on the running
   server (`queue flush`, `hold`, `release`, `delete`, `requeue`, `config
-  reload`, `config diff`, and `status`) use the admin API
+  reload`, `config diff`, `status`, `cluster`, and `ip-pool`) use the admin API
   (`Sovite.Core.Web.API`) at the address and with the token the config file
   names, so they must run as a user that can read the token file.
   """
@@ -40,6 +42,7 @@ defmodule Sovite.Core.CLI do
   alias Sovite.SASL.Password
 
   @version Mix.Project.config()[:version]
+  @cluster_commands CLI.Cluster.commands()
   @data_commands CLI.Data.commands()
   @dns_commands CLI.DNS.commands()
   @migrate_commands CLI.Migrate.commands()
@@ -61,6 +64,7 @@ defmodule Sovite.Core.CLI do
   #{String.trim_trailing(CLI.Data.usage())}
   #{String.trim_trailing(CLI.DNS.usage())}
   #{String.trim_trailing(CLI.Ops.usage())}
+  #{String.trim_trailing(CLI.Cluster.usage())}
   #{String.trim_trailing(CLI.Migrate.usage())}
     hash-password [SCHEME]           Hash a password from standard input for an auth.file users file.
                                      SCHEME: scram-sha-256 (default), sha512-crypt, sha256-crypt
@@ -136,6 +140,13 @@ defmodule Sovite.Core.CLI do
 
   defp run([command | _] = argv, path) when command in @ops_commands do
     case CLI.Ops.run(argv, path) do
+      :usage -> usage_error()
+      status -> status
+    end
+  end
+
+  defp run([command | _] = argv, path) when command in @cluster_commands do
+    case CLI.Cluster.run(argv, path) do
       :usage -> usage_error()
       status -> status
     end

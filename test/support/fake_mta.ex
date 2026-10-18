@@ -9,7 +9,8 @@ defmodule Sovite.Test.FakeMTA do
   parameters), `:rcpt_to` (accepted recipients only), `:rcpt_args` (their
   whole `RCPT` arguments), `:data` (dot-unstuffed, without the final
   `.`), and `:chunked` (sent with `BDAT`). Each new connection is reported
-  as `{:fake_mta, pid, :connected}`.
+  as `{:fake_mta, pid, :connected}`, followed by `{:fake_mta, pid, {:peer,
+  ip}}` with the client's address.
 
       {:ok, mta} = FakeMTA.start_link(responses: %{rcpt: &reject_unknown/1})
       port = FakeMTA.port(mta)
@@ -116,6 +117,10 @@ defmodule Sovite.Test.FakeMTA do
     end
 
     send(config.owner, {:fake_mta, config.server, :connected})
+    {_transport, raw} = socket
+
+    with {:ok, {ip, _port}} when is_tuple(ip) <- :inet.peername(raw),
+         do: send(config.owner, {:fake_mta, config.server, {:peer, ip}})
 
     {socket, tls} =
       if config.implicit_tls, do: upgrade(socket, config), else: {socket, nil}

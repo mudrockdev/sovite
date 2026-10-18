@@ -127,4 +127,33 @@ defmodule Sovite.Abuse.RateLimitTest do
     assert RateLimit.hit(name, :ip, 1, 60_000) == :ok
     assert RateLimit.add(name, :ip, 60_000) in 1..2
   end
+
+  test "deltas carry counts to another table" do
+    {a, a_pid, clock} = start(replicate: true)
+    {b, _pid, b_clock} = start()
+    :atomics.put(b_clock, 1, :atomics.get(clock, 1))
+
+    assert RateLimit.hit(a, :ip, 3, 1000) == :ok
+    assert RateLimit.add(a, :user, 1000, 2) == 2
+    assert RateLimit.hit(a, :ip, 1, 1000) == :limited
+
+    deltas = RateLimit.take_deltas(a)
+    assert Enum.sort(deltas) == [{:ip, 1000, 1000, 1}, {:user, 1000, 1000, 2}]
+    assert RateLimit.take_deltas(a) == []
+
+    assert RateLimit.merge(b, deltas ++ [{:bad, 0, 1, 1}, {:bad, 1000, 1000, -1}]) == :ok
+    assert RateLimit.count(b, :ip, 1000) == 1
+    assert RateLimit.count(b, :user, 1000) == 2
+    assert RateLimit.hit(b, :ip, 1, 1000) == :limited
+    # Merged counts are not deltas again, and tables without
+    # replication keep none.
+    assert RateLimit.take_deltas(b) == []
+
+    # Deltas nobody takes are purged with their bucket.
+    RateLimit.add(a, :ip, 1000)
+    advance(clock, 2000)
+    send(a_pid, :cleanup)
+    :sys.get_state(a_pid)
+    assert RateLimit.take_deltas(a) == []
+  end
 end

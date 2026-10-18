@@ -169,6 +169,12 @@ tls = "dane"
 # relayhost_password = "secret"
 # Send messages with BDAT to servers that offer CHUNKING.
 chunking = true
+# Keep connections open for a while after a delivery, for the next
+# message to the same destination.
+connection_cache = true
+connection_cache_time = "2s"
+# Send from the addresses of an [[ip_pool]].
+# ip_pool = "shared"
 
 [auth]
 # Users for SMTP AUTH: "database" (sovitectl user add ...), "file", "ldap",
@@ -398,6 +404,44 @@ public_metrics = false
 [metrics]
 # Prometheus metrics at /metrics on the web server.
 enabled = true
+
+# [cluster]
+# Run as a node of a cluster: shared configuration, rate limits, and
+# greylisting, and copies of each other's queues. Nodes talk over TLS
+# 1.3 with certificates from a CA of the cluster's own.
+# enabled = true
+# node_name = "mx1@10.0.0.1"
+# address = "10.0.0.1"
+# port = 4370
+# seeds = ["mx2@10.0.0.2", "mx3@10.0.0.3"]
+# cert_file = "/etc/sovite/cluster/mx1.pem"
+# key_file = "/etc/sovite/cluster/mx1.key"
+# ca_file = "/etc/sovite/cluster/ca.pem"
+# The settings all nodes share (sovitectl cluster config push FILE).
+# shared_config = "/var/lib/sovite/cluster.toml"
+# Copies of each queued message on other nodes, which deliver it when its
+# node stays down for handover_after.
+# queue_replicas = 1
+# handover_after = "10m"
+
+# [[tenant]]
+# A customer whose mail this server hosts: its own limits, DKIM keys, and
+# IP pool.
+# name = "acme"
+# domains = ["acme.example"]
+# ip_pool = "acme"
+# messages = "10000/1d"
+# max_message_size = "10M"
+
+# [[ip_pool]]
+# Source addresses for outbound mail, with warm-up schedules.
+# name = "acme"
+# [[ip_pool.address]]
+# address = "192.0.2.10"
+# helo = "mta1.example.com"
+# warmup_start = 2026-10-01
+# warmup = [50, 100, 200, 500, 1000, 2000, 5000]
+# daily_limit = 50000
 
 [tracing]
 # OpenTelemetry traces of SMTP sessions and deliveries, over OTLP/HTTP.

@@ -66,6 +66,15 @@ defmodule Sovite.Core.Telemetry do
   | `[:sovite, :tracing, :export, :error]` | `spans` | `name`, `reason` |
   | `[:sovite, :tracing, :spans, :dropped]` | `spans` | `name` |
   | `[:sovite, :systemd, :watchdog, :skipped]` | | `reason` |
+  | `[:sovite, :cluster, :node, :up]` | | `node` |
+  | `[:sovite, :cluster, :node, :down]` | | `node` |
+  | `[:sovite, :cluster, :join, :error]` | | `peer`, `reason` |
+  | `[:sovite, :cluster, :config, :applied]` | `version` | `origin` |
+  | `[:sovite, :cluster, :config, :rejected]` | `version` | `origin`, `reason` |
+  | `[:sovite, :cluster, :queue, :taken_over]` | `messages` | `node` |
+  | `[:sovite, :cluster, :queue, :handed_over]` | `messages`, `failed` | |
+  | `[:sovite, :tenant, :limited]` | | `tenant`, `limit` |
+  | `[:sovite, :ip_pool, :exhausted]` | | `pool` |
 
   `smtp.message.accepted` links a received message's queue ID to its
   session and `Message-ID`, so `sovitectl trace` can find it by either.
@@ -77,7 +86,9 @@ defmodule Sovite.Core.Telemetry do
 
   Message lifecycle events (`:queue`, delivery `:stop` and `:exception`,
   accepted messages), administrator actions on the queue, config
-  reloads, draining, authentication results of received mail, sent DMARC reports,
+  reloads, draining, cluster nodes coming up, shared configurations
+  taken, queues handed over, tenant limits hit, full IP pools,
+  authentication results of received mail, sent DMARC reports,
   successful logins, certificate loads and ACME issuance, failed TLS
   handshakes, SMTP commands that got a 4xx or 5xx reply, clients the
   screen refused, exceeded rate limits, failed DNS list lookups, and
@@ -86,7 +97,9 @@ defmodule Sovite.Core.Telemetry do
   bans, suspended users, certificate errors, failed ACME orders,
   `WARN` results of restrictions, failed policy server requests, failed
   config reloads, web requests that crashed, failed trace exports,
-  and skipped watchdog pings are logged at `:warning`.
+  skipped watchdog pings, cluster nodes going down, shared configurations
+  refused, and messages taken over from nodes that stayed down are
+  logged at `:warning`.
   All other events are logged at `:debug`.
 
   Failed logins are logged as `auth.failure: mechanism=PLAIN,
@@ -158,7 +171,16 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :web, :request, :exception],
     [:sovite, :tracing, :export, :error],
     [:sovite, :tracing, :spans, :dropped],
-    [:sovite, :systemd, :watchdog, :skipped]
+    [:sovite, :systemd, :watchdog, :skipped],
+    [:sovite, :cluster, :node, :up],
+    [:sovite, :cluster, :node, :down],
+    [:sovite, :cluster, :join, :error],
+    [:sovite, :cluster, :config, :applied],
+    [:sovite, :cluster, :config, :rejected],
+    [:sovite, :cluster, :queue, :taken_over],
+    [:sovite, :cluster, :queue, :handed_over],
+    [:sovite, :tenant, :limited],
+    [:sovite, :ip_pool, :exhausted]
   ]
 
   @info_events [
@@ -185,7 +207,12 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :smtp, :message, :accepted],
     [:sovite, :config, :reloaded],
     [:sovite, :server, :drain, :start],
-    [:sovite, :server, :drain, :stop]
+    [:sovite, :server, :drain, :stop],
+    [:sovite, :cluster, :node, :up],
+    [:sovite, :cluster, :config, :applied],
+    [:sovite, :cluster, :queue, :handed_over],
+    [:sovite, :tenant, :limited],
+    [:sovite, :ip_pool, :exhausted]
   ]
 
   @warning_events [
@@ -204,7 +231,10 @@ defmodule Sovite.Core.Telemetry do
     [:sovite, :web, :request, :exception],
     [:sovite, :tracing, :export, :error],
     [:sovite, :tracing, :spans, :dropped],
-    [:sovite, :systemd, :watchdog, :skipped]
+    [:sovite, :systemd, :watchdog, :skipped],
+    [:sovite, :cluster, :node, :down],
+    [:sovite, :cluster, :config, :rejected],
+    [:sovite, :cluster, :queue, :taken_over]
   ]
 
   @doc "Returns every event in the catalog."

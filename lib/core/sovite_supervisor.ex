@@ -72,10 +72,12 @@ defmodule Sovite.Core.Supervisor do
 
   alias Sovite.Core.{
     ACME,
+    Cluster,
     Config,
     Control,
     DMARCReports,
     Greylist,
+    IPPools,
     Logging,
     MailAuth,
     Metrics,
@@ -175,7 +177,10 @@ defmodule Sovite.Core.Supervisor do
       metrics: if(config.metrics.enabled and config.admin.enabled, do: args.names.metrics),
       tracing: if(config.tracing.enabled, do: args.names.tracing),
       started_at: args.started_at,
-      inherited: inherited_sockets()
+      inherited: inherited_sockets(),
+      rate_limit: @rate_limit,
+      suspensions: @suspensions,
+      ip_pools: if(config.ip_pool != [], do: IPPools)
     }
   end
 
@@ -200,8 +205,10 @@ defmodule Sovite.Core.Supervisor do
          {Repo, {config.database, elem(runtime.repo, 1)}},
          {DomainCache, repo: runtime.repo}
        ] ++
+       pool_specs(config, runtime) ++
        security_specs(config, runtime) ++
        [{QueueManager, QueueManager.opts(config, runtime.repo) ++ manager_opts}] ++
+       Cluster.child_specs(config, runtime) ++
        report_specs(config, runtime) ++
        Enum.map(config.listener, &listener(&1, config, runtime)) ++
        policy_specs(config, runtime) ++
@@ -285,9 +292,22 @@ defmodule Sovite.Core.Supervisor do
       if(dnssec_check?(config), do: [dnssec_check_spec(runtime.resolver)], else: [])
   end
 
+  defp pool_specs(config, runtime) do
+    case IPPools.opts(config, IPPools, runtime.repo) do
+      nil -> []
+      opts -> [{IPPools, opts}]
+    end
+  end
+
   defp abuse_specs(config, runtime) do
+    # In a cluster, counts go to the other nodes, by the wall clock.
+    rate_limit =
+      if config.cluster.enabled,
+        do: [name: @rate_limit, replicate: true, clock: &Cluster.clock/0],
+        else: [name: @rate_limit]
+
     [
-      {RateLimit, name: @rate_limit},
+      {RateLimit, rate_limit},
       {Cache, name: @screen_cache},
       {Cache, name: @suspensions}
     ] ++ if(config.greylist.enabled, do: [{Greylist, repo: runtime.repo}], else: [])
@@ -298,7 +318,8 @@ defmodule Sovite.Core.Supervisor do
      name: @penalty,
      max_failures: config.auth.max_failures,
      window: config.auth.failure_window,
-     ban_time: config.auth.ban_time}
+     ban_time: config.auth.ban_time,
+     replicate: config.cluster.enabled}
   end
 
   defp dmarc_reports_spec(config, runtime) do

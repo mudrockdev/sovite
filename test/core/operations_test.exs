@@ -200,6 +200,59 @@ defmodule Sovite.Core.OperationsTest do
   end
 
   describe "sovitectl" do
+    test "cluster and IP pool commands on a server that is not clustered", context do
+      context =
+        start_mta(context, """
+        [[ip_pool]]
+        name = "main"
+        [[ip_pool.address]]
+        address = "127.0.0.2"
+        helo = "out.example.org"
+        daily_limit = 100
+        """)
+
+      assert {200, body} = http(context, :get, "/api/cluster")
+      assert JSON.decode!(body) == %{"enabled" => false}
+
+      assert {200, body} = http(context, :get, "/api/ip_pools")
+
+      assert %{"pools" => [%{"name" => "main", "addresses" => [address]}]} = JSON.decode!(body)
+      assert address["sent_today"] == 0
+      assert address["limit_today"] == 100
+
+      assert {200, metrics} = http(context, :get, "/metrics")
+      assert metrics =~ ~r/sovite_ip_pool_sent_today\{[^}]*address="127.0.0.2"[^}]*\} 0/
+      assert metrics =~ ~r/sovite_ip_pool_limit_today\{[^}]*pool="main"[^}]*\} 100/
+      refute metrics =~ "sovite_cluster_nodes{"
+
+      assert capture_io(fn -> assert cli(context, ["cluster", "status"]) == 0 end) =~
+               "the cluster is not enabled"
+
+      assert capture_io(fn -> assert cli(context, ["ip-pool", "status"]) == 0 end) =~
+               ~r/main\n  127.0.0.2 +0\/100/
+
+      file = Path.join(context.dir, "shared.toml")
+      File.write!(file, "")
+
+      for args <- [
+            ["cluster", "config", "push", file],
+            ["cluster", "leave"],
+            ["cluster", "join", "b@h:1"]
+          ] do
+        assert capture_io(:stderr, fn -> assert cli(context, args) == 1 end) =~
+                 "the cluster is not enabled"
+      end
+
+      assert capture_io(:stderr, fn ->
+               assert cli(context, ["cluster", "config", "push", "/nonexistent"]) == 1
+             end) =~ "cannot read /nonexistent"
+
+      assert capture_io(:stderr, fn -> assert cli(context, ["cluster", "nope"]) == 64 end) =~
+               "Usage"
+
+      assert {409, _} = http(context, :post, "/api/cluster/config")
+    end
+
     test "lists, shows, holds, releases, and deletes queued messages", context do
       context = start_mta(context)
       id = send_mail(context)

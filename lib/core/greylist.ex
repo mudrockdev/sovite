@@ -10,7 +10,8 @@ defmodule Sovite.Core.Greylist do
   retry; most spam bots do not.
 
   If the database fails, the recipient passes: greylisting must never
-  lose mail.
+  lose mail. In a cluster whose nodes have their own SQLite databases,
+  entries go to the other nodes (`Sovite.Core.Cluster.Sync`).
 
   As a process, it deletes expired entries every hour.
 
@@ -25,18 +26,32 @@ defmodule Sovite.Core.Greylist do
   require Logger
 
   alias Sovite.Abuse.Greylist, as: Rules
+  alias Sovite.Core.Cluster.Sync
   alias Sovite.Core.Repo.Tables.GreylistEntries
 
   @cleanup_interval 3_600_000
 
+  @shared [
+    :triplet,
+    :client_network,
+    :sender,
+    :recipient,
+    :first_seen,
+    :last_seen,
+    :passed_at,
+    :expires_at
+  ]
+
   @doc "Greylisting options from the config, or `nil` when it is off."
   @spec opts(Sovite.Core.Config.t(), Sovite.Core.Repo.t() | nil) :: map() | nil
-  def opts(%{greylist: %{enabled: true} = greylist}, repo) when repo != nil,
+  def opts(%{greylist: %{enabled: true} = greylist} = config, repo) when repo != nil,
     do: %{
       repo: repo,
       delay: greylist.delay,
       retry_window: greylist.retry_window,
-      max_age: greylist.max_age
+      max_age: greylist.max_age,
+      # Nodes with their own databases share entries.
+      sync: Sync.greylist?(config)
     }
 
   def opts(_config, _repo), do: nil
@@ -69,7 +84,8 @@ defmodule Sovite.Core.Greylist do
     fields = %{triplet: key, client_network: network, sender: sender, recipient: recipient}
 
     case GreylistEntries.put(opts.repo, Map.merge(entry, fields)) do
-      {:ok, _entry} ->
+      {:ok, stored} ->
+        if opts[:sync], do: Sync.greylist(Map.take(stored, @shared))
         deferred(verdict, fields)
 
       {:error, %{errors: [triplet: _]}} when stored == nil ->

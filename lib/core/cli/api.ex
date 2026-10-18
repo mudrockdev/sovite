@@ -12,7 +12,7 @@ defmodule Sovite.Core.CLI.API do
   Sends a request. Returns `{:ok, status, body}` with the decoded JSON
   body, or `{:error, text}`.
   """
-  def request(config, method, path) do
+  def request(config, method, path, body \\ %{}) do
     admin = config.admin
 
     with true <- admin.enabled || {:error, "the admin API is disabled ([admin] enabled = false)"},
@@ -27,7 +27,7 @@ defmodule Sovite.Core.CLI.API do
 
       request =
         if method == :post,
-          do: {url, headers, ~c"application/json", "{}"},
+          do: {url, headers, ~c"application/json", JSON.encode!(body)},
           else: {url, headers}
 
       http_opts = [timeout: @timeout, connect_timeout: 5_000, ssl: ssl_opts(config)]

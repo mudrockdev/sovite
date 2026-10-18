@@ -90,7 +90,8 @@ defmodule Sovite.Core.Web do
              name: penalty,
              max_failures: config.auth.max_failures,
              window: config.auth.failure_window,
-             ban_time: config.auth.ban_time},
+             ban_time: config.auth.ban_time,
+             replicate: config.cluster.enabled},
             id: {Sovite.Abuse.Penalty, penalty}
           ),
           listener_spec(admin, opts, runtime)

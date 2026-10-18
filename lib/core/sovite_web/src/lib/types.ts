@@ -91,3 +91,35 @@ export type Trace = { queue_ids: string[]; lines: string[]; queued: MessageDetai
 
 /** A setting: key, value as TOML, and whether the value is the default. */
 export type Setting = [key: string, value: string, isDefault: boolean];
+
+export type ClusterMember = {
+	node: string;
+	status: 'self' | 'up' | 'down';
+	since: string | null;
+	hostname?: string;
+	version?: string;
+	uptime?: number;
+	queue?: Record<QueueName, number>;
+};
+
+export type ClusterStatus =
+	| { enabled: false }
+	| {
+			enabled: true;
+			node: string;
+			members: ClusterMember[];
+			shared_config: { version: number; origin: string } | null;
+			queue: { copies: Record<string, number>; taken_over: Record<string, number> };
+	  };
+
+export type IPPool = {
+	name: string;
+	overflow: string | null;
+	addresses: {
+		address: string;
+		node: string | null;
+		helo: string | null;
+		sent_today: number;
+		limit_today: number | null;
+	}[];
+};

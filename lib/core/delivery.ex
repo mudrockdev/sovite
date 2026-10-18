@@ -116,8 +116,9 @@ defmodule Sovite.Core.Delivery do
       transaction: 3
     ]
 
+  alias Sovite.Core.Cluster.Placement
   alias Sovite.Core.Delivery.{LMTP, Local, TLSPolicy}
-  alias Sovite.Core.Router
+  alias Sovite.Core.{IPPools, Router}
   alias Sovite.DNS.MX
   alias Sovite.Message.{Headers, Received, Trace}
   alias Sovite.Queue.{Record, Spool}
@@ -188,7 +189,8 @@ defmodule Sovite.Core.Delivery do
           delimiter: String.t(),
           tmp_dir: Path.t(),
           mta_sts: GenServer.server() | nil,
-          tls_reports: Sovite.Core.Repo.t() | nil
+          tls_reports: Sovite.Core.Repo.t() | nil,
+          ip_pools: atom() | nil
         }
 
   @type tls_level :: :none | :may | :encrypt | :verify | :dane
@@ -238,6 +240,18 @@ defmodule Sovite.Core.Delivery do
   defp deliver(%{destination: %{transport: :smtp}} = job, connection, opts),
     do: smtp(job, connection, opts)
 
+  # Another node of the cluster delivers these (Sovite.Core.Cluster.Placement).
+  defp deliver(%{destination: %{transport: :cluster, node: node}} = job, _connection, _opts) do
+    case Placement.hand_over(job, node) do
+      {:ok, text} ->
+        delivered = details("2.0.0", text, node, false)
+        {Enum.map(job.recipients, &{&1, :delivered, delivered}), node, nil}
+
+      {:error, text} ->
+        {all(job, "4.4.0", text), nil, nil}
+    end
+  end
+
   defp deliver(job, connection, opts) do
     case loops(job) do
       {:ok, []} ->
@@ -284,15 +298,43 @@ defmodule Sovite.Core.Delivery do
     smtp(job, nil, opts)
   end
 
-  defp smtp(job, {client, host}, opts) do
-    case transaction(job, client, host) do
-      # The cached connection went away; start over with a fresh one.
-      {:retry, _error} -> smtp(job, nil, opts)
-      {results, remote, connection} -> {results, remote, connection}
+  # A reused connection from an IP pool address that is full now.
+  defp smtp(%{destination: %{pool: _}} = job, {client, host}, opts) do
+    local = Client.local_address(client)
+
+    if local == nil or IPPools.room?(opts.ip_pools, local) do
+      reused(job, client, host, opts)
+    else
+      Client.quit(client)
+      smtp(job, nil, opts)
     end
   end
 
-  defp smtp(job, nil, opts) do
+  defp smtp(job, {client, host}, opts), do: reused(job, client, host, opts)
+
+  # An IP pool: addresses picked for this connection.
+  defp smtp(%{destination: %{pool: pool} = destination} = job, nil, opts) when is_binary(pool) do
+    case IPPools.source(opts.ip_pools, pool) do
+      {:ok, %{source: source, helo: helo}} ->
+        destination = %{destination | source: source} |> Map.put(:helo, helo)
+        connect(%{job | destination: destination}, opts)
+
+      {:error, text} ->
+        {all(job, "4.7.0", text), nil, nil}
+    end
+  end
+
+  defp smtp(job, nil, opts), do: connect(job, opts)
+
+  defp reused(job, client, host, opts) do
+    case transaction(job, client, host) do
+      # The cached connection went away; start over with a fresh one.
+      {:retry, _error} -> smtp(job, nil, opts)
+      result -> counted(result, job, Client.local_address(client), opts)
+    end
+  end
+
+  defp connect(job, opts) do
     ctx = TLSPolicy.context(job, opts)
 
     case addresses(job.destination, ctx.dnssec, opts) do
@@ -322,7 +364,7 @@ defmodule Sovite.Core.Delivery do
 
   defp try_addresses(job, [{host, ip, port, secure} | rest], _last_error, ctx, opts) do
     remote = remote_name(host, ip)
-    opts = %{opts | client: source_option(opts.client, job.destination, ip)}
+    opts = %{opts | client: source_option(opts.client, job.destination, ip, opts.hostname)}
 
     result =
       case TLSPolicy.plan(ctx, host, port, secure, opts) do
@@ -344,9 +386,20 @@ defmodule Sovite.Core.Delivery do
 
     case result do
       {:retry, error} -> try_addresses(job, rest, error, ctx, opts)
-      result -> result
+      result -> counted(result, job, opts.client[:local_address], opts)
     end
   end
+
+  # A message sent from an address of an IP pool counts for the address.
+  defp counted({results, _remote, _connection} = result, %{destination: %{pool: _}}, local, opts)
+       when local != nil and opts.ip_pools != nil do
+    if Enum.any?(results, &match?({_rcpt, :delivered, _details}, &1)),
+      do: IPPools.count(opts.ip_pools, local, 1)
+
+    result
+  end
+
+  defp counted(result, _job, _local, _opts), do: result
 
   # RFC 8689 §4.2.1: the next server must support REQUIRETLS too.
   defp requiretls(%{requiretls: true}, client, remote) do
@@ -372,10 +425,17 @@ defmodule Sovite.Core.Delivery do
 
   defp deliverby(_job, client, _remote), do: {:ok, client}
 
-  # Connect from the destination's source address for this family, if any.
-  defp source_option(client, %{source: source}, ip) do
+  # Connect from the destination's source address for this family, if
+  # any, and with its EHLO name, for an IP pool address that has one.
+  defp source_option(client, %{source: source} = destination, ip, hostname) do
     family = if tuple_size(ip) == 4, do: :ipv4, else: :ipv6
     client = Keyword.delete(client, :local_address)
+
+    client =
+      case destination do
+        %{helo: helo} -> Keyword.put(client, :helo, Map.get(helo, family, hostname))
+        _ -> client
+      end
 
     case Map.fetch(source || %{}, family) do
       {:ok, local} -> Keyword.put(client, :local_address, local)

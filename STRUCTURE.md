@@ -67,12 +67,13 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | `queue/` | `Sovite.Queue` | Durable mail spool with storage behaviour, crash recovery, retry scheduler |
 | `listener/` | `Sovite.Listener` | TCP/TLS listener with connection limits, PROXY protocol support, draining, live option updates, and inherited sockets |
 | `tracing/` | `Sovite.Tracing` | OpenTelemetry traces from `:telemetry` events, sampled, batched, and exported with OTLP/HTTP (JSON) |
+| `cluster/` | `Sovite.Cluster` | A cluster of BEAM nodes over Partisan, without Distributed Erlang: TLS 1.3 with mutual authentication, joining known peers, messages and calls to named processes on other nodes, node up/down notifications. Partisan is one per VM and configured through its application env, so this component is the exception to the rules on configuration and global state |
 
 ### Layer 3: Sovite Only
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), email authentication of received and sent mail (SPF, DKIM, ARC, DMARC, SRS) and DMARC reports, transport security policies (DANE, MTA-STS cache, REQUIRETLS) and TLS-RPT reports, anti-abuse (postscreen-like client screen, greylisting, rate limits, suspension of compromised accounts), milters, policy servers, after-queue content filters, bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration, operations (web UI and admin API on Plug and Cowboy, metrics and trace definitions, config reload, graceful drain, systemd, queue inspection, message traces and reports from the logs) |
+| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), email authentication of received and sent mail (SPF, DKIM, ARC, DMARC, SRS) and DMARC reports, transport security policies (DANE, MTA-STS cache, REQUIRETLS) and TLS-RPT reports, anti-abuse (postscreen-like client screen, greylisting, rate limits, suspension of compromised accounts), milters, policy servers, after-queue content filters, bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration, operations (web UI and admin API on Plug and Cowboy, metrics and trace definitions, config reload, graceful drain, systemd, queue inspection, message traces and reports from the logs), clustering (shared configuration, shared rate limits, bans, and greylisting, queue copies and takeover, placement of deliveries), tenants, and outbound IP pools with warm-up schedules |
 
 New components are added as new folders, placed in the lowest layer their dependencies allow.
 
@@ -103,6 +104,10 @@ lib/core/
   control.ex         # Sovite.Core.Control: config reload, graceful drain, systemd notifications, status
   web.ex             # Sovite.Core.Web: the web server (Plug and Cowboy): UI, admin API, protections
   web/               # its router, API, pages, and security plugs
+  cluster.ex         # Sovite.Core.Cluster: runs as a cluster node; the shared configuration
+  cluster/           # sharing anti-abuse state, queue copies and takeover, which node delivers what
+  tenants.ex         # Sovite.Core.Tenants: tenants, their limits and keys
+  ip_pools.ex        # Sovite.Core.IPPools: outbound IP pools and warm-up schedules
   metrics.ex         # Sovite.Core.Metrics: the Prometheus metrics
   tracing.ex         # Sovite.Core.Tracing: the OpenTelemetry spans
   queue_info.ex      # Sovite.Core.QueueInfo: reading the queue for sovitectl and the API

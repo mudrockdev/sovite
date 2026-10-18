@@ -45,4 +45,21 @@ defmodule Sovite.Abuse.PenaltyTest do
     Process.sleep(80)
     assert :ets.tab2list(name) == []
   end
+
+  test "failures recorded on one node count on another" do
+    a = start(max_failures: 2, window: 60_000, ban_time: 60_000, replicate: true)
+    b = start(max_failures: 2, window: 60_000, ban_time: 60_000)
+
+    assert Penalty.failure(a, :ip) == :ok
+    assert Penalty.failure(a, :other) == :ok
+    assert Penalty.failure(a, :other) == :banned
+    assert Penalty.take_deltas(a) == %{ip: 1, other: 2}
+    assert Penalty.take_deltas(a) == %{}
+
+    assert Penalty.merge(b, %{ip: 1, other: 2, bad: -1}) == :ok
+    assert Penalty.failure(b, :ip) == :banned
+    assert Penalty.banned?(b, :other)
+    refute Penalty.banned?(b, :bad)
+    assert Penalty.take_deltas(b) == %{}
+  end
 end

@@ -29,7 +29,19 @@ defmodule Sovite.Abuse.RateLimit do
     * `:cleanup_interval` - milliseconds between purges of old buckets.
       Defaults to one minute.
     * `:clock` - a zero-arity function returning the current time in
-      milliseconds. For tests.
+      milliseconds. Defaults to the time since the VM started.
+    * `:replicate` - when `true`, counted events are also kept as
+      deltas, for `take_deltas/1`. Defaults to `false`.
+
+  ## Sharing counts
+
+  Several nodes can enforce one limit together: each takes the deltas
+  of its table (`take_deltas/1`) now and then, and sends them to the
+  others, which add them to theirs (`merge/2`). The nodes need the same
+  `:clock`, such as `&System.os_time(:millisecond)/0` on hosts with
+  synchronized clocks, so that their buckets line up. Events counted
+  elsewhere and not yet merged are missing from the counts, so limits
+  are a little looser than on one node.
 
   ## Telemetry
 
@@ -47,7 +59,7 @@ defmodule Sovite.Abuse.RateLimit do
   @doc "Starts the rate limiter."
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
-    opts = Keyword.validate!(opts, [:name, :clock, cleanup_interval: 60_000])
+    opts = Keyword.validate!(opts, [:name, :clock, cleanup_interval: 60_000, replicate: false])
     GenServer.start_link(__MODULE__, opts, name: Keyword.fetch!(opts, :name))
   end
 
@@ -78,6 +90,7 @@ defmodule Sovite.Abuse.RateLimit do
 
       :limited
     else
+      delta(name, row, count)
       :ok
     end
   end
@@ -93,6 +106,7 @@ defmodule Sovite.Abuse.RateLimit do
     bucket = div(now, window)
     row = {key, window, bucket}
     current = :ets.update_counter(name, row, {2, count}, {row, 0, 0})
+    delta(name, row, count)
     div(scaled_estimate(previous(name, key, window, bucket), current, now, window), window)
   end
 
@@ -109,6 +123,36 @@ defmodule Sovite.Abuse.RateLimit do
       end
 
     div(scaled_estimate(previous(name, key, window, bucket), current, now, window), window)
+  end
+
+  @doc """
+  Returns the events counted since the last call, as `{key, window,
+  bucket, count}` tuples, for `merge/2` on other nodes. Empty unless
+  started with `replicate: true`.
+  """
+  @spec take_deltas(atom()) :: [{term(), pos_integer(), integer(), pos_integer()}]
+  def take_deltas(name) do
+    for {{:delta, key, window, bucket} = row, count} <-
+          :ets.match_object(name, {{:delta, :_, :_, :_}, :_}),
+        count > 0 do
+      # Events counted meanwhile stay for the next call.
+      :ets.update_counter(name, row, {2, -count})
+      {key, window, bucket, count}
+    end
+    |> tap(fn _ -> :ets.match_delete(name, {{:delta, :_, :_, :_}, 0}) end)
+  end
+
+  @doc "Adds events counted on other nodes (see `take_deltas/1`)."
+  @spec merge(atom(), [{term(), pos_integer(), integer(), pos_integer()}]) :: :ok
+  def merge(name, deltas) do
+    for {key, window, bucket, count} <- deltas,
+        is_integer(window) and window > 0 and is_integer(bucket) and is_integer(count) and
+          count > 0 do
+      row = {key, window, bucket}
+      :ets.update_counter(name, row, {2, count}, {row, 0, 0})
+    end
+
+    :ok
   end
 
   @doc "Forgets every window of `key`."
@@ -136,6 +180,7 @@ defmodule Sovite.Abuse.RateLimit do
 
     clock = Keyword.get(opts, :clock)
     if clock, do: :ets.insert(table, {:clock, clock})
+    if Keyword.get(opts, :replicate), do: :ets.insert(table, {:replicate, true})
 
     state = %{
       table: table,
@@ -152,7 +197,9 @@ defmodule Sovite.Abuse.RateLimit do
     now = if state.clock, do: state.clock.(), else: now()
 
     :ets.select_delete(state.table, [
-      {{{:_, :"$1", :"$2"}, :_, :_}, [{:<, :"$2", {:-, {:div, now, :"$1"}, 1}}], [true]}
+      {{{:_, :"$1", :"$2"}, :_, :_}, [{:<, :"$2", {:-, {:div, now, :"$1"}, 1}}], [true]},
+      # Deltas nobody took.
+      {{{:delta, :_, :"$1", :"$2"}, :_}, [{:<, :"$2", {:-, {:div, now, :"$1"}, 1}}], [true]}
     ])
 
     schedule(state)
@@ -160,6 +207,13 @@ defmodule Sovite.Abuse.RateLimit do
   end
 
   defp schedule(state), do: Process.send_after(self(), :cleanup, state.cleanup_interval)
+
+  defp delta(name, {key, window, bucket}, count) do
+    if :ets.member(name, :replicate) do
+      row = {:delta, key, window, bucket}
+      :ets.update_counter(name, row, {2, count}, {row, 0})
+    end
+  end
 
   defp previous(name, key, window, bucket) do
     case :ets.lookup(name, {key, window, bucket - 1}) do

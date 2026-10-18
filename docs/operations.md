@@ -1,6 +1,6 @@
 # Operations
 
-Running Sovite: the queue, the configuration, message traces and log reports, the web UI and admin API, metrics and traces, stopping and reloading, systemd, and packages.
+Running Sovite: the queue, the configuration, message traces and log reports, the web UI and admin API, metrics and traces, stopping and reloading, clusters, systemd, and packages.
 
 ## `sovitectl`
 
@@ -15,6 +15,8 @@ Running Sovite: the queue, the configuration, message traces and log reports, th
 | `route ADDRESS [SENDER]` | the config file and the database | no |
 | `status` | | yes |
 | `trace ID [LOG...]`, `report [LOG...]` | log files | no |
+| `cluster status`, `join NODE`, `leave`, `config push FILE` | | yes |
+| `ip-pool status` | | yes |
 
 A command that needs the server prints `sovite is not running` when it cannot reach it; `status` then exits with `3`.
 
@@ -144,6 +146,11 @@ curl -H "Authorization: Bearer $(cat /var/lib/sovite/admin.token)" http://127.0.
 | `POST /api/config/reload` | Reload the config file: `200`, `422` with the errors of an invalid file, or `409` for changes that need a restart |
 | `GET /api/route?address=A&sender=S` | As `sovitectl route` |
 | `GET /api/trace?id=ID` | As `sovitectl trace`, with `[log] directory` |
+| `GET /api/cluster` | The cluster's nodes, as this one sees them, with the version, host name, uptime, and queue sizes of those connected; the shared configuration's version; the copies of other nodes' messages held here. `{"enabled": false}` without a cluster |
+| `POST /api/cluster/config` | `{"content": "TOML"}`: send it to every node as the shared configuration: `200` with the new `version`, or `422` with the `errors` it has on this node |
+| `POST /api/cluster/join` | `{"peer": "name@host:port"}`: join the cluster that node is in |
+| `POST /api/cluster/leave` | Drain this node, hand its queue to the others, and leave the cluster |
+| `GET /api/ip_pools` | The IP pools, with the messages each address sent today and today's limit |
 | `GET /metrics` | Prometheus metrics |
 
 Responses are JSON; errors are `{"error": "..."}`.
@@ -190,6 +197,94 @@ Give the service manager more time than `shutdown_timeout` before it kills the s
 - The queue manager takes its new settings for the messages it picks up from then on.
 - Everything else whose settings changed is restarted with them.
 - `[database]` and `queue.directory` changes need a restart: the reload is refused.
+
+## Clusters
+
+Sovite servers can form a cluster (`[cluster]`, see [the reference](configuration.md#clusters-cluster)). The nodes:
+
+- share a configuration file, pushed to all of them at once;
+- share rate limits, tenant limits, failed-login bans, suspended accounts, and with SQLite, greylisting;
+- keep copies of each other's queued messages, and deliver those of a node that stays down;
+- hand mail to the node whose IP pool it goes out from, or, with `destination_affinity`, to the node that owns its destination;
+- hand their queue to the others when they leave.
+
+They talk over [Partisan](https://hexdocs.pm/partisan), on port 4370, with TLS 1.3 both ways: each node has a certificate from the cluster's own CA, and accepts only peers with one. There is no plaintext mode: a peer can send any node any message, so the CA must sign the cluster's certificates and nothing else, and the port should only be reachable from the other nodes (a private network, or firewall rules). Distributed Erlang stays off.
+
+### Setting one up
+
+A CA, and a certificate for each node (here with OpenSSL; any CA tooling works):
+
+```sh
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 \
+  -subj "/CN=Sovite cluster CA" -keyout ca.key -out ca.pem
+for node in mx1 mx2 mx3; do
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+    -subj "/CN=$node" -keyout $node.key -out $node.csr
+  openssl x509 -req -in $node.csr -CA ca.pem -CAkey ca.key -days 825 -out $node.pem
+done
+```
+
+Copy `ca.pem` and each node's `.pem` and `.key` to `/etc/sovite/cluster/` on that node, readable by the `sovite` user, and keep `ca.key` offline. Then, on each node:
+
+```toml
+[cluster]
+enabled = true
+node_name = "mx1@10.0.0.1"
+address = "10.0.0.1"
+seeds = ["mx2@10.0.0.2"]
+cert_file = "/etc/sovite/cluster/mx1.pem"
+key_file = "/etc/sovite/cluster/mx1.key"
+ca_file = "/etc/sovite/cluster/ca.pem"
+shared_config = "/var/lib/sovite/cluster.toml"
+```
+
+Restart the nodes; they join each other within `join_interval`. `sovitectl cluster status` shows them:
+
+```
+Node:           mx1@10.0.0.1
+Shared config:  version 3, from mx2@10.0.0.2
+
+-Node-                          -State- -Details-
+mx1@10.0.0.1                    self
+mx2@10.0.0.2                    up      mx2.example.com, sovite 0.2.0, active=0 corrupt=0 deferred=4 hold=0 incoming=0, since 2026-10-18T09:12:44Z
+```
+
+A new node needs only one seed that is up: `sovitectl cluster join mx2@10.0.0.2:4370` joins a running node without a restart.
+
+### The shared configuration
+
+Put the settings all nodes share in a file, and send it to every node:
+
+```sh
+sovitectl cluster config push /etc/sovite/cluster.toml
+```
+
+Each node checks it with its own config file, writes it to `cluster.shared_config`, and reloads, as `sovitectl config reload` does. A node that cannot run with it keeps its version and logs `cluster.config.rejected`; the push itself fails when the node it is sent from cannot. A node's own file wins, so leave in it what is its own: `[server] hostname`, `[[listener]]`, `[cluster]`, `[database]`, and paths. Nodes that were down, or join later, get the newest version when they connect.
+
+### When a node goes down
+
+Each queued message is copied to `queue_replicas` other nodes when it is queued, and again when it is deferred or held, so the copy has its delivery records; the copies go when the message is done. After a node has been down for `handover_after`, the first of each message's copy holders that is up queues it and delivers it, under the same queue ID (`cluster.queue.taken_over`). When the node comes back, it is told which of its messages were taken over, and deletes them.
+
+SMTP delivers mail at least once, and a cluster can deliver some messages twice: when a node is cut off from the others without being down, when it comes back while its messages are being taken over, or when a copy missed its last update. A longer `handover_after` makes this rarer; a node that is down for maintenance should leave the cluster instead.
+
+### Leaving
+
+```sh
+sovitectl cluster leave
+systemctl stop sovite
+```
+
+`leave` drains the node (it stops accepting and delivering mail), hands every queued message to the other nodes, and takes the node out of the cluster. Messages that could not be handed over stay in its queue.
+
+### IP pools in a cluster
+
+An `[[ip_pool.address]]` with `node` is used by that node only. Mail whose pool has no address on the node it was queued on is handed to a node that has one, as a new message with only those recipients: its recipients count as delivered on the first node (`handed to cluster node ... as ID` in its log), and the second node delivers it and sends the notifications. `sovitectl ip-pool status` shows what each address sent today, and its limit:
+
+```
+shared (overflow: spare)
+  192.0.2.10                                     812  on mx1@10.0.0.1
+  192.0.2.11                                  37/200  on mx2@10.0.0.2
+```
 
 ## systemd
 

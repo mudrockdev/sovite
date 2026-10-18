@@ -18,6 +18,7 @@
 		{ href: resolve('/queue'), id: '/queue', label: m.nav_queue },
 		{ href: resolve('/route'), id: '/route', label: m.nav_route },
 		{ href: resolve('/trace'), id: '/trace', label: m.nav_trace },
+		{ href: resolve('/cluster'), id: '/cluster', label: m.nav_cluster },
 		{ href: resolve('/config'), id: '/config', label: m.nav_config }
 	];
 

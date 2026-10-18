@@ -324,6 +324,10 @@ Outbound delivery over SMTP, for the `smtp` transport.
 | `tls_ca_file` | absolute path | system CAs | PEM file of CAs to trust for `verify`. |
 | `relayhost_username` | string | unset | Log in to the relay host with SASL (`SCRAM-SHA-256`, `PLAIN`, or `LOGIN`, whichever it offers first). Credentials are only sent over TLS. |
 | `relayhost_password` | string | unset | Password for `relayhost_username`. |
+| `source_address` | array of IP addresses | `[]` | Connect from these local addresses: at most one IPv4 and one IPv6 address. The sender relays table (`sovitectl sender-relay`) can give senders their own. |
+| `ip_pool` | name | unset | Send from the addresses of this [IP pool](#ip-pools-ip_pool), instead of `source_address`. A tenant's pool comes first. |
+| `connection_cache` | boolean | `true` | Keep a connection open after a delivery, for the next message to the same destination, as Postfix's connection cache does. A delivery that ends with another message ready for the destination always reuses its connection. |
+| `connection_cache_time` | duration | `2s` | How long an idle connection is kept. It counts towards `destination_concurrency` and `max_deliveries` meanwhile, but is closed at once when another destination waits for a free slot. With `cluster.destination_affinity`, one node sends all of a destination's mail, so the cluster shares its connections. |
 | `chunking` | boolean | `true` | Send messages in `BDAT` chunks (RFC 3030) to servers that offer `CHUNKING`. Binary messages always are, and only go to servers that offer `BINARYMIME` (`5.6.3` otherwise). |
 
 ### How mail is delivered
@@ -962,6 +966,118 @@ OpenTelemetry traces of SMTP sessions and deliveries, sent with OTLP over HTTP (
 | `headers` | table of strings | `{}` | Extra request headers, such as `{ authorization = "Bearer ..." }`. |
 | `sample_ratio` | number, 0 to 1 | `1.0` | The share of traces sent. All the deliveries of one message are sampled together. |
 | `service_name` | string | `sovite` | The `service.name` resource attribute. |
+
+## Clusters: `[cluster]`
+
+Several Sovite servers can run as one cluster: they share their configuration, their rate limits, bans, and greylisting, keep copies of each other's queues, and deliver the mail of a node that stays down. Nodes talk over [Partisan](https://hexdocs.pm/partisan), not Distributed Erlang, on their own TCP port, with TLS 1.3 and mutual authentication. See [Operations](operations.md#clusters) for setting one up.
+
+```toml
+[cluster]
+enabled = true
+node_name = "mx1@10.0.0.1"
+address = "10.0.0.1"
+seeds = ["mx2@10.0.0.2", "mx3@10.0.0.3"]
+cert_file = "/etc/sovite/cluster/mx1.pem"
+key_file = "/etc/sovite/cluster/mx1.key"
+ca_file = "/etc/sovite/cluster/ca.pem"
+shared_config = "/var/lib/sovite/cluster.toml"
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Run as a cluster node. Needs `node_name`, `address`, `cert_file`, `key_file`, and `ca_file`. |
+| `node_name` | `name@host` | unset | This node's name, unique in the cluster. The host part is usually the node's address. |
+| `address` | IP address | unset | The address to accept other nodes on. They are told it, so it must be one they can reach: not `0.0.0.0`. |
+| `port` | integer | `4370` | The port to accept other nodes on. |
+| `seeds` | array of `name@host[:port]` | `[]` | Nodes to join, tried every `join_interval` until connected. Every node needs at least one other; the rest are learned from them. The port defaults to `port`. Host names are resolved on each try. |
+| `cert_file` | absolute path | unset | This node's certificate (PEM), signed by the cluster CA. |
+| `key_file` | absolute path | unset | Its private key. |
+| `ca_file` | absolute path | unset | The cluster CA: nodes accept only peers whose certificate it signed. Use a CA of its own, which signs nothing but the cluster's certificates. |
+| `join_interval` | duration | `10s` | How often to try the seeds that are not connected. |
+| `sync_interval` | duration | `1s` | How often nodes send each other what their rate limits counted, failed logins, suspended accounts, and greylist entries. |
+| `shared_config` | absolute path | unset | The cluster's shared configuration, kept up to date by the cluster: see below. |
+| `queue_replicas` | integer, 0 to 2 | `1` | Other nodes that keep a copy of each queued message. `0`: no copies, so the mail of a node that is down waits for it. |
+| `handover_after` | duration | `10m` | How long a node must stay down before the others deliver its messages from their copies. |
+| `destination_affinity` | boolean | `false` | Send all the cluster's mail for a destination (an MX domain or relay host) from one node, which keeps fewer, busier connections to it. Mail queued on another node is handed to it. |
+
+All but `seeds`, `join_interval`, `sync_interval`, `shared_config`, `queue_replicas`, `handover_after`, and `destination_affinity` need a restart.
+
+Rate limits shared by a cluster count by the wall clock, so keep the nodes' clocks in sync (NTP). Nodes with their own SQLite databases share greylist entries; nodes that share a PostgreSQL or MySQL database share every table already, which is the way to share domains, users, aliases, and the rest.
+
+### The shared configuration
+
+With `shared_config`, the settings of that file come first, and those of the node's own file override them: tables are merged key by key, other values replaced. Keep in the node's file what is its own (`[server]`, `[[listener]]`, `[cluster]`, `[database]`, paths), and put the rest in the shared file. `sovitectl cluster config push FILE` sends a new version of it to every node; each checks it with its own file, stores it, and reloads. A node that comes back or joins later gets the newest version. The shared file cannot have a `[cluster]` table.
+
+## Tenants: `[[tenant]]`
+
+Tenants are customers whose mail one server or cluster hosts, each with its own limits, DKIM keys, and IP pool.
+
+```toml
+[[tenant]]
+name = "acme"
+domains = ["acme.example"]
+users = ["relay-acme"]
+ip_pool = "acme"
+messages = "10000/1d"
+recipients = "50000/1d"
+max_message_size = "10M"
+max_recipients = 500
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `name` | name | required | Letters, digits, `_`, and `-`. Kept with each queued message. |
+| `domains` | array of domains | `[]` | The tenant's domains, with their subdomains. A domain belongs to one tenant only. |
+| `users` | array of strings | `[]` | Logins of the tenant, besides those in its domains (`user@acme.example`). |
+| `ip_pool` | name | unset | The [IP pool](#ip-pools-ip_pool) its mail goes out from, instead of `delivery.ip_pool`. |
+| `messages` | rate | unset | Messages per period for the whole tenant, such as `"10000/1d"`: `450 4.7.1` over it. |
+| `recipients` | rate | unset | Recipients per period for the whole tenant. |
+| `max_message_size` | size | unset | The largest message: `552 5.3.4` over it, at `MAIL` (with `SIZE`) or after the data. |
+| `max_recipients` | integer | unset | Recipients per message: `452 4.5.3` over it. |
+
+A message belongs to a tenant when the client logged in as one of its `users`, or with a login in one of its domains, or, for clients that logged in or are in `smtp.trusted_networks`, when the sender's domain is one of its domains. Mail from the internet belongs to no tenant.
+
+The DKIM keys (`[[dkim.key]]`) of a tenant's domains sign only that tenant's mail, so one customer cannot sign as another. Tenant limits come on top of `[rate_limit]`, and are shared by a cluster.
+
+## IP pools: `[[ip_pool]]`
+
+The source addresses mail goes out from, with warm-up schedules and daily limits for new addresses. SMTP deliveries use the pool of their tenant, else `delivery.ip_pool`; the sender relays table comes first.
+
+```toml
+[[ip_pool]]
+name = "shared"
+overflow = "spare"
+
+[[ip_pool.address]]
+address = "192.0.2.10"
+helo = "mta1.example.com"
+
+[[ip_pool.address]]
+address = "192.0.2.11"
+helo = "mta2.example.com"
+warmup_start = 2026-10-01
+warmup = [50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
+daily_limit = 100000
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `name` | name | required | The pool's name. |
+| `overflow` | name | unset | The pool to use when no address of this one has room left today. Without it, the delivery is deferred (`4.7.0`) until the next day. |
+| `address` | array of tables | required | The pool's addresses, below. |
+
+Each `[[ip_pool.address]]`:
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `address` | IP address | required | A local address of the node that has it. |
+| `helo` | host name | `server.hostname` | The `EHLO` name of connections from it: the name its reverse DNS gives. |
+| `node` | node name | this node | In a cluster, the node that has the address. Mail for a pool with no address on this node goes to a node that has one. |
+| `warmup_start` | date | unset | The first day of the warm-up schedule. The address is not used before it. |
+| `warmup` | array of integers | `[]` | Messages per day, from `warmup_start` on: the first entry for that day, the second for the next, and so on. |
+| `daily_limit` | integer | unset | Messages per day once the schedule is over, or without one. |
+
+Each connection picks one IPv4 and one IPv6 address with room left today (UTC), the one with the most room left as a share of its limit first. A message counts once for the address it went out from. Counts are kept in the database (`ip_address_counts`), and shown by `sovitectl ip-pool status`, the web UI, and the `sovite_ip_pool_sent_today` metric.
 
 ---
 

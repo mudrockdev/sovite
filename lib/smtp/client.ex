@@ -341,6 +341,10 @@ defmodule Sovite.SMTP.Client do
 
   defp auth_loop(client, _module, _state, reply), do: {:error, client, {:rejected, reply}}
 
+  @doc "Returns the local address the connection was asked to use (`:local_address`), if any."
+  @spec local_address(t()) :: :inet.ip_address() | nil
+  def local_address(%__MODULE__{opts: opts}), do: opts[:local_address]
+
   @doc "Returns the server's address and port."
   @spec peer(t()) :: {address(), :inet.port_number()}
   def peer(%__MODULE__{address: address, port: port}), do: {address, port}
