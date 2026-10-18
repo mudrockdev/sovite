@@ -32,6 +32,8 @@ defmodule Sovite.MixProject do
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
+  # `mix dev` and `mix dev.mta`, kept out of the package.
+  defp elixirc_paths(:dev), do: ["lib", "development/tasks"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp package do
@@ -87,7 +89,7 @@ defmodule Sovite.MixProject do
     [
       plt_local_path: "priv/plts",
       plt_core_path: "priv/plts",
-      plt_add_apps: [:mix, :ex_unit]
+      plt_add_apps: [:mix, :ex_unit, :iex]
     ]
   end
 

@@ -8,8 +8,9 @@ import { sveltekit } from '@sveltejs/kit/vite';
 export default defineConfig({
 	server: {
 		proxy: {
-			'/api': { target: 'http://127.0.0.1:9025', changeOrigin: false },
-			'/metrics': { target: 'http://127.0.0.1:9025', changeOrigin: false }
+			// The MTA's admin API; `mix dev` sets SOVITE_API from its config.
+			'/api': { target: process.env.SOVITE_API ?? 'http://127.0.0.1:9025', changeOrigin: false },
+			'/metrics': { target: process.env.SOVITE_API ?? 'http://127.0.0.1:9025', changeOrigin: false }
 		}
 	},
 	plugins: [

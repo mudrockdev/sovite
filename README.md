@@ -32,9 +32,12 @@ sovitectl access set client 192.0.2 REJECT spam source   # used by client_access
 Run the MTA locally:
 
 ```sh
-cp rel/overlays/etc/sovite.toml.example sovite.toml   # edit as needed
-SOVITE_START_MTA=1 SOVITE_CONFIG=./sovite.toml iex -S mix
+mix dev.mta         # the MTA: SMTP on 127.0.0.1:2525, web UI and admin API on 127.0.0.1:9025
+mix dev             # the MTA and the web UI's dev server (bun dev, http://localhost:5173)
+iex -S mix dev.mta  # with a shell
 ```
+
+They use `--config PATH`, `$SOVITE_CONFIG`, or `sovite.toml` in the project if one of them is given; otherwise they write `development/sovite.toml`, with data in `development/`, local mail for `sovite.test` in Maildir folders there, and other mail relayed to `127.0.0.1:1025` for a mail catcher such as Mailpit, never to the internet. They print the admin token to sign in to the web UI with. The web UI's own checks run in the project root: `bun run check`, `bun run lint`, `bun run test`.
 
 Build a release:
 
