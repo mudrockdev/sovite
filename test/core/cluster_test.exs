@@ -356,4 +356,47 @@ defmodule Sovite.Core.ClusterTest do
     assert_receive {:fake_mta, ^mta, {:peer, {127, 0, 0, 5}}}, 10_000
     assert_receive {:fake_mta, ^mta, {:message, %{rcpt_to: ["b@example.net"]}}}, 10_000
   end
+
+  test "a node without the mailbox part hands hosted mail to a node that runs it", context do
+    store = Path.join(context.dir, "mail")
+
+    %{a: a, b: b} =
+      nodes(context, [
+        {"a",
+         source: 2, toml: ~s([stack]\nmailbox = false\n[domains]\nhosted = ["hosted.example"])},
+        {"b",
+         source: 3,
+         seeds: ["a"],
+         toml: ~s([stack]\nmta = false\n[maildir]\nmailbox = "#{store}/{domain}/{user}")}
+      ])
+
+    a = start_node(a)
+    b = start_node(b)
+    connected(a, b)
+
+    # Each node tells the others which parts it runs.
+    ClusterPeers.eventually(fn ->
+      call(a, Sovite.Core.Stack, :nodes, [:mailbox]) == [b.node]
+    end)
+
+    ClusterPeers.eventually(fn -> call(b, Sovite.Core.Stack, :nodes, [:mta]) == [a.node] end)
+
+    # The mailbox, in a's database (one database per node here, shared in production).
+    assert call(a, CLI, :run, [["--config", a.path, "mailbox", "add", "alice@hosted.example"]]) ==
+             0
+
+    id = spool(a, ["alice@hosted.example"])
+    call(a, Sovite.Core.MTA.QueueManager, :notify, [Sovite.Core.MTA.QueueManager, id])
+
+    # b's store has the message, with the trace fields of final delivery.
+    ClusterPeers.eventually(fn -> Path.wildcard("#{store}/hosted.example/alice/new/*") != [] end)
+    [file] = Path.wildcard("#{store}/hosted.example/alice/new/*")
+
+    assert File.read!(file) =~
+             ~r/\AReturn-Path: <a@sender.example>\r\nDelivered-To: alice@hosted.example\r\n/
+
+    ClusterPeers.eventually(fn ->
+      not queued?(a, :incoming, id) and not queued?(a, :active, id)
+    end)
+  end
 end

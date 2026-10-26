@@ -11,8 +11,27 @@ defmodule Sovite.Core.Config.RoutingRules do
     domain_errors(values.domains) ++
       restriction_errors(values.restrictions) ++
       source_errors(values.delivery.source_address) ++
-      pipe_errors(values.routing, values.pipe)
+      pipe_errors(values.routing, values.pipe) ++
+      mailbox_errors(values)
   end
+
+  # Without the mailbox part on this node or in a cluster, nothing takes
+  # mail for the mailbox transport: hosted mail goes elsewhere, such as
+  # to Dovecot over LMTP.
+  defp mailbox_errors(%{stack: %{mta: true, mailbox: false}, cluster: %{enabled: false}} = values) do
+    if values.routing.mailbox_transport.transport == :mailbox,
+      do: [
+        %Error{
+          path: ["routing", "mailbox_transport"],
+          reason:
+            "the mailbox part is off ([stack] mailbox = false): deliver hosted mail " <>
+              ~s(another way, such as "lmtp:unix:/run/dovecot/lmtp")
+        }
+      ],
+      else: []
+  end
+
+  defp mailbox_errors(_values), do: []
 
   # A pipe transport must name a [pipe.<name>] section.
   defp pipe_errors(routing, pipes) do

@@ -2,6 +2,7 @@ defmodule Sovite.Core.MTA.FinalDeliveryTest do
   # Delivery.run for the final transports: LMTP, Maildir, and pipes.
   use ExUnit.Case, async: true
 
+  alias Sovite.Core.Address
   alias Sovite.Core.MTA.Delivery
   alias Sovite.Core.MTA.Delivery.Local
   alias Sovite.Queue.{Envelope, ID, Spool}
@@ -177,14 +178,14 @@ defmodule Sovite.Core.MTA.FinalDeliveryTest do
 
     test "refuses addresses that are not safe in a path" do
       assert {:ok, "/m/example.com/a.b"} =
-               Local.maildir_path("/m/{domain}/{user}", "a.b@example.com", "")
+               Address.maildir("/m/{domain}/{user}", "a.b@example.com", "")
 
-      assert :error = Local.maildir_path("/m/{user}", "a/b@example.com", "")
-      assert :error = Local.maildir_path("/m/{user}", "..@example.com", "")
-      assert :error = Local.maildir_path("/m/{user}", "..+x@example.com", "+")
+      assert :error = Address.maildir("/m/{user}", "a/b@example.com", "")
+      assert :error = Address.maildir("/m/{user}", "..@example.com", "")
+      assert :error = Address.maildir("/m/{user}", "..+x@example.com", "+")
 
       assert {:ok, "/m/a@example.com"} =
-               Local.maildir_path("/m/{address}", "A+x@example.com", "+")
+               Address.maildir("/m/{address}", "A+x@example.com", "+")
     end
   end
 

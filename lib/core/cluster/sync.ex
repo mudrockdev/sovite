@@ -19,11 +19,8 @@ defmodule Sovite.Core.Cluster.Sync do
 
   use GenServer
 
-  require Logger
-
   alias Sovite.Abuse.{Cache, Penalty, RateLimit}
   alias Sovite.Cluster, as: Mesh
-  alias Sovite.Core.Repo.Tables.GreylistEntries
 
   @max_pending 10_000
 
@@ -34,7 +31,9 @@ defmodule Sovite.Core.Cluster.Sync do
       rate_limit: runtime.rate_limit,
       penalties: Enum.reject([runtime.penalty, runtime.args.names.web_penalty], &is_nil/1),
       suspensions: runtime.suspensions,
-      repo: runtime.repo
+      repo: runtime.repo,
+      # Stores a greylist entry: the MTA's, so it comes from the runtime.
+      greylist_merge: runtime.greylist_merge
     ]
   end
 
@@ -65,7 +64,8 @@ defmodule Sovite.Core.Cluster.Sync do
       )
 
     Process.send_after(self(), :tick, opts[:interval])
-    {:ok, opts |> Map.new() |> Map.merge(%{handler: handler, greylist: [], suspended: []})}
+    state = opts |> Map.new() |> Map.put_new(:greylist_merge, nil)
+    {:ok, Map.merge(state, %{handler: handler, greylist: [], suspended: []})}
   end
 
   @doc false
@@ -136,23 +136,15 @@ defmodule Sovite.Core.Cluster.Sync do
         is_binary(user) and is_integer(time) and time > 0 and state.suspensions != nil,
         do: Cache.put(state.suspensions, {:suspended, user}, true, time)
 
-    for %{triplet: triplet} = entry <- List.wrap(payload[:greylist]),
-        is_binary(triplet) and state.repo != nil,
-        do: merge_greylist(state.repo, entry)
+    merge_greylist(state, List.wrap(payload[:greylist]))
+  end
 
+  # Only on nodes that run the MTA, which greylists.
+  defp merge_greylist(%{repo: repo, greylist_merge: merge}, entries)
+       when repo != nil and merge != nil do
+    for %{triplet: triplet} = entry <- entries, is_binary(triplet), do: merge.(repo, entry)
     :ok
   end
 
-  defp merge_greylist(repo, entry) do
-    case GreylistEntries.merge(repo, entry) do
-      {:ok, _entry} ->
-        :ok
-
-      {:error, changeset} ->
-        Logger.warning("invalid greylist entry from the cluster: #{inspect(changeset.errors)}")
-    end
-  rescue
-    error ->
-      Logger.error("cannot store a greylist entry from the cluster: #{Exception.message(error)}")
-  end
+  defp merge_greylist(_state, _entries), do: :ok
 end

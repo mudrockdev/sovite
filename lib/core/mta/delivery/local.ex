@@ -1,11 +1,14 @@
 defmodule Sovite.Core.MTA.Delivery.Local do
   @moduledoc false
-  # Final delivery on this machine for Sovite.Core.MTA.Delivery: Maildir (the
-  # local and mailbox transports) and pipe commands. Each recipient is
-  # delivered on its own, with Return-Path: and Delivered-To: at the top.
+  # Final delivery for Sovite.Core.MTA.Delivery: Maildir for the local
+  # transport, pipe commands, and the mailbox transport, which the mailbox
+  # part delivers (Sovite.Core.Stack.Mailbox). Each recipient is delivered
+  # on its own, with Return-Path: and Delivered-To: at the top.
 
-  alias Sovite.Core.MTA.{Delivery, Routing}
+  alias Sovite.Core.Address
+  alias Sovite.Core.MTA.Delivery
   alias Sovite.Core.MTA.Delivery.Transaction
+  alias Sovite.Core.Stack
   alias Sovite.Maildir
   alias Sovite.Message.Trace
   alias Sovite.Pipe
@@ -31,16 +34,34 @@ defmodule Sovite.Core.MTA.Delivery.Local do
   }
 
   @spec deliver(Delivery.job(), Delivery.opts()) :: [Delivery.result()]
+  def deliver(%{destination: %{transport: :mailbox}} = job, opts) do
+    for {rcpt, status, text} <-
+          Stack.Mailbox.deliver(mailbox(opts), job.sender, job.recipients, message(job)),
+        do: result(rcpt, status, text)
+  end
+
   def deliver(%{destination: destination} = job, opts),
     do: Enum.map(job.recipients, &recipient(destination, job, &1, opts))
 
-  defp recipient(%{transport: transport}, job, rcpt, opts) when transport in [:local, :mailbox] do
-    case opts.maildir[transport] do
-      nil ->
-        result(rcpt, "4.3.5", "#{transport} delivery is not configured: set maildir.#{transport}")
+  # Without the stack's options (as when tests build them), the mailbox
+  # part is here.
+  defp mailbox(%{mailbox: mailbox}) when mailbox != nil, do: mailbox
 
-      template ->
-        maildir(job, rcpt, template, opts)
+  defp mailbox(opts) do
+    %{
+      stack: %{local: %{mta: true, filter: true, mailbox: true}, cluster: false},
+      store: %{
+        template: opts.maildir[:mailbox],
+        delimiter: opts.delimiter,
+        hostname: opts.hostname
+      }
+    }
+  end
+
+  defp recipient(%{transport: :local}, job, rcpt, opts) do
+    case opts.maildir[:local] do
+      nil -> result(rcpt, "4.3.5", "local delivery is not configured: set maildir.local")
+      template -> maildir(job, rcpt, template, opts)
     end
   end
 
@@ -54,7 +75,7 @@ defmodule Sovite.Core.MTA.Delivery.Local do
   ## Maildir
 
   defp maildir(job, rcpt, template, opts) do
-    case maildir_path(template, rcpt, opts.delimiter) do
+    case Address.maildir(template, rcpt, opts.delimiter) do
       {:ok, dir} ->
         data = Stream.concat([trace(job.sender, rcpt)], message(job))
 
@@ -75,23 +96,6 @@ defmodule Sovite.Core.MTA.Delivery.Local do
     end
   end
 
-  @doc false
-  # The folder for `rcpt`: {user} is the lower-cased local part without
-  # its extension, {domain} the domain, {address} both.
-  def maildir_path(template, rcpt, delimiter) do
-    {user, _extension, domain} = parts(rcpt, delimiter)
-    values = %{"user" => user, "domain" => domain, "address" => "#{user}@#{domain}"}
-
-    if Enum.all?(Map.values(values), &path_safe?/1),
-      do:
-        {:ok,
-         Regex.replace(~r/\{(user|domain|address)\}/, template, fn _, key -> values[key] end)},
-      else: :error
-  end
-
-  defp path_safe?(value),
-    do: value not in ["", ".", ".."] and not String.contains?(value, ["/", <<0>>])
-
   defp file_status(:enospc), do: "4.3.1"
   defp file_status(:edquot), do: "4.2.2"
   defp file_status(_reason), do: "4.3.0"
@@ -102,7 +106,7 @@ defmodule Sovite.Core.MTA.Delivery.Local do
   ## Pipe
 
   defp pipe(job, rcpt, name, pipe, opts) do
-    {user, extension, domain} = parts(rcpt, opts.delimiter)
+    {user, extension, domain} = Address.parts(rcpt, opts.delimiter)
 
     values = %{
       "sender" => job.sender,
@@ -205,13 +209,6 @@ defmodule Sovite.Core.MTA.Delivery.Local do
   end
 
   ## Shared
-
-  defp parts(rcpt, delimiter) do
-    {local, domain} = Routing.split(String.downcase(rcpt))
-    {user, extension} = Routing.extension(delimiter, local)
-    extension = if extension, do: String.slice(extension, 1..-1//1), else: ""
-    {user, extension, domain}
-  end
 
   defp trace(sender, rcpt), do: Trace.return_path(sender) <> Trace.delivered_to(rcpt)
 

@@ -18,15 +18,15 @@ defmodule Sovite.Core.MTA.Routing do
     * `:remote` - everything else.
   """
 
-  alias Sovite.Core.Config
+  alias Sovite.Core.{Address, Config}
   alias Sovite.Core.MTA.Lookup
+  alias Sovite.Core.Stack.Mailbox
 
   alias Sovite.Core.Repo.Tables.{
     AddressRewrites,
     Aliases,
     BccRules,
     DomainCache,
-    Mailboxes,
     RelocatedUsers,
     SenderRelays,
     Transports
@@ -89,7 +89,8 @@ defmodule Sovite.Core.MTA.Routing do
       domain_cache: repo && DomainCache.id(repo),
       delimiter: routing.extension_delimiter,
       aliases: table.("aliases", Aliases, %{}),
-      mailboxes: table.("mailboxes", Mailboxes, %{}),
+      # The mailbox part's directory, through its interface.
+      mailboxes: table.("mailboxes", Mailbox, %{}),
       moved_users: table.("moved_users", RelocatedUsers, %{}),
       # Rewrites for one kind come first, then those for both.
       sender_rewrites:
@@ -160,42 +161,14 @@ defmodule Sovite.Core.MTA.Routing do
   @spec hosted?(t(), String.t()) :: boolean()
   def hosted?(routing, domain), do: class(routing, domain) != :remote
 
-  @doc """
-  Splits an address into its local part and lower-cased domain. A bare
-  local part (`"postmaster"`) has domain `nil`.
-  """
+  @doc "See `Sovite.Core.Address.split/1`."
   @spec split(String.t()) :: {String.t(), String.t() | nil}
-  def split(address) do
-    case :binary.matches(address, "@") do
-      [] ->
-        {address, nil}
+  defdelegate split(address), to: Address
 
-      matches ->
-        {at, 1} = List.last(matches)
-        local = binary_part(address, 0, at)
-        domain = binary_part(address, at + 1, byte_size(address) - at - 1)
-        {local, String.downcase(domain, :ascii)}
-    end
-  end
-
-  @doc """
-  Splits the extension off a local part: `"alice+lists"` is `{"alice",
-  "+lists"}` with delimiter `"+"`. With several delimiter characters, the
-  first one found counts. Returns `{local, nil}` without an extension.
-  """
-  @spec extension(t() | String.t(), String.t()) :: {String.t(), String.t() | nil}
-  def extension(%__MODULE__{delimiter: delimiter}, local), do: extension(delimiter, local)
-  def extension(delimiter, local) when delimiter in [nil, ""], do: {local, nil}
-
-  def extension(delimiter, local) do
-    case :binary.match(local, String.graphemes(delimiter)) do
-      {at, _} when at > 0 ->
-        {binary_part(local, 0, at), binary_part(local, at, byte_size(local) - at)}
-
-      _ ->
-        {local, nil}
-    end
-  end
+  @doc "See `Sovite.Core.Address.extension/2`, with the routing's delimiter."
+  @spec extension(t() | String.t() | nil, String.t()) :: {String.t(), String.t() | nil}
+  def extension(%__MODULE__{delimiter: delimiter}, local), do: Address.extension(delimiter, local)
+  def extension(delimiter, local), do: Address.extension(delimiter, local)
 
   @doc """
   Looks up an address in `tables`, trying, in order:

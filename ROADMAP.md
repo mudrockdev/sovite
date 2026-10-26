@@ -289,13 +289,13 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 ### Phase 15 — Modular Stack (groundwork for 2.0)
 
 - [x] `[stack]` switches for the three parts, `mta`, `filter`, and `mailbox`, all on by default; a part that is off starts nothing and opens no port
-- [ ] Table ownership: each table belongs to one part (or is shared), and only that part's table modules use it; checked like the component boundaries
-- [ ] Internal interfaces between parts (MTA → filter: scan; MTA → mailbox: deliver, quota, user lookup; mailbox → MTA: submit), in-process when parts share a node, over the cluster's mutual TLS when they do not
-- [ ] Fallbacks when a part is off: the MTA uses milters (Rspamd) instead of the filter, and LMTP and the Dovecot auth protocol instead of the mailbox part
-- [ ] Node roles in a cluster: which parts each node runs (for example MTA-only edge nodes, filter nodes, mailbox nodes)
-- [ ] Shared identity: one user directory (database, LDAP, or OAuth) for every part, owned by the mailbox part, used by the others only through the internal interface
+- [x] Table ownership: each table belongs to one part (or is shared), and only that part's table modules use it; checked like the component boundaries
+- [ ] Internal interfaces between parts (MTA → filter: scan; MTA → mailbox: deliver, quota, user lookup; mailbox → MTA: submit), in-process when parts share a node, over the cluster's mutual TLS when they do not. Done: MTA → mailbox deliver and the user directory (`Sovite.Core.Stack.Mailbox`). With the filter and the mailbox store: scan (2.0), quota and submit (3.0)
+- [x] Fallbacks when a part is off: the MTA uses milters (Rspamd) instead of the filter, and LMTP and the Dovecot auth protocol instead of the mailbox part
+- [x] Node roles in a cluster: which parts each node runs (for example MTA-only edge nodes, filter nodes, mailbox nodes)
+- [x] Shared identity: one user directory (database, LDAP, or OAuth) for every part, owned by the mailbox part, used by the others only through the internal interface
 - [x] `sovitectl` and the web UI show and manage only the parts that are on
-- [ ] Repository layout and boundary checks for the parts: the MTA in `lib/core/mta/` (`Sovite.Core.MTA.*`), the new parts in `lib/core/filter/` and `lib/core/mailbox/`, shared code (config, database, cluster, CLI and web UI shells) in `lib/core/`, reusable components in `lib/<component>/`
+- [x] Repository layout and boundary checks for the parts: the MTA in `lib/core/mta/` (`Sovite.Core.MTA.*`), the new parts in `lib/core/filter/` and `lib/core/mailbox/`, shared code (config, database, cluster, CLI and web UI shells) in `lib/core/`, reusable components in `lib/<component>/`
 
 **Done when:** each part can be turned off without the others breaking, the MTA runs with external Rspamd and Dovecot in their place, and no part uses another part's tables except through its interface.
 

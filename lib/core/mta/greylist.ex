@@ -42,6 +42,25 @@ defmodule Sovite.Core.MTA.Greylist do
     :expires_at
   ]
 
+  @doc """
+  Stores an entry another cluster node shared (see
+  `Sovite.Core.Cluster.Sync`): the earliest sighting and pass, and the
+  latest use and expiry, win.
+  """
+  @spec merge(Sovite.Core.Repo.t(), map()) :: :ok
+  def merge(repo, entry) do
+    case GreylistEntries.merge(repo, entry) do
+      {:ok, _entry} ->
+        :ok
+
+      {:error, changeset} ->
+        Logger.warning("invalid greylist entry from the cluster: #{inspect(changeset.errors)}")
+    end
+  rescue
+    error ->
+      Logger.error("cannot store a greylist entry from the cluster: #{Exception.message(error)}")
+  end
+
   @doc "Greylisting options from the config, or `nil` when it is off."
   @spec opts(Sovite.Core.Config.t(), Sovite.Core.Repo.t() | nil) :: map() | nil
   def opts(%{greylist: %{enabled: true} = greylist} = config, repo) when repo != nil,

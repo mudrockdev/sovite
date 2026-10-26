@@ -84,6 +84,7 @@ defmodule Sovite.Core.Supervisor do
     Config,
     Control,
     Logging,
+    Mailbox,
     Metrics,
     Repo,
     Telemetry,
@@ -201,7 +202,8 @@ defmodule Sovite.Core.Supervisor do
       mta_sts: nil,
       rate_limit: nil,
       suspensions: nil,
-      ip_pools: nil
+      ip_pools: nil,
+      greylist_merge: nil
     }
   end
 
@@ -213,7 +215,8 @@ defmodule Sovite.Core.Supervisor do
       mta_sts: if(config.mta_sts.enabled, do: @mta_sts),
       rate_limit: @rate_limit,
       suspensions: @suspensions,
-      ip_pools: if(config.ip_pool != [], do: IPPools)
+      ip_pools: if(config.ip_pool != [], do: IPPools),
+      greylist_merge: &Greylist.merge/2
     }
   end
 
@@ -240,6 +243,7 @@ defmodule Sovite.Core.Supervisor do
        security_specs(config, runtime) ++
        mta_only(runtime, [{QueueManager, QueueManager.opts(config, runtime.repo) ++ manager_opts}]) ++
        Cluster.child_specs(config, runtime) ++
+       Mailbox.child_specs(config) ++
        mta_only(runtime, report_specs(config, runtime)) ++
        mta_only(runtime, Enum.map(config.listener, &listener(&1, config, runtime))) ++
        mta_only(runtime, policy_specs(config, runtime)) ++

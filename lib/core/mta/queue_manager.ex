@@ -93,6 +93,7 @@ defmodule Sovite.Core.MTA.QueueManager do
   alias Sovite.Core.Config
   alias Sovite.Core.MTA.{Bounce, Delivery, IPPools, Outbound, Recipients, Router, Routing}
   alias Sovite.Core.MTA.Cluster.Placement
+  alias Sovite.Core.Stack
   alias Sovite.Queue.{Backoff, Entry, Envelope, ID, Spool}
   alias Sovite.SMTP.Client
 
@@ -156,6 +157,7 @@ defmodule Sovite.Core.MTA.QueueManager do
       double_bounce_recipient: config.bounce.double_bounce_recipient,
       bounce_size_limit: config.bounce.size_limit,
       maildir: config.maildir,
+      mailbox: Stack.Mailbox.opts(config),
       pipes: config.pipe,
       delimiter: config.routing.extension_delimiter,
       ip_pools: if(config.ip_pool != [], do: IPPools),
@@ -306,6 +308,7 @@ defmodule Sovite.Core.MTA.QueueManager do
         cacerts: Map.get(opts, :tls_cacerts)
       },
       maildir: Map.get(opts, :maildir) || %{},
+      mailbox: Map.get(opts, :mailbox),
       pipes: Map.get(opts, :pipes, %{}),
       delimiter: Map.get(opts, :delimiter, ""),
       mta_sts: Map.get(opts, :mta_sts),

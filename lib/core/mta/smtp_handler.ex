@@ -170,7 +170,8 @@ defmodule Sovite.Core.MTA.SMTPHandler do
     SenderCheck
   }
 
-  alias Sovite.Core.Repo.Tables.{AccessRules, Mailboxes, Users}
+  alias Sovite.Core.Repo.Tables.AccessRules
+  alias Sovite.Core.Stack
 
   alias Sovite.{AuthResults, SASL, SRS}
   alias Sovite.Message.{Date, Headers, MessageID, Received, Trace}
@@ -272,7 +273,8 @@ defmodule Sovite.Core.MTA.SMTPHandler do
   defp auth_opts(%{auth: auth} = config, repo) do
     backend =
       case auth.backend do
-        :database -> {Users, repo: repo}
+        # The mailbox part's user directory.
+        :database -> {Stack.Mailbox, repo: repo}
         :file -> {SASL.Backend.Static, file: auth.file.path}
         :ldap -> {SASL.Backend.LDAP, ldap_opts(auth.ldap)}
       end
@@ -522,7 +524,7 @@ defmodule Sovite.Core.MTA.SMTPHandler do
 
     stored =
       if state.repo,
-        do: Users.senders(state.repo, identity),
+        do: Stack.Mailbox.senders(state.repo, identity),
         else: []
 
     SenderCheck.allowed?(identity, sender, configured ++ stored)
@@ -688,7 +690,7 @@ defmodule Sovite.Core.MTA.SMTPHandler do
     {local, _domain} = Routing.split(address)
 
     with false <- String.downcase(local) in @role_accounts,
-         {:ok, added} <- Mailboxes.added_at(repo, address),
+         {:ok, added} <- Stack.Mailbox.added_at(repo, address),
          true <- DateTime.after?(added, since) do
       {:reject, Reply.new(550, "5.7.17", "<#{address}>: Mailbox owner has changed")}
     else

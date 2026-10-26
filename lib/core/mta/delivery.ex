@@ -185,6 +185,7 @@ defmodule Sovite.Core.MTA.Delivery do
             cacerts: [binary()] | nil
           },
           maildir: %{optional(:local | :mailbox) => String.t() | nil},
+          mailbox: Sovite.Core.Stack.Mailbox.opts() | nil,
           pipes: %{String.t() => map()},
           delimiter: String.t(),
           tmp_dir: Path.t(),

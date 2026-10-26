@@ -111,6 +111,10 @@ lib/core/
   logging.ex         # Sovite.Core.Logging: the [log] section, log files, syslog
   log_reader.ex      # Sovite.Core.LogReader: reading Sovite's logs back
   telemetry.ex       # Sovite.Core.Telemetry: the event catalog, logged by default
+  address.ex         # Sovite.Core.Address: splitting addresses, Maildir folders
+  stack.ex           # Sovite.Core.Stack: which parts run where
+  stack/             # the parts' interfaces: Sovite.Core.Stack.Mailbox (the user directory, delivery to the store)
+  mailbox/           # the mailbox part: its user directory, the Maildir store, and the server other nodes deliver to
   mta/
     smtp_handler.ex  # Sovite.Core.MTA.SMTPHandler: the SMTP session's policy and spooling
     queue_manager.ex # Sovite.Core.MTA.QueueManager: schedules queued mail
@@ -144,7 +148,9 @@ Every database table has its own migration, schema, and table module. Code outsi
 1. **Dependencies only point downward.** A component may depend on components in the same or lower layers, never higher.
 2. **Reusable components never depend on `core/` or `sovite.ex`.** If a reusable component needs something from `core/`, that something is either moved into a reusable component or injected via a behaviour/option.
 3. **No dependency cycles** between components, even within the same layer.
-4. **Enforced in CI** with `mix xref graph --format cycles` and a check that no reusable folder references `Sovite.Core`. The `boundary` library can make these compile-time errors.
+4. **The parts never reference each other.** `core/mta/`, `core/filter/`, and `core/mailbox/` meet only through the shared interfaces in `Sovite.Core.Stack`, so each part can be turned off, or run on other nodes.
+5. **Each table belongs to one part, or is shared.** Only its part uses a part's table modules, besides `core/repo/` and the operator surfaces of every part, `sovitectl` (`core/cli*`) and the admin API (`core/web/`). The MTA's tables: access rules, address rewrites, aliases, BCC rules, DMARC and TLS report entries, greylist entries, IP address counts, MTA-STS policies, relocated users, sender relays, and transports. Shared: domains (every part serves them), and users and mailboxes (identity, which the mailbox part owns once it exists). The list is in `scripts/check_boundaries.sh`; add a new table to it.
+6. **Enforced in CI** with `mix xref graph --format cycles` and `scripts/check_boundaries.sh`, which checks that no reusable folder references `Sovite.Core`, that the parts stay apart, and the table owners. The `boundary` library can make these compile-time errors.
 
 ---
 

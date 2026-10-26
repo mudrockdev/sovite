@@ -1095,6 +1095,19 @@ defmodule Sovite.Core.ConfigTest do
              [routing]
              mailbox_transport = "pipe:missing"
              """) == ["routing.mailbox_transport: there is no [pipe.missing] section"]
+
+      # Without the mailbox part, hosted mail needs another transport.
+      assert phase5_errors("[stack]\nmailbox = false\n") == [
+               ~s{routing.mailbox_transport: the mailbox part is off ([stack] mailbox = false): deliver hosted mail another way, such as "lmtp:unix:/run/dovecot/lmtp"}
+             ]
+
+      assert {:ok, _config} =
+               Config.parse("""
+               [stack]
+               mailbox = false
+               [routing]
+               mailbox_transport = "lmtp:unix:/run/dovecot/lmtp"
+               """)
     end
 
     test "LMTP listeners default to port 24 and must not use port 25" do

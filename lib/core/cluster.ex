@@ -48,7 +48,7 @@ defmodule Sovite.Core.Cluster do
 
   alias Sovite.Cluster, as: Mesh
   alias Sovite.Cluster.{Joiner, Peer}
-  alias Sovite.Core.Cluster.{SharedConfig, Sync}
+  alias Sovite.Core.Cluster.{Parts, SharedConfig, Sync}
   alias Sovite.Core.Control
   alias Sovite.Core.MTA.Cluster.Queue
   alias Sovite.Core.MTA.QueueInfo
@@ -82,6 +82,13 @@ defmodule Sovite.Core.Cluster do
       {Sync, Sync.opts(config, runtime)}
     ] ++ if(runtime.queue_manager, do: [{Queue, Queue.opts(config, runtime)}], else: [])
   end
+
+  @doc """
+  The parts of the stack (`[stack]`) each connected node runs, as it
+  told this one. Empty outside a cluster.
+  """
+  @spec parts() :: %{node() => [Sovite.Core.Config.part()]}
+  defdelegate parts, to: Parts, as: :connected
 
   @doc false
   # The clock of rate limits shared by the cluster, so that the nodes'
@@ -179,7 +186,7 @@ defmodule Sovite.Core.Cluster do
           started_at: System.os_time(:second)
         }
 
-        for other <- Mesh.connected(), do: offer(state, other)
+        for other <- Mesh.connected(), do: hello(state, other)
         {:ok, state}
 
       {:error, reason} ->
@@ -274,7 +281,7 @@ defmodule Sovite.Core.Cluster do
 
   @impl true
   def handle_info({:nodeup, node}, state) do
-    offer(state, node)
+    hello(state, node)
     {:noreply, put_in(state.since[node], now())}
   end
 
@@ -331,7 +338,21 @@ defmodule Sovite.Core.Cluster do
     {:noreply, state}
   end
 
+  # Another node's parts: only the known ones, so no atoms are made.
+  def handle_info({:parts, node, parts}, state) when is_atom(node) and is_list(parts) do
+    :ok = Parts.put(node, Enum.filter(parts, &(&1 in [:mta, :filter, :mailbox])))
+    {:noreply, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
+
+  # What a node that connects learns first: this node's parts, and the
+  # shared configuration's version.
+  defp hello(state, node) do
+    parts = for {part, true} <- state.stack, do: part
+    Mesh.send(node, __MODULE__, {:parts, state.node, parts})
+    offer(state, node)
+  end
 
   defp offer(state, node) do
     offered = if state.shared, do: Map.take(state.shared, [:version, :origin]), else: nil

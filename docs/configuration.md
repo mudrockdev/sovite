@@ -33,9 +33,13 @@ Sovite is a whole mail stack in parts, each of which can be turned off: the MTA 
 |---|---|---|---|
 | `mta` | boolean | `true` | Run the MTA: the `[[listener]]`s, the queue, delivery, and everything around them. Off, the node takes and sends no mail; the admin API's queue, routing, trace, and IP pool endpoints answer `404`, the web UI hides those pages, and `sovitectl` leaves `queue`, `route`, `trace`, `report`, and `ip-pool` out of its help and refuses them. Commands that manage the database (domains, aliases, users, ...) still work: the database is shared by every node and part. |
 | `filter` | boolean | `true` | Run the filter. Nothing to run yet. |
-| `mailbox` | boolean | `true` | Run the mailbox server. Nothing to run yet. |
+| `mailbox` | boolean | `true` | Run the mailbox part. So far it is the store for hosted mailboxes, the Maildir folders of `maildir.mailbox`, that the `mailbox` transport delivers to; IMAP and the rest come in 3.0. Off, the MTA hands that mail to a node of the cluster that runs the mailbox part, or, without a cluster, needs another `routing.mailbox_transport`, such as `"lmtp:unix:/run/dovecot/lmtp"` for Dovecot. |
 
-Turning a part on or off needs a restart: a reload refuses the change. In a cluster, each node says which parts it runs, and `sovitectl cluster status` shows them.
+Turning a part on or off needs a restart: a reload refuses the change.
+
+In a cluster, each node tells the others which parts it runs, and `sovitectl cluster status` shows them. A node can run any of them: for example MTA-only edge nodes in front of mailbox nodes. Mail for the mailbox part goes to a node that runs it, the same node for the same mailbox while the cluster does not change; when none is connected, it waits in the queue.
+
+The user directory (`sovitectl user` and `sovitectl mailbox`, the `database` backend of [`[auth]`](#auth)) belongs to the mailbox part, and every part uses it: it is in the database, which every node shares.
 
 ## `[server]`
 
