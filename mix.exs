@@ -145,6 +145,14 @@ defmodule Sovite.MixProject do
         IDNA: [~r/^Sovite\.IDNA/],
         Net: [~r/^Sovite\.Net/],
         Message: [~r/^Sovite\.Message/],
+        "Message analysis": [
+          ~r/^Sovite\.Charset/,
+          ~r/^Sovite\.MIME/,
+          ~r/^Sovite\.HTML/,
+          ~r/^Sovite\.URL/,
+          ~r/^Sovite\.Magic/,
+          ~r/^Sovite\.Analyzer/
+        ],
         DNS: [~r/^Sovite\.DNS/],
         LDAP: [~r/^Sovite\.LDAP/],
         SASL: [~r/^Sovite\.SASL/],

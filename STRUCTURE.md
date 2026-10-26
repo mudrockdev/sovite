@@ -40,12 +40,17 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | `validators/` | `Sovite.Validators` | Syntax checks for addresses (RFC 5321/5322, and internationalized ones per RFC 6531), domains, hostnames, IP literals, HELO names |
 | `idna/` | `Sovite.IDNA` | Internationalized domain names (IDNA2008, RFC 5890–5893): Punycode, U-label/A-label conversion, code point, contextual, and Bidi rules |
 | `net/` | `Sovite.Net` | IP address and CIDR network parsing and matching |
+| `charset/` | `Sovite.Charset` | Text in the charsets mail uses (with the WHATWG Encoding Standard's labels) to UTF-8: single-byte ISO and Windows code pages, KOI8, GBK/GB18030, Big5, Shift_JIS, EUC-JP, ISO-2022-JP, EUC-KR, UTF-16/32, UTF-7 |
+| `magic/` | `Sovite.Magic` | File types by content (magic numbers): programs, scripts, archives, documents (Office and ZIP-based formats by their contents), images, media, markup |
 
 ### Layer 1: Formats & Infrastructure
 
 | Folder | Namespace | Contents |
 |---|---|---|
 | `message/` | `Sovite.Message` | RFC 5322 header parsing/folding, address lists (rewriting addresses in `From:`/`To:`/...), MIME, `Received:` / `Date:` / `Message-ID:` builders, trace fields (`Return-Path:`, `Delivered-To:`, hop counting), streaming body handling |
+| `mime/` | `Sovite.MIME` | The MIME tree of a message with depth, part, size, and header limits: parameters (RFC 2231), encoded words (RFC 2047), transfer encodings, text in UTF-8, and anomalies noted instead of failing |
+| `html/` | `Sovite.HTML` | A bounded HTML tokenizer for filters: visible text, text hidden by styles, links, images, the title, and HTML5 character references |
+| `url/` | `Sovite.URL` | URLs and mail addresses in text: finding them (with `hxxp` and `[.]` undone), taking them apart, normalizing hosts (IDNA, %-escapes, numeric IPv4), and noting the tricks |
 | `dns/` | `Sovite.DNS` | Resolver behaviour, default resolver, cache, MX / TXT / TLSA helpers, Null MX |
 | `ldap/` | `Sovite.LDAP` | LDAP connections (StartTLS/LDAPS), bind, search, RFC 4515 filters with injection-safe placeholders, DN escaping |
 | `sasl/` | `Sovite.SASL` | PLAIN, LOGIN, SCRAM-SHA-256, OAUTHBEARER (both server and client side) |
@@ -70,6 +75,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | `tls/` | `Sovite.TLS` | Certificate store with SNI, ACME, DANE verification, MTA-STS policies (discovery, fetch, MX matching, a policy server), TLS-RPT reports |
 | `milter/` | `Sovite.Milter` | Milter protocol client (version 6, for Rspamd, OpenDKIM, OpenDMARC, ClamAV-milter, ...), packet codec, applying a milter's header changes with libmilter index rules |
 | `policy/` | `Sovite.Policy` | Postfix policy delegation protocol: a client (TCP, Unix socket, or a program on standard input and output, as for policyd-spf), access(5) action parsing, and a server, so policy servers can be written in Elixir |
+| `analyzer/` | `Sovite.Analyzer` | A message taken apart for a filter: MIME structure, text parts (HTML made text), URLs with their link texts, addresses, attachments with their types by content and disguised programs, and every anomaly |
 | `abuse/` | `Sovite.Abuse` | Failed-login penalties, DNSBL/DNSWL/RHSBL scoring, reverse DNS (FCrDNS) checks, greylisting decisions, rate limiting, an expiring cache |
 | `queue/` | `Sovite.Queue` | Durable mail spool with storage behaviour, crash recovery, retry scheduler |
 | `listener/` | `Sovite.Listener` | TCP/TLS listener with connection limits, PROXY protocol support, draining, live option updates, and inherited sockets |

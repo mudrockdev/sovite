@@ -301,7 +301,7 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 16 — Filter Engine Core
 
-- [ ] Message analyzer: MIME tree with nesting, part-count, and size limits; charset decoding; HTML to text with a bounded, safe parser; URL and email extraction (text, HTML, redirects, obfuscation); attachment metadata and file types by content (magic numbers), not by name
+- [x] Message analyzer: MIME tree with nesting, part-count, and size limits; charset decoding; HTML to text with a bounded, safe parser; URL and email extraction (text, HTML, redirects, obfuscation); attachment metadata and file types by content (magic numbers), not by name
 - [ ] Rule engine: symbols with scores and groups, regular expression rules on headers, body, MIME parts, and URLs (with a safe regex engine and time limits), composites, conditions, maps (lists of IPs, domains, addresses, hashes) reloaded without restart
 - [ ] Actions: reject, soft reject (`451`), greylist, add header, rewrite subject, quarantine, no action; thresholds per tenant and per user
 - [ ] Existing checks as symbols: SPF, DKIM, DMARC, ARC, DNSBL/DNSWL/RHSBL, reverse DNS, greylisting, rate limits, sender and recipient rules

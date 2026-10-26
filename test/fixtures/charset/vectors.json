@@ -1,0 +1,152 @@
+[
+ {
+  "label": "iso-8859-2",
+  "bytes": "5a61bff3b3e62067eab66cb1206a61bcf1",
+  "text": "Zażółć gęślą jaźń"
+ },
+ {
+  "label": "iso-8859-5",
+  "bytes": "bfe0d8d2d5e220dcd8e0",
+  "text": "Привет мир"
+ },
+ {
+  "label": "iso-8859-7",
+  "bytes": "cae1ebe7ecddf1e120eafcf3ece5",
+  "text": "Καλημέρα κόσμε"
+ },
+ {
+  "label": "iso-8859-8",
+  "bytes": "f9ece5ed20f2e5eced",
+  "text": "שלום עולם"
+ },
+ {
+  "label": "iso-8859-15",
+  "bytes": "a475726f20636166e920bd75767265",
+  "text": "€uro café œuvre"
+ },
+ {
+  "label": "windows-1251",
+  "bytes": "d1fae5f8fc20e6e520e5f9b820fdf2e8f5",
+  "text": "Съешь же ещё этих"
+ },
+ {
+  "label": "windows-1252",
+  "bytes": "93736d617274942071756f746573209620636166e920802099",
+  "text": "“smart” quotes – café € ™"
+ },
+ {
+  "label": "iso-8859-1",
+  "bytes": "636166e9206372e86d6520f1",
+  "text": "café crème ñ"
+ },
+ {
+  "label": "us-ascii",
+  "bytes": "706c61696e206173636969",
+  "text": "plain ascii"
+ },
+ {
+  "label": "iso-8859-9",
+  "bytes": "54fc726be76520f0fcfefdf6e720dd",
+  "text": "Türkçe ğüşıöç İ"
+ },
+ {
+  "label": "windows-1256",
+  "bytes": "e3d1cdc8c720c8c7e1dac7e1e3",
+  "text": "مرحبا بالعالم"
+ },
+ {
+  "label": "koi8-r",
+  "bytes": "f3dfc5dbd820d6c520c5dda3",
+  "text": "Съешь же ещё"
+ },
+ {
+  "label": "koi8-u",
+  "bytes": "f0d2c9d7a6d420d3d7a6d420ad",
+  "text": "Привіт світ ґ"
+ },
+ {
+  "label": "ibm866",
+  "bytes": "8fe0a8a2a5e2",
+  "text": "Привет"
+ },
+ {
+  "label": "windows-874",
+  "bytes": "cac7d1cab4d5a4c3d1ba",
+  "text": "สวัสดีครับ"
+ },
+ {
+  "label": "macintosh",
+  "bytes": "6361668e20c220b9",
+  "text": "café ¬ π"
+ },
+ {
+  "label": "gb2312",
+  "bytes": "d6d0cec4d3cabcfeb2e2cad4",
+  "text": "中文邮件测试"
+ },
+ {
+  "label": "gbk",
+  "bytes": "c0acbbf8d3cabcfedf5e9e56",
+  "text": "垃圾邮件過濾"
+ },
+ {
+  "label": "gb18030",
+  "bytes": "d6d0cec495328236b2e2cad4a2e3",
+  "text": "中文𠀀测试€"
+ },
+ {
+  "label": "big5",
+  "bytes": "c163c5e9a4a4a4e5b4fab8d5",
+  "text": "繁體中文測試"
+ },
+ {
+  "label": "shift_jis",
+  "bytes": "93fa967b8cea82cc8381815b838bb6c0b6c5",
+  "text": "日本語のメールｶﾀｶﾅ"
+ },
+ {
+  "label": "euc-jp",
+  "bytes": "c6fccbdcb8eca4cea5e1a1bca5eb8eb68ec08eb68ec58fe2c7",
+  "text": "日本語のメールｶﾀｶﾅ鄧"
+ },
+ {
+  "label": "iso-2022-jp",
+  "bytes": "1b2442467c4b5c386c244e2561213c256b1b2842206173636969",
+  "text": "日本語のメール ascii"
+ },
+ {
+  "label": "euc-kr",
+  "bytes": "c7d1b1b9beee20b8dec0cf208c63b9e6b0a2c7cf",
+  "text": "한국어 메일 똠방각하"
+ },
+ {
+  "label": "ks_c_5601-1987",
+  "bytes": "bec8b3e7c7cfbcbcbfe4",
+  "text": "안녕하세요"
+ },
+ {
+  "label": "utf-16le",
+  "bytes": "6800e9006c006c006f00200034d81edd",
+  "text": "héllo 𝄞"
+ },
+ {
+  "label": "utf-16",
+  "bytes": "fffe62006f006d00200034d81edd",
+  "text": "bom 𝄞"
+ },
+ {
+  "label": "utf-16be",
+  "bytes": "006200e9",
+  "text": "bé"
+ },
+ {
+  "label": "utf-32",
+  "bytes": "fffe000075000000740000006600000033000000320000002000000013270000",
+  "text": "utf32 ✓"
+ },
+ {
+  "label": "utf-7",
+  "bytes": "4869204d6f6d202d2b4a6a6f2d2d2120412b496d49446b512e",
+  "text": "Hi Mom -☺-! A≢Α."
+ }
+]
