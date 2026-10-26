@@ -50,7 +50,9 @@ defmodule Sovite.Core.Supervisor do
   database, the certificate store and ACME client, the cluster's
   membership and shared state, the metrics, the trace exporter, the
   admin API, the watchdog, and `Sovite.Core.Control`) start only with
-  `stack.mta`. The filter and mailbox parts have nothing to start yet.
+  `stack.mta`. The filter part starts `Sovite.Core.Filter.Server`, which
+  keeps its rules loaded; the mailbox part, in a cluster, the server that
+  takes mail for its store from other nodes.
 
   ## Reloading
 
@@ -83,6 +85,7 @@ defmodule Sovite.Core.Supervisor do
     Cluster,
     Config,
     Control,
+    Filter,
     Logging,
     Mailbox,
     Metrics,
@@ -243,6 +246,7 @@ defmodule Sovite.Core.Supervisor do
        security_specs(config, runtime) ++
        mta_only(runtime, [{QueueManager, QueueManager.opts(config, runtime.repo) ++ manager_opts}]) ++
        Cluster.child_specs(config, runtime) ++
+       Filter.child_specs(config, runtime.instance) ++
        Mailbox.child_specs(config) ++
        mta_only(runtime, report_specs(config, runtime)) ++
        mta_only(runtime, Enum.map(config.listener, &listener(&1, config, runtime))) ++

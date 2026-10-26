@@ -32,7 +32,7 @@ Sovite is a whole mail stack in parts, each of which can be turned off: the MTA 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `mta` | boolean | `true` | Run the MTA: the `[[listener]]`s, the queue, delivery, and everything around them. Off, the node takes and sends no mail; the admin API's queue, routing, trace, and IP pool endpoints answer `404`, the web UI hides those pages, and `sovitectl` leaves `queue`, `route`, `trace`, `report`, and `ip-pool` out of its help and refuses them. Commands that manage the database (domains, aliases, users, ...) still work: the database is shared by every node and part. |
-| `filter` | boolean | `true` | Run the filter. Nothing to run yet. |
+| `filter` | boolean | `true` | Run the filter. So far it is the rule engine, with the rules of [`[filter]`](#filter); actions and scanning in the MTA's session come later in 2.0. |
 | `mailbox` | boolean | `true` | Run the mailbox part. So far it is the store for hosted mailboxes, the Maildir folders of `maildir.mailbox`, that the `mailbox` transport delivers to; IMAP and the rest come in 3.0. Off, the MTA hands that mail to a node of the cluster that runs the mailbox part, or, without a cluster, needs another `routing.mailbox_transport`, such as `"lmtp:unix:/run/dovecot/lmtp"` for Dovecot. |
 
 Turning a part on or off needs a restart: a reload refuses the change.
@@ -921,6 +921,16 @@ Delivery status notifications (RFC 3464) are sent from `MAILER-DAEMON@<server.ho
 |---|---|---|---|
 | `double_bounce_recipient` | email address | unset | Where to report a notification, or any other message from the null sender, that could not be delivered. Unset: such double bounces are only logged. A failed double-bounce report is never reported again. |
 | `size_limit` | size | `50000` | The largest message a failure notification returns whole, for `RET=FULL`. Larger ones get their header fields returned. |
+
+## `[filter]`
+
+The filter part (`[stack] filter`), in place of Rspamd. Its rules are in their own TOML files: see [Filter rules](filter.md) for what they look like.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `rules` | list of absolute paths | `[]` | Rule files, or directories whose `*.toml` files are read in name order (`10-base.toml` before `50-local.toml`). Files are read in the order given; a later file's entry with the name of an earlier one changes only the keys it sets. `sovitectl config check` and a reload read and check them all. |
+| `reload_interval` | duration | `1m` | How often the rule files, and the map files they name, are checked for changes. Changed files are read again without a restart, and also at every config reload. Rules with errors are not taken: the ones before stay, and the errors are logged. |
+| `timeout` | duration | `5s` | How long the rules may take for one message. Rules after it do not run, and the scan notes `time_limit`. |
 
 ## `[log]`
 

@@ -8,7 +8,8 @@
 # The parts of the mail stack this node runs. A part that is off starts
 # nothing and opens no port. Changing them needs a restart.
 mta = true
-# The filter (2.0) and the mailbox server (3.0) are not there yet.
+# The filter (2.0) is its rule engine so far, the mailbox server (3.0)
+# the store for hosted mailboxes.
 filter = true
 mailbox = true
 
@@ -359,6 +360,16 @@ server = "[127.0.0.1]:25"
 # double_bounce_recipient = "postmaster@example.com"
 # The largest message returned whole in a failure notification (RET=FULL).
 size_limit = 50000
+
+[filter]
+# Rule files, or directories of *.toml rule files read in name order.
+# See docs/filter.md.
+# rules = ["/etc/sovite/rules"]
+rules = []
+# How often changed rule and map files are read again.
+reload_interval = "1m"
+# How long the rules may take for one message.
+timeout = "5s"
 
 [log]
 # One of: debug, info, notice, warning, error

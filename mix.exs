@@ -135,6 +135,7 @@ defmodule Sovite.MixProject do
         "ROADMAP.md",
         "STRUCTURE.md",
         "docs/configuration.md",
+        "docs/filter.md",
         "docs/logging.md",
         "docs/operations.md",
         "docs/security.md",
@@ -145,13 +146,14 @@ defmodule Sovite.MixProject do
         IDNA: [~r/^Sovite\.IDNA/],
         Net: [~r/^Sovite\.Net/],
         Message: [~r/^Sovite\.Message/],
-        "Message analysis": [
+        Filtering: [
           ~r/^Sovite\.Charset/,
           ~r/^Sovite\.MIME/,
           ~r/^Sovite\.HTML/,
           ~r/^Sovite\.URL/,
           ~r/^Sovite\.Magic/,
-          ~r/^Sovite\.Analyzer/
+          ~r/^Sovite\.Analyzer/,
+          ~r/^Sovite\.Rules/
         ],
         DNS: [~r/^Sovite\.DNS/],
         LDAP: [~r/^Sovite\.LDAP/],

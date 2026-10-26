@@ -15,6 +15,7 @@ defmodule Sovite.Core.Config do
     AuthRules,
     ClusterRules,
     Error,
+    FilterRules,
     RoutingRules,
     Schema,
     TransportRules
@@ -397,6 +398,15 @@ defmodule Sovite.Core.Config do
      {:section,
       [{:double_bounce_recipient, :mailbox, []}, {:size_limit, :byte_size, default: 50_000}]},
      []},
+    # The filter part: its rule files (files or directories of *.toml), and
+    # how often they and the map files they name are checked for changes.
+    {:filter,
+     {:section,
+      [
+        {:rules, {:list, :absolute_path}, default: []},
+        {:reload_interval, :duration, default: "1m"},
+        {:timeout, :duration, default: "5s"}
+      ]}, []},
     {:log,
      {:section,
       [
@@ -525,6 +535,7 @@ defmodule Sovite.Core.Config do
     :policy,
     :sendmail,
     :bounce,
+    :filter,
     :log,
     :admin,
     :metrics,
@@ -777,6 +788,7 @@ defmodule Sovite.Core.Config do
           policy: %{timeout: pos_integer(), default_action: String.t()},
           sendmail: %{server: Sovite.Core.MTA.Transport.host(), origin: String.t() | nil},
           bounce: %{double_bounce_recipient: String.t() | nil, size_limit: pos_integer()},
+          filter: %{rules: [Path.t()], reload_interval: pos_integer(), timeout: pos_integer()},
           log: Sovite.Core.Logging.config(),
           admin: %{
             enabled: boolean(),
@@ -1117,6 +1129,7 @@ defmodule Sovite.Core.Config do
       |> Kernel.++(TransportRules.errors(values))
       |> Kernel.++(AbuseRules.errors(values))
       |> Kernel.++(ClusterRules.errors(values))
+      |> Kernel.++(FilterRules.errors(values))
       |> Enum.filter(& &1)
 
     if errors == [], do: :ok, else: {:error, errors}

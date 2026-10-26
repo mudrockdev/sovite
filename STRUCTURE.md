@@ -21,7 +21,8 @@ lib/
 | `lib/sovite.ex` | Application entry point. Starts the supervision tree from `core/`. | No |
 | `lib/core/` | What every part shares: the config file, the database, the supervision tree, config reload and draining, the cluster, the CLI (`sovitectl`) and web UI shells, logging, telemetry, metrics, traces, certificates, and tenants. | No |
 | `lib/core/mta/` | The MTA part: receiving, queueing, routing, and delivering mail, and everything around it. | No |
-| `lib/core/filter/`, `lib/core/mailbox/` | The filter and mailbox parts, when they come (see `ROADMAP.md`). | No |
+| `lib/core/filter/` | The filter part: its rules loaded and scans. More in 2.0 (see `ROADMAP.md`). | No |
+| `lib/core/mailbox/` | The mailbox part: the user directory and the Maildir store. More in 3.0. | No |
 | `lib/<component>/` | Self-contained building blocks (SMTP, DKIM, SPF, ...) usable by any Elixir project. | Yes |
 
 The parts share one database and one schema. Each table belongs to one part, or to all of them, and a part reaches another part's data only through that part's interface, never its tables or internals.
@@ -76,6 +77,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | `milter/` | `Sovite.Milter` | Milter protocol client (version 6, for Rspamd, OpenDKIM, OpenDMARC, ClamAV-milter, ...), packet codec, applying a milter's header changes with libmilter index rules |
 | `policy/` | `Sovite.Policy` | Postfix policy delegation protocol: a client (TCP, Unix socket, or a program on standard input and output, as for policyd-spf), access(5) action parsing, and a server, so policy servers can be written in Elixir |
 | `analyzer/` | `Sovite.Analyzer` | A message taken apart for a filter: MIME structure, text parts (HTML made text), URLs with their link texts, addresses, attachments with their types by content and disguised programs, and every anomaly |
+| `rules/` | `Sovite.Rules` | A rule engine for mail filtering: symbols with scores and groups, regular expressions matched with work limits, maps (IPs, domains, addresses, strings), composites and conditions as boolean expressions, rule files merged by name |
 | `abuse/` | `Sovite.Abuse` | Failed-login penalties, DNSBL/DNSWL/RHSBL scoring, reverse DNS (FCrDNS) checks, greylisting decisions, rate limiting, an expiring cache |
 | `queue/` | `Sovite.Queue` | Durable mail spool with storage behaviour, crash recovery, retry scheduler |
 | `listener/` | `Sovite.Listener` | TCP/TLS listener with connection limits, PROXY protocol support, draining, live option updates, and inherited sockets |
@@ -120,6 +122,7 @@ lib/core/
   address.ex         # Sovite.Core.Address: splitting addresses, Maildir folders
   stack.ex           # Sovite.Core.Stack: which parts run where
   stack/             # the parts' interfaces: Sovite.Core.Stack.Mailbox (the user directory, delivery to the store)
+  filter/            # the filter part: rule files, the server that keeps rules and maps loaded, scans
   mailbox/           # the mailbox part: its user directory, the Maildir store, and the server other nodes deliver to
   mta/
     smtp_handler.ex  # Sovite.Core.MTA.SMTPHandler: the SMTP session's policy and spooling
