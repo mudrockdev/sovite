@@ -167,11 +167,14 @@ defmodule Sovite.Core.CLI.Filter do
             do: Checks.run(message, envelope, Checks.opts(config, Config.resolver(config))),
             else: %{}
 
+        analysis = Analyzer.analyze(message)
+
         result =
-          Rules.scan(rules, Analyzer.analyze(message),
+          Rules.scan(rules, analysis,
             raw: message,
             envelope: envelope,
-            symbols: Checks.symbols(checks),
+            symbols:
+              Checks.symbols(checks) ++ Checks.headers(analysis, envelope, config.server.hostname),
             maps: maps(rules),
             timeout: config.filter.timeout
           )

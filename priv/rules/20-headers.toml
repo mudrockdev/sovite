@@ -1,0 +1,151 @@
+# Sovite's built-in rules: the symbols of its header checks
+# (Sovite.HeaderChecks), with scores close to Rspamd's. Read before the
+# files of [filter] rules, which can change them by name. See
+# docs/filter.md.
+
+[[group]]
+name = "headers"
+description = "The message's header fields"
+
+[[symbol]]
+name = "MISSING_DATE"
+group = "headers"
+score = 1.0
+description = "The message has no Date: field"
+
+[[symbol]]
+name = "INVALID_DATE"
+group = "headers"
+score = 1.5
+description = "The Date: field is not a date"
+
+[[symbol]]
+name = "DATE_IN_FUTURE"
+group = "headers"
+score = 4.0
+description = "The Date: is more than 2 hours ahead"
+
+[[symbol]]
+name = "DATE_IN_PAST"
+group = "headers"
+score = 1.0
+description = "The Date: is more than 7 days ago"
+
+[[symbol]]
+name = "MISSING_MID"
+group = "headers"
+score = 2.5
+description = "The message has no Message-ID: field"
+
+[[symbol]]
+name = "INVALID_MSGID"
+group = "headers"
+score = 1.7
+description = "The Message-ID: is not <left@right>"
+
+[[symbol]]
+name = "MID_RHS_NOT_FQDN"
+group = "headers"
+score = 0.5
+description = "The Message-ID: is not at a domain with a dot"
+
+[[symbol]]
+name = "MISSING_FROM"
+group = "headers"
+score = 2.0
+description = "The message has no From: field"
+
+[[symbol]]
+name = "MULTIPLE_FROM"
+group = "headers"
+score = 8.0
+description = "Several From: fields, or several addresses in one"
+
+[[symbol]]
+name = "INVALID_FROM"
+group = "headers"
+score = 2.0
+description = "The From: field has no address that can be read"
+
+[[symbol]]
+name = "FROM_NO_DN"
+group = "headers"
+score = 0.0
+description = "The From: address has no display name"
+
+[[symbol]]
+name = "SPOOF_DISPLAY_NAME"
+group = "headers"
+score = 8.0
+description = "The display name of From: shows an address at another domain"
+
+[[symbol]]
+name = "FROM_NEQ_ENVFROM"
+group = "headers"
+score = 0.0
+description = "The From: address is not the envelope sender"
+
+[[symbol]]
+name = "REPLYTO_UNPARSABLE"
+group = "headers"
+score = 1.0
+description = "The Reply-To: field has no address that can be read"
+
+[[symbol]]
+name = "REPLYTO_DOM_NEQ_FROM_DOM"
+group = "headers"
+score = 0.0
+description = "Replies go to another domain than From:"
+
+[[symbol]]
+name = "MISSING_TO"
+group = "headers"
+score = 2.0
+description = "The message has no To: field"
+
+[[symbol]]
+name = "MISSING_SUBJECT"
+group = "headers"
+score = 2.0
+description = "The message has no Subject: field"
+
+[[symbol]]
+name = "MULTIPLE_UNIQUE_HEADERS"
+group = "headers"
+score = 7.0
+description = "A field that may appear once appears again"
+
+[[symbol]]
+name = "RCVD_COUNT_ZERO"
+group = "headers"
+score = 0.0
+description = "The message has no Received: field"
+
+[[symbol]]
+name = "RCVD_UNPARSABLE"
+group = "headers"
+score = 1.0
+description = "A Received: field has no readable date or host"
+
+[[symbol]]
+name = "RCVD_DATES_UNORDERED"
+group = "headers"
+score = 0.5
+description = "An earlier Received: hop is dated over an hour after a later one"
+
+[[symbol]]
+name = "FORGED_RCVD_HOSTNAME"
+group = "headers"
+score = 3.0
+description = "A Received: field claims this server got the message before another host"
+
+# Replies going elsewhere matter when the From: domain is not
+# authenticated, or the display name shows another address.
+
+[[composite]]
+name = "REPLYTO_FORGED_FROM"
+group = "headers"
+expression = "REPLYTO_DOM_NEQ_FROM_DOM & (DMARC_POLICY_REJECT | DMARC_POLICY_QUARANTINE | DMARC_POLICY_SOFTFAIL | SPOOF_DISPLAY_NAME)"
+score = 3.0
+policy = "leave"
+description = "Replies go to another domain, and From: is not to be trusted"

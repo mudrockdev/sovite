@@ -40,6 +40,7 @@ defmodule Sovite.Core.Filter.Checks do
   alias Sovite.ARC
   alias Sovite.DKIM.{Body, Verifier}
   alias Sovite.DMARC
+  alias Sovite.HeaderChecks
   alias Sovite.Message.Headers
   alias Sovite.SPF
 
@@ -171,6 +172,18 @@ defmodule Sovite.Core.Filter.Checks do
       ],
       & &1
     )
+  end
+
+  @doc """
+  The symbols of the header checks (`Sovite.HeaderChecks`) of an analyzed
+  message, with the envelope sender of `envelope` and this server's
+  `hostname`.
+  """
+  @spec headers(Sovite.Analyzer.t(), map(), String.t()) :: [symbol()]
+  def headers(analysis, envelope, hostname) do
+    analysis.mime.headers
+    |> HeaderChecks.check(hostnames: [hostname], envelope_from: envelope[:from])
+    |> Enum.map(fn {name, options} -> {name, options, 0} end)
   end
 
   ## Running the checks

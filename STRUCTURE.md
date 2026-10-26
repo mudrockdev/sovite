@@ -48,7 +48,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `message/` | `Sovite.Message` | RFC 5322 header parsing/folding, address lists (rewriting addresses in `From:`/`To:`/...), MIME, `Received:` / `Date:` / `Message-ID:` builders, trace fields (`Return-Path:`, `Delivered-To:`, hop counting), streaming body handling |
+| `message/` | `Sovite.Message` | RFC 5322 header parsing/folding, address lists (rewriting addresses in `From:`/`To:`/...), MIME, `Received:` / `Date:` / `Message-ID:` builders and parsers, mailboxes with display names, trace fields (`Return-Path:`, `Delivered-To:`, hop counting), streaming body handling |
 | `mime/` | `Sovite.MIME` | The MIME tree of a message with depth, part, size, and header limits: parameters (RFC 2231), encoded words (RFC 2047), transfer encodings, text in UTF-8, and anomalies noted instead of failing |
 | `html/` | `Sovite.HTML` | A bounded HTML tokenizer for filters: visible text, text hidden by styles, links, images, the title, and HTML5 character references |
 | `url/` | `Sovite.URL` | URLs and mail addresses in text: finding them (with `hxxp` and `[.]` undone), taking them apart, normalizing hosts (IDNA, %-escapes, numeric IPv4), and noting the tricks |
@@ -77,6 +77,7 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 | `milter/` | `Sovite.Milter` | Milter protocol client (version 6, for Rspamd, OpenDKIM, OpenDMARC, ClamAV-milter, ...), packet codec, applying a milter's header changes with libmilter index rules |
 | `policy/` | `Sovite.Policy` | Postfix policy delegation protocol: a client (TCP, Unix socket, or a program on standard input and output, as for policyd-spf), access(5) action parsing, and a server, so policy servers can be written in Elixir |
 | `analyzer/` | `Sovite.Analyzer` | A message taken apart for a filter: MIME structure, text parts (HTML made text), URLs with their link texts, addresses, attachments with their types by content and disguised programs, and every anomaly |
+| `header_checks/` | `Sovite.HeaderChecks` | Header checks for filters: missing or malformed `Date:`, `Message-ID:`, and `From:`, spoofing display names, `Reply-To:` to other domains, repeated fields, forged `Received:` chains |
 | `rules/` | `Sovite.Rules` | A rule engine for mail filtering: symbols with scores and groups, regular expressions matched with work limits, maps (IPs, domains, addresses, strings), composites and conditions as boolean expressions, rule files merged by name, actions by score |
 | `abuse/` | `Sovite.Abuse` | Failed-login penalties, DNSBL/DNSWL/RHSBL scoring, reverse DNS (FCrDNS) checks, greylisting decisions, rate limiting, an expiring cache |
 | `queue/` | `Sovite.Queue` | Durable mail spool with storage behaviour, crash recovery, retry scheduler |

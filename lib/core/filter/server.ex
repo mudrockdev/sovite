@@ -22,8 +22,10 @@ defmodule Sovite.Core.Filter.Server do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc false
-  # The state scans read: the rules, the maps of files, the timeout.
-  @spec loaded(term()) :: %{rules: Rules.t(), maps: map(), timeout: pos_integer()} | nil
+  # The state scans read: the rules, the maps of files, the timeout, and
+  # this server's name.
+  @spec loaded(term()) ::
+          %{rules: Rules.t(), maps: map(), timeout: pos_integer(), hostname: String.t()} | nil
   def loaded(instance), do: :persistent_term.get({__MODULE__, instance}, nil)
 
   @impl true
@@ -45,6 +47,7 @@ defmodule Sovite.Core.Filter.Server do
       flags: Keyword.fetch!(opts, :flags),
       interval: Keyword.fetch!(opts, :reload_interval),
       timeout: Keyword.fetch!(opts, :timeout),
+      hostname: Keyword.get(opts, :hostname, "localhost"),
       rules: nil,
       rule_stamps: nil,
       maps: %{},
@@ -81,7 +84,8 @@ defmodule Sovite.Core.Filter.Server do
       :persistent_term.put({__MODULE__, state.instance}, %{
         rules: state.rules,
         maps: state.maps,
-        timeout: state.timeout
+        timeout: state.timeout,
+        hostname: state.hostname
       })
     end
 

@@ -5,7 +5,8 @@ defmodule Sovite.RulesFuzzTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  alias Sovite.{Analyzer, Rules}
+  alias Sovite.{Analyzer, HeaderChecks, Rules}
+  alias Sovite.Message.{AddressList, Date, Headers, MessageID, Received}
   alias Sovite.Rules.{Expression, Maps}
   alias Sovite.Test.Fuzz
 
@@ -121,6 +122,38 @@ defmodule Sovite.RulesFuzzTest do
       assert Enum.all?(result.symbols, fn symbol ->
                Enum.all?(symbol.options, &String.valid?/1)
              end)
+    end
+  end
+
+  property "any header section is checked, and its fields parsed" do
+    seed =
+      "Received: from a.example (a [192.0.2.1]) by b.example; 27 Oct 2026 12:00:00 +0000 (UTC)\r\n" <>
+        "Date: Tue, 27 Oct 2026 12:00:00 +0300\r\nMessage-ID: <x@a.example>\r\n" <>
+        "From: \"A (x)\" <a@a.example>\r\nReply-To: b@b.example\r\nTo: c@c.example\r\n"
+
+    check all(
+            header <- Fuzz.input([seed], ["\r\n", ":", "<", ">", "\"", "(", ")", ";", "@", ","]),
+            max_runs: Fuzz.runs()
+          ) do
+      fields = Headers.parse(header)
+
+      symbols =
+        Fuzz.quick(fn ->
+          HeaderChecks.check(fields, hostnames: ["b.example"], envelope_from: "a@a.example")
+        end)
+
+      assert Enum.all?(symbols, fn {name, options} ->
+               is_binary(name) and Enum.all?(options, &String.valid?/1)
+             end)
+
+      for value <- [header | Enum.map(fields, &elem(&1, 1))] do
+        assert match?({:ok, %DateTime{}}, Date.parse(value)) or Date.parse(value) == :error
+        assert match?({:ok, _, _}, MessageID.parse(value)) or MessageID.parse(value) == :error
+        assert %{from: _, by: _, ip: _, date: _} = Received.parse(value)
+
+        assert match?({:ok, _}, AddressList.mailboxes(value)) or
+                 AddressList.mailboxes(value) == :error
+      end
     end
   end
 end

@@ -35,6 +35,7 @@ defmodule Sovite.Core.Filter do
         instance: instance,
         rules: config.filter.rules,
         flags: RuleFiles.flags(),
+        hostname: config.server.hostname,
         reload_interval: config.filter.reload_interval,
         timeout: config.filter.timeout
       ]
@@ -49,8 +50,8 @@ defmodule Sovite.Core.Filter do
   Scans a message with the loaded rules. Options are those of
   `Sovite.Rules.scan/3`, but `:maps` and `:timeout`, which come from the
   configuration, and `:checks`, results of Sovite's own checks
-  (`Sovite.Core.Filter.Checks`), whose symbols come before those of
-  `:symbols`. `{:error, :not_running}` when the part is not.
+  (`Sovite.Core.Filter.Checks`). Their symbols, then those of the header
+  checks (`Sovite.HeaderChecks`), come before those of `:symbols`. `{:error, :not_running}` when the part is not.
   """
   @spec scan(term(), binary(), keyword()) :: {:ok, Rules.result()} | {:error, :not_running}
   def scan(instance, message, opts \\ []) when is_binary(message) do
@@ -60,7 +61,13 @@ defmodule Sovite.Core.Filter do
 
       loaded ->
         {checks, opts} = Keyword.pop(opts, :checks, %{})
-        symbols = Checks.symbols(checks) ++ Keyword.get(opts, :symbols, [])
+        analysis = Analyzer.analyze(message)
+        envelope = Map.new(Keyword.get(opts, :envelope, %{}))
+
+        symbols =
+          Checks.symbols(checks) ++
+            Checks.headers(analysis, envelope, loaded.hostname) ++
+            Keyword.get(opts, :symbols, [])
 
         opts =
           Keyword.merge(opts,
@@ -70,7 +77,7 @@ defmodule Sovite.Core.Filter do
             timeout: loaded.timeout
           )
 
-        {:ok, Rules.scan(loaded.rules, Analyzer.analyze(message), opts)}
+        {:ok, Rules.scan(loaded.rules, analysis, opts)}
     end
   end
 end

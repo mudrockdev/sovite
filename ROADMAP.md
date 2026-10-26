@@ -305,7 +305,7 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 - [x] Rule engine: symbols with scores and groups, regular expression rules on headers, body, MIME parts, and URLs (with a safe regex engine and time limits), composites, conditions, maps (lists of IPs, domains, addresses, hashes) reloaded without restart
 - [x] Actions: reject, soft reject (`451`), greylist, add header, rewrite subject, quarantine, no action; thresholds per tenant and per user
 - [x] Existing checks as symbols: SPF, DKIM, DMARC, ARC, DNSBL/DNSWL/RHSBL, reverse DNS, greylisting, rate limits, sender and recipient rules
-- [ ] Header checks: missing or malformed `Date:`, `Message-ID:`, `From:`; forged `Received:` chains; mismatched display names; suspicious `Reply-To:`
+- [x] Header checks: missing or malformed `Date:`, `Message-ID:`, `From:`; forged `Received:` chains; mismatched display names; suspicious `Reply-To:`
 - [ ] Scanning in the MTA's SMTP session (before `250`) and for outbound mail of authenticated users
 - [ ] `X-Spam-*` and `Authentication-Results`-style result headers; per-symbol explanations in the message trace
 - [ ] Rspamd-compatible HTTP protocol (`/checkv2`, `/symbols`, `/ping`) and a milter server mode, so other MTAs (Postfix, Exim) can use the filter

@@ -1,6 +1,6 @@
 defmodule Sovite.Message.Received do
   @moduledoc """
-  Builds `Received:` trace header fields (RFC 5321 §4.4).
+  Builds and parses `Received:` trace header fields (RFC 5321 §4.4).
 
       Received: from client.example.net ([192.0.2.7])
               by mx.example.com with ESMTP id 0Q7c3XbK2mA9fZ
@@ -100,4 +100,55 @@ defmodule Sovite.Message.Received do
   @spec address_literal(:inet.ip_address()) :: String.t()
   def address_literal(ip) when tuple_size(ip) == 4, do: "[#{:inet.ntoa(ip)}]"
   def address_literal(ip), do: "[IPv6:#{:inet.ntoa(ip)}]"
+
+  @doc """
+  Reads a `Received:` field's value, leniently, as MTAs write them in
+  many ways: the `from` and `by` names, the address of the client (the
+  first address literal in a comment after `from`), and the date after
+  the last `;`. What is not there, or not readable, is `nil`.
+
+      iex> Sovite.Message.Received.parse("from client.example (client.example [192.0.2.7]) by mx.example.com with ESMTP; Sun, 4 Oct 2026 12:00:00 +0000")
+      %{from: "client.example", ip: "192.0.2.7", by: "mx.example.com", date: ~U[2026-10-04 12:00:00Z]}
+  """
+  @spec parse(String.t()) :: %{
+          from: String.t() | nil,
+          ip: String.t() | nil,
+          by: String.t() | nil,
+          date: DateTime.t() | nil
+        }
+  def parse(value) when is_binary(value) do
+    value = value |> String.replace(~r/\r?\n[ \t]+/, " ") |> String.trim()
+
+    {clauses, date} =
+      case :binary.matches(value, ";") do
+        [] ->
+          {value, nil}
+
+        matches ->
+          {at, 1} = List.last(matches)
+          rest = binary_part(value, at + 1, byte_size(value) - at - 1)
+          {binary_part(value, 0, at), parse_date(rest)}
+      end
+
+    %{
+      from: word(~r/\Afrom\s+([^\s;()]+)/i, clauses),
+      ip: word(~r/\Afrom\s+[^(]*\([^)]*\[(?:IPv6:)?([0-9A-Fa-f:.]+)\]/i, clauses),
+      by: word(~r/(?:\A|\s|\))by\s+([^\s;()]+)/i, clauses),
+      date: date
+    }
+  end
+
+  defp word(regex, text) do
+    case Regex.run(regex, text) do
+      [_, word] -> String.downcase(word)
+      nil -> nil
+    end
+  end
+
+  defp parse_date(text) do
+    case Date.parse(text) do
+      {:ok, date} -> date
+      :error -> nil
+    end
+  end
 end

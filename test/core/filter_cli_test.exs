@@ -103,19 +103,20 @@ defmodule Sovite.Core.FilterCLITest do
       assert stdout =~ "  R_DKIM_NA  0.0\n"
       assert stdout =~ "  RDNS_UNCONFIRMED  1.0 [client.example]\n"
       assert stdout =~ "  CAPS  7.0 [CHEAP]\n"
-      assert stdout =~ "score: 9.0\naction: add_header\n"
+      assert stdout =~ "  MISSING_MID  2.5\n"
+      assert stdout =~ "score: 14.5\naction: add_header\n"
 
       assert {64, _, _} = cli(config, ~w(filter scan --bogus))
     end
 
     test "scans a message", %{config: config, rules: rules, tmp_dir: dir} do
       file = Path.join(dir, "message.eml")
-      File.write!(file, "Subject: CHEAP stuff\r\n\r\nhi\r\n")
+      File.write!(file, message("CHEAP stuff"))
 
       assert {0, "score: 7.0\naction: add_header\n  CAPS  7.0 [CHEAP]\n", _} =
                cli(config, ["filter", "scan", file])
 
-      File.write!(file, "Subject: fine\r\n\r\nhi\r\n")
+      File.write!(file, message("fine"))
       assert {0, "score: 0.0\naction: no_action\n", _} = cli(config, ["filter", "scan", file])
       assert {1, _, stderr} = cli(config, ["filter", "scan", file <> ".x"])
       assert stderr =~ "error: cannot read"
@@ -124,5 +125,21 @@ defmodule Sovite.Core.FilterCLITest do
       assert {1, _, stderr} = cli(config, ["filter", "scan", file])
       assert stderr =~ "#{rules}: symbol[0].match: is required with regex or map"
     end
+  end
+
+  # A message whose header passes the header checks.
+  defp message(subject) do
+    date = Sovite.Message.Date.format(DateTime.utc_now())
+
+    """
+    Received: from client.example by mx.example.org; #{date}\r
+    Date: #{date}\r
+    Message-ID: <1@client.example>\r
+    From: Alice <a@example.com>\r
+    To: b@example.org\r
+    Subject: #{subject}\r
+    \r
+    hi\r
+    """
   end
 end

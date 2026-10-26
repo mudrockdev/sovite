@@ -151,6 +151,30 @@ Their scores are in Sovite's built-in rules (`priv/rules/10-checks.toml` in the 
 
 What a check found is kept with its symbol: the domain and the SPF mechanism that matched, the DKIM domains, the DNS list's answers, ...
 
+### Header checks
+
+Every message's header fields are checked too, for what mail programs do not write and forgers do. Their scores are in `priv/rules/20-headers.toml`, group `headers`.
+
+| Symbol | When | Default score |
+|---|---|---|
+| `MISSING_DATE`, `INVALID_DATE` | No `Date:`, or one that is not a date | 1.0, 1.5 |
+| `DATE_IN_FUTURE`, `DATE_IN_PAST` | `Date:` more than 2 hours ahead, more than 7 days ago | 4.0, 1.0 |
+| `MISSING_MID`, `INVALID_MSGID` | No `Message-ID:`, or one that is not `<left@right>` | 2.5, 1.7 |
+| `MID_RHS_NOT_FQDN` | The `Message-ID:` is not at a domain with a dot | 0.5 |
+| `MISSING_FROM`, `INVALID_FROM` | No `From:`, or none with an address that can be read | 2.0, 2.0 |
+| `MULTIPLE_FROM` | Several `From:` fields, or several addresses in one | 8.0 |
+| `SPOOF_DISPLAY_NAME` | The display name shows an address at another domain: `"service@paypal.com" <x@evil.example>` | 8.0 |
+| `FROM_NO_DN`, `FROM_NEQ_ENVFROM` | No display name; `From:` is not the envelope sender | 0 |
+| `REPLYTO_UNPARSABLE` | A `Reply-To:` without an address that can be read | 1.0 |
+| `REPLYTO_DOM_NEQ_FROM_DOM` | Replies go to another domain than `From:` | 0 |
+| `REPLYTO_FORGED_FROM` | A composite: replies go elsewhere, and DMARC failed or the display name spoofs | 3.0 |
+| `MISSING_TO`, `MISSING_SUBJECT` | No `To:`, no `Subject:` | 2.0, 2.0 |
+| `MULTIPLE_UNIQUE_HEADERS` | A field RFC 5322 allows once (`Date:`, `To:`, `Subject:`, `Message-ID:`, ...) appears again | 7.0 |
+| `RCVD_COUNT_ZERO` | No `Received:` field | 0 |
+| `RCVD_UNPARSABLE` | A `Received:` field without a readable date or host | 1.0 |
+| `RCVD_DATES_UNORDERED` | An earlier hop is dated more than an hour after a later one | 0.5 |
+| `FORGED_RCVD_HOSTNAME` | A `Received:` field says this server (`[server] hostname`) got the message before another host did: written by the sender, or a loop | 3.0 |
+
 ## Changing the rules of other files
 
 Entries are merged by name across files, in the order of `[filter] rules`: a later entry changes only the keys it sets. A local file can change a score, or turn a rule off, without copying it:

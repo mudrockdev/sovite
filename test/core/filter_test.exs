@@ -37,7 +37,7 @@ defmodule Sovite.Core.FilterTest do
 
   defp names(instance) do
     {:ok, result} = Filter.scan(instance, @message)
-    Enum.map(result.symbols, & &1.name)
+    for symbol <- result.symbols, symbol.group != "headers", do: symbol.name
   end
 
   test "rule files are read in name order, and their errors are config errors", %{tmp_dir: dir} do
@@ -136,7 +136,7 @@ defmodule Sovite.Core.FilterTest do
 
     assert {:ok, result} = Filter.scan(instance, @message, checks: checks, symbols: ["OTHER"])
 
-    assert Enum.map(result.symbols, &{&1.name, &1.score}) == [
+    assert for(s <- result.symbols, s.group != "headers", do: {s.name, s.score}) == [
              {"R_SPF_FAIL", 4.0},
              {"R_DKIM_NA", 0.0},
              {"OTHER", 0.0}

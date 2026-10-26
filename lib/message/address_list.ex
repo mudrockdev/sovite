@@ -38,6 +38,49 @@ defmodule Sovite.Message.AddressList do
   end
 
   @doc """
+  Returns the mailboxes in `value`, in order: each address with its
+  display name, unquoted and with white space collapsed (encoded words
+  are left as they are), or `nil`. `:error` as for `addresses/1`.
+
+      iex> Sovite.Message.AddressList.mailboxes(~S|"Doe, \\"J\\"" <j@x.example>, k@y, Team: Bo  Li <b@z>;|)
+      {:ok, [{~s(Doe, "J"), "j@x.example"}, {nil, "k@y"}, {"Bo Li", "b@z"}]}
+  """
+  @spec mailboxes(binary()) :: {:ok, [{String.t() | nil, String.t()}]} | :error
+  def mailboxes(value) do
+    with {:ok, units} <- tokenize(value, [], []),
+         do: {:ok, Enum.flat_map(units, &unit_mailboxes/1)}
+  end
+
+  defp unit_mailboxes(pieces) do
+    name = if Enum.any?(pieces, &match?({:angle, _}, &1)), do: display_name(pieces)
+    for address <- unit_addresses(pieces), do: {name, address}
+  end
+
+  # The words before the angle address; comments are not part of it.
+  defp display_name(pieces) do
+    name =
+      pieces
+      |> Enum.take_while(&(not match?({:angle, _}, &1)))
+      |> Enum.flat_map(fn
+        {:text, text} -> [text]
+        {:quoted, quoted} -> [unquote_string(quoted)]
+        _piece -> []
+      end)
+      |> Enum.join()
+      |> String.split()
+      |> Enum.join(" ")
+
+    if name == "", do: nil, else: name
+  end
+
+  # A quoted string as tokenized: without its opening quote.
+  defp unquote_string(quoted) do
+    quoted
+    |> binary_part(0, byte_size(quoted) - 1)
+    |> String.replace(~r/\\(.)/s, "\\1")
+  end
+
+  @doc """
   Rewrites the addresses in a whole header field (`"To: a@b\\r\\n"`), as
   kept by `Sovite.Message.Headers`.
   """

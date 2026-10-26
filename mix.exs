@@ -153,6 +153,7 @@ defmodule Sovite.MixProject do
           ~r/^Sovite\.URL/,
           ~r/^Sovite\.Magic/,
           ~r/^Sovite\.Analyzer/,
+          ~r/^Sovite\.HeaderChecks/,
           ~r/^Sovite\.Rules/
         ],
         DNS: [~r/^Sovite\.DNS/],
