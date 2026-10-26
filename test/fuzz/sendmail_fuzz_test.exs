@@ -9,7 +9,7 @@ defmodule Sovite.SendmailFuzzTest do
 
   import ExUnit.CaptureIO
 
-  alias Sovite.Core.Sendmail
+  alias Sovite.Core.MTA.Sendmail
   alias Sovite.Message.Headers
   alias Sovite.Queue.Spool
   alias Sovite.Test.{FakeMTA, Fuzz}

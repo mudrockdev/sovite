@@ -53,7 +53,8 @@ defmodule Sovite.Core.Metrics do
   | `sovite_ip_pool_limit_today` | gauge | `pool`, `address` |
   """
 
-  alias Sovite.Core.{Cluster, Control, IPPools, QueueInfo, QueueManager}
+  alias Sovite.Core.{Cluster, Control}
+  alias Sovite.Core.MTA.{IPPools, QueueInfo, QueueManager}
   alias Sovite.Metrics
 
   @version Mix.Project.config()[:version]
@@ -304,6 +305,9 @@ defmodule Sovite.Core.Metrics do
 
     nodes ++ pools
   end
+
+  # Without the MTA there is no queue.
+  defp queue_gauges(%{queue_manager: nil}), do: []
 
   defp queue_gauges(runtime) do
     counts = QueueInfo.counts(runtime.directory)

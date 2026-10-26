@@ -9,7 +9,7 @@ defmodule Sovite.Core.Repo.Schemas.SenderLogin do
 
   import Ecto.Changeset
 
-  alias Sovite.Core.SenderCheck
+  alias Sovite.Core.MTA.SenderCheck
 
   @type t :: %__MODULE__{}
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# newaliases(1) for local programs: runs Sovite.Core.Sendmail without starting
+# newaliases(1) for local programs: runs Sovite.Core.MTA.Sendmail without starting
 # the MTA. Link it where programs look for it, such as /usr/bin/newaliases.
 set -e
 SELF=$(readlink -f "$0")
@@ -8,4 +8,4 @@ BIN_DIR=$(dirname "$SELF")
 # can still send mail.
 RELEASE_COOKIE="${RELEASE_COOKIE:-unused}"
 export RELEASE_COOKIE
-exec "$BIN_DIR/sovite" eval "Sovite.Core.Sendmail.main(System.argv())" -bi "$@"
+exec "$BIN_DIR/sovite" eval "Sovite.Core.MTA.Sendmail.main(System.argv())" -bi "$@"

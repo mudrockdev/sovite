@@ -3,13 +3,13 @@ defmodule Sovite.Core.Repo.Tables.AccessRules do
   Access rules for the restriction chains, stored in Sovite's database
   and managed with `sovitectl access`.
 
-  As a `Sovite.Core.Lookup` table, the handle names the kind of rule:
+  As a `Sovite.Core.MTA.Lookup` table, the handle names the kind of rule:
   `:client`, `:helo`, `:sender`, or `:recipient`.
   A lookup returns the action and its text, as an `access(5)` table
   would.
   """
 
-  @behaviour Sovite.Core.Lookup
+  @behaviour Sovite.Core.MTA.Lookup
 
   import Ecto.Query, only: [from: 2]
 
@@ -52,7 +52,7 @@ defmodule Sovite.Core.Repo.Tables.AccessRules do
   def list(repo),
     do: Repo.run(repo, & &1.all(from(r in AccessRule, order_by: [r.kind, r.pattern])))
 
-  @impl Sovite.Core.Lookup
+  @impl Sovite.Core.MTA.Lookup
   def lookup(%{repo: repo, kind: kind}, key) do
     query =
       from(r in AccessRule,

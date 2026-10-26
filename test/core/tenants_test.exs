@@ -3,7 +3,8 @@ defmodule Sovite.Core.TenantsTest do
   use ExUnit.Case, async: true
 
   alias Sovite.Abuse.RateLimit
-  alias Sovite.Core.{Config, SMTPHandler, Tenants}
+  alias Sovite.Core.{Config, Tenants}
+  alias Sovite.Core.MTA.SMTPHandler
   alias Sovite.DKIM.SigningKey
   alias Sovite.Queue.Spool
   alias Sovite.Test.{FakeDNS, SMTPClient, TelemetryForwarder}

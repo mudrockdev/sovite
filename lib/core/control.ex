@@ -41,8 +41,9 @@ defmodule Sovite.Core.Control do
 
   require Logger
 
-  alias Sovite.Core.{Config, Logging, QueueInfo, QueueManager}
+  alias Sovite.Core.{Config, Logging}
   alias Sovite.Core.Control.Signals
+  alias Sovite.Core.MTA.{QueueInfo, QueueManager}
   alias Sovite.Listener
   alias Sovite.Systemd
 
@@ -177,12 +178,11 @@ defmodule Sovite.Core.Control do
   defp build_status(state) do
     config = state.config
     runtime = state.runtime
-    stats = queue_stats(runtime.queue_manager)
-    counts = QueueInfo.counts(config.queue.directory)
 
     %{
       version: @version,
       hostname: config.server.hostname,
+      stack: config.stack,
       started_at: DateTime.to_iso8601(DateTime.from_unix!(runtime.started_at)),
       uptime: System.os_time(:second) - runtime.started_at,
       config_path: runtime.config_path,
@@ -193,13 +193,25 @@ defmodule Sovite.Core.Control do
           {id, count} <- listener_connections(runtime.supervisor),
           do: %{id: id, connections: count}
         ),
-      queue: %{counts | active: stats[:active] || counts.active},
-      deliveries: %{running: stats[:deliveries] || 0, ready: stats[:ready] || 0},
       vm: %{
         memory: :erlang.memory(:total),
         processes: :erlang.system_info(:process_count),
         otp_release: List.to_string(:erlang.system_info(:otp_release))
       }
+    }
+    |> Map.merge(mta_status(config, runtime.queue_manager))
+  end
+
+  # The queue, when this node runs the MTA.
+  defp mta_status(_config, nil), do: %{}
+
+  defp mta_status(config, manager) do
+    stats = queue_stats(manager)
+    counts = QueueInfo.counts(config.queue.directory)
+
+    %{
+      queue: %{counts | active: stats[:active] || counts.active},
+      deliveries: %{running: stats[:deliveries] || 0, ready: stats[:ready] || 0}
     }
   end
 
@@ -268,6 +280,8 @@ defmodule Sovite.Core.Control do
   defp check_restart(old, new) do
     keys =
       [
+        # Parts start or stop only with the server.
+        old.stack != new.stack && "stack",
         old.database != new.database && "database",
         old.queue.directory != new.queue.directory && "queue.directory"
       ]
@@ -447,15 +461,9 @@ defmodule Sovite.Core.Control do
       end
     end
 
-    manager = state.runtime.queue_manager
-    deliveries = Task.async(fn -> QueueManager.drain(manager, timeout) end)
+    deliveries = drain_deliveries(state.runtime.queue_manager, timeout)
     left = wait_connections(pids, deadline)
-
-    result =
-      case Task.yield(deliveries, max(deadline - System.monotonic_time(:millisecond), 0) + 1_000) do
-        {:ok, result} -> if result == :ok, do: :ok, else: :timeout
-        _ -> :timeout
-      end
+    result = deliveries_result(deliveries, deadline)
 
     :telemetry.execute(
       [:sovite, :server, :drain, :stop],
@@ -466,6 +474,21 @@ defmodule Sovite.Core.Control do
     %{state | drained: true}
   catch
     :exit, _reason -> %{state | drained: true}
+  end
+
+  # Without the MTA, there are no deliveries to wait for.
+  defp drain_deliveries(nil, _timeout), do: nil
+
+  defp drain_deliveries(manager, timeout),
+    do: Task.async(fn -> QueueManager.drain(manager, timeout) end)
+
+  defp deliveries_result(nil, _deadline), do: :ok
+
+  defp deliveries_result(task, deadline) do
+    case Task.yield(task, max(deadline - System.monotonic_time(:millisecond), 0) + 1_000) do
+      {:ok, result} -> if result == :ok, do: :ok, else: :timeout
+      _ -> :timeout
+    end
   end
 
   defp wait_connections(pids, deadline) do

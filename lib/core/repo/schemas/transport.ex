@@ -2,15 +2,15 @@ defmodule Sovite.Core.Repo.Schemas.Transport do
   @moduledoc """
   A transport map entry: mail for `pattern` (an address, a domain,
   `.domain` for its subdomains, or `*`) goes through `transport`, a
-  `Sovite.Core.Transport` specification.
+  `Sovite.Core.MTA.Transport` specification.
   """
 
   use Ecto.Schema
 
   import Ecto.Changeset
 
+  alias Sovite.Core.MTA.Transport, as: TransportSpec
   alias Sovite.Core.Repo.Data
-  alias Sovite.Core.Transport, as: TransportSpec
 
   @type t :: %__MODULE__{}
 

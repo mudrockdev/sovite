@@ -1,8 +1,8 @@
 defmodule Sovite.Core.Repo.Tables.DMARCReportEntries do
   @moduledoc """
   DMARC evaluations waiting to be reported, one per message, written by
-  `Sovite.Core.SMTPHandler` and read and removed by
-  `Sovite.Core.DMARCReports` when it sends the aggregate reports.
+  `Sovite.Core.MTA.SMTPHandler` and read and removed by
+  `Sovite.Core.MTA.DMARCReports` when it sends the aggregate reports.
   """
 
   import Ecto.Query, only: [from: 2]

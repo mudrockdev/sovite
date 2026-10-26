@@ -3,7 +3,8 @@ defmodule Sovite.Core.CLITest do
 
   import ExUnit.CaptureIO
 
-  alias Sovite.Core.{CLI, Greylist}
+  alias Sovite.Core.CLI
+  alias Sovite.Core.MTA.Greylist
   alias Sovite.DKIM.SigningKey
   alias Sovite.SASL.Password
   alias Sovite.Test.{Certs, Database, FakeNameserver}
@@ -16,6 +17,27 @@ defmodule Sovite.Core.CLITest do
     File.write!(path, ~s([server]\nhostname = "mx.example.org"\n))
 
     assert capture_io(fn -> assert CLI.run(["config", "check", path]) == 0 end) == "#{path}: OK\n"
+  end
+
+  test "a node without the MTA has no MTA commands", %{tmp_dir: dir} do
+    path = Path.join(dir, "no-mta.toml")
+    File.write!(path, "[stack]\nmta = false\n")
+
+    help = capture_io(fn -> assert CLI.run(["--config", path, "help"]) == 0 end)
+    refute help =~ "queue list"
+    refute help =~ "ip-pool status"
+    refute help =~ "and today's limits"
+    assert help =~ "config check"
+    assert help =~ "cluster status"
+
+    stderr =
+      capture_io(:stderr, fn -> assert CLI.run(["--config", path, "queue", "list"]) == 1 end)
+
+    assert stderr == "error: queue: the MTA is off on this node ([stack] mta = false)\n"
+
+    # With the MTA, all of them.
+    File.write!(path, "")
+    assert capture_io(fn -> CLI.run(["--config", path, "help"]) end) =~ "queue list"
   end
 
   test "config check prints each error and fails", %{tmp_dir: dir} do

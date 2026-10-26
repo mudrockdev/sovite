@@ -6,6 +6,7 @@ defmodule Sovite.AdminAPIFuzzTest do
   use ExUnit.Case, async: false
   use ExUnitProperties
 
+  alias Sovite.Core.Telemetry
   alias Sovite.Test.{FakeDNS, Fuzz}
 
   @moduletag :fuzz
@@ -49,7 +50,7 @@ defmodule Sovite.AdminAPIFuzzTest do
 
     on_exit(fn ->
       Logger.configure(level: level)
-      Sovite.Core.Telemetry.detach_logger()
+      Telemetry.detach_logger()
 
       with {:ok, %{formatter: formatter}} <- handler do
         :logger.update_handler_config(:default, :formatter, formatter)

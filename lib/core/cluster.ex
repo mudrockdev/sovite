@@ -26,7 +26,7 @@ defmodule Sovite.Core.Cluster do
       SQLite, greylisting (`Sovite.Core.Cluster.Sync`): nodes that share
       a PostgreSQL or MySQL database share the rest of the database
       anyway, so use one for the domains, users, and other tables;
-    * their queues (`Sovite.Core.Cluster.Queue`): copies of each queued
+    * their queues (`Sovite.Core.MTA.Cluster.Queue`): copies of each queued
       message on other nodes, which deliver it when its node stays
       down; mail handed to the node that sends from the right IP pool,
       or that owns its destination; and the queue of a node that leaves.
@@ -48,8 +48,10 @@ defmodule Sovite.Core.Cluster do
 
   alias Sovite.Cluster, as: Mesh
   alias Sovite.Cluster.{Joiner, Peer}
-  alias Sovite.Core.Cluster.{Queue, SharedConfig, Sync}
-  alias Sovite.Core.{Control, QueueInfo}
+  alias Sovite.Core.Cluster.{SharedConfig, Sync}
+  alias Sovite.Core.Control
+  alias Sovite.Core.MTA.Cluster.Queue
+  alias Sovite.Core.MTA.QueueInfo
 
   @version Mix.Project.config()[:version]
 
@@ -73,12 +75,12 @@ defmodule Sovite.Core.Cluster do
        queue_manager: runtime.queue_manager,
        directory: config.queue.directory,
        hostname: config.server.hostname,
+       stack: config.stack,
        max_message_size: config.smtp.max_message_size},
       {Joiner,
        name: Joiner, peers: cluster.seeds, port: cluster.port, interval: cluster.join_interval},
-      {Sync, Sync.opts(config, runtime)},
-      {Queue, Queue.opts(config, runtime)}
-    ]
+      {Sync, Sync.opts(config, runtime)}
+    ] ++ if(runtime.queue_manager, do: [{Queue, Queue.opts(config, runtime)}], else: [])
   end
 
   @doc false
@@ -138,7 +140,7 @@ defmodule Sovite.Core.Cluster do
   @doc """
   Takes this node out of the cluster: drains it (see
   `Sovite.Core.Control`), so it stops receiving and delivering mail,
-  hands its queue to the connected nodes (`Sovite.Core.Cluster.Queue`),
+  hands its queue to the connected nodes (`Sovite.Core.MTA.Cluster.Queue`),
   and leaves. Stop the node then. Returns how many messages were handed
   over, and how many stay here.
   """
@@ -171,6 +173,7 @@ defmodule Sovite.Core.Cluster do
           queue_manager: Keyword.fetch!(opts, :queue_manager),
           directory: Keyword.fetch!(opts, :directory),
           hostname: Keyword.fetch!(opts, :hostname),
+          stack: Keyword.fetch!(opts, :stack),
           shared: SharedConfig.read(cluster.shared_config),
           since: %{},
           started_at: System.os_time(:second)
@@ -248,7 +251,12 @@ defmodule Sovite.Core.Cluster do
       {:reply, {:error, :no_peers}, state}
     else
       :ok = Control.drain(state.control)
-      result = Queue.hand_over_all()
+      # Without the MTA there is no queue to hand over.
+      result =
+        if state.queue_manager,
+          do: Queue.hand_over_all(),
+          else: {:ok, %{handed_over: 0, failed: 0}}
+
       _ = Mesh.leave(state.node)
       {:reply, result, state}
     end
@@ -307,13 +315,16 @@ defmodule Sovite.Core.Cluster do
   def handle_info({:"$cluster_call", from, :summary}, state) do
     # Not here: the status of Control and the queue can take a while.
     %{hostname: hostname, directory: directory, started_at: started_at} = state
+    mta = state.queue_manager != nil
+    parts = for {part, true} <- state.stack, do: part
 
     spawn(fn ->
       Mesh.reply(from, %{
         version: @version,
         hostname: hostname,
         uptime: System.os_time(:second) - started_at,
-        queue: QueueInfo.counts(directory)
+        parts: Enum.sort(parts),
+        queue: if(mta, do: QueueInfo.counts(directory))
       })
     end)
 

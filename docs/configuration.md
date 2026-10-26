@@ -25,6 +25,18 @@ Every setting is optional. A release ships a commented example at `etc/sovite.to
 
 ---
 
+## `[stack]`
+
+Sovite is a whole mail stack in parts, each of which can be turned off: the MTA (in place of Postfix), the filter (in place of Rspamd, coming in 2.0), and the mailbox server (in place of Dovecot, coming in 3.0). See [`ROADMAP.md`](../ROADMAP.md). A part that is off starts nothing and opens no port. The config file, database, cluster, `sovitectl`, the admin API, and the web UI are shared by all parts and run whatever is on.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `mta` | boolean | `true` | Run the MTA: the `[[listener]]`s, the queue, delivery, and everything around them. Off, the node takes and sends no mail; the admin API's queue, routing, trace, and IP pool endpoints answer `404`, the web UI hides those pages, and `sovitectl` leaves `queue`, `route`, `trace`, `report`, and `ip-pool` out of its help and refuses them. Commands that manage the database (domains, aliases, users, ...) still work: the database is shared by every node and part. |
+| `filter` | boolean | `true` | Run the filter. Nothing to run yet. |
+| `mailbox` | boolean | `true` | Run the mailbox server. Nothing to run yet. |
+
+Turning a part on or off needs a restart: a reload refuses the change. In a cluster, each node says which parts it runs, and `sovitectl cluster status` shows them.
+
 ## `[server]`
 
 | Key | Type | Default | Description |
@@ -489,7 +501,7 @@ Replies outside `127.0.0.0/8` are ignored, and `127.255.255.0/24` replies (list 
 
 ### Restrictions for `EHLO` names and reverse DNS
 
-These checks can be added to the `[restrictions]` chains (`Sovite.Core.Restrictions` lists all checks):
+These checks can be added to the `[restrictions]` chains (`Sovite.Core.MTA.Restrictions` lists all checks):
 
 | Check | Effect |
 |---|---|
@@ -650,7 +662,7 @@ ln -s /opt/sovite/bin/mailq /usr/bin/mailq
 ln -s /opt/sovite/bin/newaliases /usr/bin/newaliases
 ```
 
-`sendmail` takes the usual options (`-t`, `-f`, `-F`, `-i`/`-oi`, `-bp`, `-bi`, ...; see `Sovite.Core.Sendmail`) and sends the message over SMTP to `server`, waiting until it is queued, so the exit status tells whether that worked (`75` when Sovite is not running). The listener must let local programs relay: add `127.0.0.1` to `smtp.trusted_networks`. Addresses without a domain get `@origin`. `mailq` lists the queue (as root or the Sovite user, since it reads the queue directory). `newaliases` does nothing: aliases are in the database.
+`sendmail` takes the usual options (`-t`, `-f`, `-F`, `-i`/`-oi`, `-bp`, `-bi`, ...; see `Sovite.Core.MTA.Sendmail`) and sends the message over SMTP to `server`, waiting until it is queued, so the exit status tells whether that worked (`75` when Sovite is not running). The listener must let local programs relay: add `127.0.0.1` to `smtp.trusted_networks`. Addresses without a domain get `@origin`. `mailq` lists the queue (as root or the Sovite user, since it reads the queue directory). `newaliases` does nothing: aliases are in the database.
 
 The settings are read from the config file when the user running `sendmail` can read it; otherwise the defaults apply.
 

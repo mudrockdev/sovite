@@ -1,6 +1,6 @@
 defmodule Sovite.Core.Repo.Tables.GreylistEntries do
   @moduledoc """
-  The greylisting triplets seen by `Sovite.Core.Greylist`: one per
+  The greylisting triplets seen by `Sovite.Core.MTA.Greylist`: one per
   client network, sender, and recipient.
   """
 

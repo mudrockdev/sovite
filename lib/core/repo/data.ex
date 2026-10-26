@@ -136,10 +136,10 @@ defmodule Sovite.Core.Repo.Data do
   end
 
   @doc """
-  Runs a lookup query for `Sovite.Core.Lookup`: `nil` is "not found", a
+  Runs a lookup query for `Sovite.Core.MTA.Lookup`: `nil` is "not found", a
   database failure is `{:error, {:database, message}}`.
   """
-  @spec lookup(Repo.t(), (module() -> String.t() | nil)) :: Sovite.Core.Lookup.result()
+  @spec lookup(Repo.t(), (module() -> String.t() | nil)) :: Sovite.Core.MTA.Lookup.result()
   def lookup(repo, fun) do
     case Repo.run(repo, fun) do
       nil -> :error

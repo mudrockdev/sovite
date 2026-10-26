@@ -180,7 +180,7 @@ defmodule Sovite.Core.SupervisorTest do
       )
 
     ids = for {id, _pid, _type, _modules} <- Supervisor.which_children(supervisor), do: id
-    assert Sovite.Core.Greylist in ids
+    assert Sovite.Core.MTA.Greylist in ids
     assert {Sovite.Abuse.RateLimit, Sovite.Core.RateLimit} in ids
 
     {:ok, client} = SMTPClient.connect(listener_port(supervisor))
@@ -456,7 +456,7 @@ defmodule Sovite.Core.SupervisorTest do
       )
 
     children = Supervisor.which_children(supervisor)
-    assert Enum.any?(children, &match?({Sovite.Core.MTASTS, _, _, _}, &1))
+    assert Enum.any?(children, &match?({Sovite.Core.MTA.MTASTS, _, _, _}, &1))
 
     {_id, listener, _, _} =
       Enum.find(children, &match?({{Sovite.Listener, "mta-sts/" <> _}, _, _, _}, &1))

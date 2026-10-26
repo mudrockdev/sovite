@@ -6,7 +6,7 @@ defmodule Sovite.EcosystemFuzzTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  alias Sovite.Core.PolicyService
+  alias Sovite.Core.MTA.PolicyService
   alias Sovite.Message.Headers
   alias Sovite.Milter
   alias Sovite.Milter.Headers, as: MilterHeaders

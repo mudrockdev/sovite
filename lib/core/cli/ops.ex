@@ -14,15 +14,8 @@ defmodule Sovite.Core.CLI.Ops do
   alias Sovite.Core.Config.Settings
   alias Sovite.Core.Repo.Tables.DomainCache
 
-  alias Sovite.Core.{
-    Config,
-    LogReader,
-    LogReport,
-    QueueInfo,
-    RouteInfo,
-    Routing,
-    Trace
-  }
+  alias Sovite.Core.{Config, LogReader}
+  alias Sovite.Core.MTA.{LogReport, QueueInfo, RouteInfo, Routing, Trace}
 
   @commands ~w(queue config route status trace report)
 
@@ -366,23 +359,38 @@ defmodule Sovite.Core.CLI.Ops do
   end
 
   defp print_status(status) do
-    queue = status["queue"]
+    lines =
+      [
+        "sovite #{status["version"]} on #{status["hostname"]}",
+        "up #{uptime(status["uptime"])}, since #{status["started_at"]}",
+        "config: #{status["config_path"] || "(none)"}" <> last_reload(status["last_reload"]),
+        parts(status["stack"]),
+        if(status["draining"], do: "draining: shutting down")
+      ] ++ mta_status(status)
 
-    lines = [
-      "sovite #{status["version"]} on #{status["hostname"]}",
-      "up #{uptime(status["uptime"])}, since #{status["started_at"]}",
-      "config: #{status["config_path"] || "(none)"}" <> last_reload(status["last_reload"]),
-      if(status["draining"], do: "draining: shutting down"),
+    IO.puts(lines |> Enum.filter(& &1) |> Enum.join("\n"))
+    0
+  end
+
+  defp parts(nil), do: nil
+
+  defp parts(stack) do
+    on = for part <- ~w(mta filter mailbox), stack[part], do: part
+    "parts: " <> if(on == [], do: "none", else: Enum.join(on, ", "))
+  end
+
+  # The queue and the listeners, when the node runs the MTA.
+  defp mta_status(%{"queue" => queue} = status) when is_map(queue) do
+    [
       "queue: " <>
         Enum.map_join(QueueInfo.queues(), ", ", &"#{queue[Atom.to_string(&1)] || 0} #{&1}"),
       "deliveries: #{status["deliveries"]["running"]} running, #{status["deliveries"]["ready"]} waiting",
       "listeners:"
       | for(l <- status["listeners"], do: "  #{l["id"]}: #{l["connections"]} connections")
     ]
-
-    IO.puts(lines |> Enum.filter(& &1) |> Enum.join("\n"))
-    0
   end
+
+  defp mta_status(_status), do: []
 
   defp last_reload(nil), do: ""
   defp last_reload(%{"at" => at, "result" => "ok"}), do: ", reloaded #{at}"

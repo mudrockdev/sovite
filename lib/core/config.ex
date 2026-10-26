@@ -20,7 +20,8 @@ defmodule Sovite.Core.Config do
     TransportRules
   }
 
-  alias Sovite.Core.{Repo, Restrictions}
+  alias Sovite.Core.MTA.Restrictions
+  alias Sovite.Core.Repo
 
   @default_path "/etc/sovite/sovite.toml"
 
@@ -33,6 +34,14 @@ defmodule Sovite.Core.Config do
   ]
 
   @schema [
+    # The parts of the stack this node runs. Only the MTA exists so far.
+    {:stack,
+     {:section,
+      [
+        {:mta, :boolean, default: true},
+        {:filter, :boolean, default: true},
+        {:mailbox, :boolean, default: true}
+      ]}, []},
     {:server,
      {:section,
       [
@@ -485,6 +494,7 @@ defmodule Sovite.Core.Config do
   # map holds. The struct is read rarely, outside hot paths.
   # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
   defstruct [
+    :stack,
     :server,
     :database,
     :queue,
@@ -534,7 +544,10 @@ defmodule Sovite.Core.Config do
   @typedoc "A DNS list for `[screen]`, see `Sovite.Abuse.DNSBL`."
   @type dns_list :: %{zone: String.t(), weight: integer(), codes: list()}
 
+  @type part :: :mta | :filter | :mailbox
+
   @type t :: %__MODULE__{
+          stack: %{mta: boolean(), filter: boolean(), mailbox: boolean()},
           server: %{
             hostname: String.t(),
             authserv_id: String.t(),
@@ -762,7 +775,7 @@ defmodule Sovite.Core.Config do
             }
           ],
           policy: %{timeout: pos_integer(), default_action: String.t()},
-          sendmail: %{server: Sovite.Core.Transport.host(), origin: String.t() | nil},
+          sendmail: %{server: Sovite.Core.MTA.Transport.host(), origin: String.t() | nil},
           bounce: %{double_bounce_recipient: String.t() | nil, size_limit: pos_integer()},
           log: Sovite.Core.Logging.config(),
           admin: %{
@@ -816,7 +829,7 @@ defmodule Sovite.Core.Config do
           max_recipients: pos_integer() | nil
         }
 
-  @typedoc "An `[[ip_pool]]`: see `Sovite.Core.IPPools`."
+  @typedoc "An `[[ip_pool]]`: see `Sovite.Core.MTA.IPPools`."
   @type ip_pool :: %{
           name: String.t(),
           overflow: String.t() | nil,
@@ -1017,6 +1030,14 @@ defmodule Sovite.Core.Config do
   @doc "Returns whether any listener offers AUTH."
   @spec auth_enabled?(t() | map()) :: boolean()
   def auth_enabled?(config), do: Enum.any?(config.listener, & &1.auth)
+
+  @doc """
+  Whether this node runs `part` of the stack (`[stack]`). A part that is
+  off starts nothing and opens no port.
+  """
+  @spec part?(t() | map(), part()) :: boolean()
+  def part?(config, part) when part in [:mta, :filter, :mailbox],
+    do: Map.fetch!(config.stack, part)
 
   @doc """
   The DNS resolver for `config`: `Sovite.DNS.InetRes` with the `[dns]`

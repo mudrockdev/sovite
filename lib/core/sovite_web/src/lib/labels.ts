@@ -1,7 +1,7 @@
 // Localized names of API values.
 
 import { m } from '#lib/paraglide/messages.js';
-import type { MessageAction, QueueName, RecipientStatus } from './types.ts';
+import type { MessageAction, Part, QueueName, RecipientStatus } from './types.ts';
 
 export const queueLabel: Record<QueueName, () => string> = {
 	incoming: m.queue_incoming,
@@ -9,6 +9,12 @@ export const queueLabel: Record<QueueName, () => string> = {
 	deferred: m.queue_deferred,
 	hold: m.queue_hold,
 	corrupt: m.queue_corrupt
+};
+
+export const partLabel: Record<Part, () => string> = {
+	mta: m.part_mta,
+	filter: m.part_filter,
+	mailbox: m.part_mailbox
 };
 
 export const statusLabel: Record<RecipientStatus['status'], () => string> = {
@@ -26,7 +32,7 @@ export const actionLabel: Record<MessageAction, () => string> = {
 	delete: m.action_delete
 };
 
-/** What can be done to a message in each queue (see Sovite.Core.QueueManager). */
+/** What can be done to a message in each queue (see Sovite.Core.MTA.QueueManager). */
 export const queueActions: Record<QueueName, MessageAction[]> = {
 	incoming: ['retry', 'hold', 'delete'],
 	active: ['hold', 'requeue', 'delete'],

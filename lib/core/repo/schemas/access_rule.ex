@@ -1,6 +1,6 @@
 defmodule Sovite.Core.Repo.Schemas.AccessRule do
   @moduledoc """
-  An access rule for the restriction chains (`Sovite.Core.Restrictions`):
+  An access rule for the restriction chains (`Sovite.Core.MTA.Restrictions`):
   when the client address, `EHLO` name, sender, or recipient (`kind`)
   matches `pattern`, take `action` (`ACCEPT`, `CONTINUE`, `REJECT`,
   `DEFER`, `DISCARD`, `HOLD`, `WARN`, or a `4NN`/`5NN` reply code) with

@@ -1,7 +1,7 @@
 defmodule Sovite.Core.CLI.Cluster do
   @moduledoc false
   # The sovitectl commands for clusters (Sovite.Core.Cluster) and IP
-  # pools (Sovite.Core.IPPools). They act on the running server, through
+  # pools (Sovite.Core.MTA.IPPools). They act on the running server, through
   # the admin API (Sovite.Core.CLI.API).
 
   import Sovite.Core.CLI.Helpers
@@ -105,6 +105,7 @@ defmodule Sovite.Core.CLI.Cluster do
     [
       member["hostname"],
       member["version"] && "sovite #{member["version"]}",
+      member["parts"] && Enum.join(member["parts"], "+"),
       member["queue"] && queue(member["queue"]),
       member["since"] && "since #{member["since"]}"
     ]

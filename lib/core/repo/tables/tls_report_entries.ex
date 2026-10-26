@@ -1,8 +1,8 @@
 defmodule Sovite.Core.Repo.Tables.TLSReportEntries do
   @moduledoc """
   TLS outcomes of outgoing sessions waiting to be reported, one per
-  session, written by `Sovite.Core.Delivery` and read and removed by
-  `Sovite.Core.TLSReports` when it sends the TLS-RPT reports.
+  session, written by `Sovite.Core.MTA.Delivery` and read and removed by
+  `Sovite.Core.MTA.TLSReports` when it sends the TLS-RPT reports.
   """
 
   import Ecto.Query, only: [from: 2]

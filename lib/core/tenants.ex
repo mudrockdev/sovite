@@ -31,7 +31,7 @@ defmodule Sovite.Core.Tenants do
       and `max_message_size` and `max_recipients` per message.
     * DKIM keys: the keys of a tenant's domains (`[[dkim.key]]`) sign
       only that tenant's mail, so one customer cannot sign as another.
-    * An IP pool (`ip_pool`, see `Sovite.Core.IPPools`) to send from,
+    * An IP pool (`ip_pool`, see `Sovite.Core.MTA.IPPools`) to send from,
       instead of `delivery.ip_pool`. An address the sender relays table
       gives for a sender comes first.
 

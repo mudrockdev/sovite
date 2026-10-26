@@ -2,7 +2,7 @@ defmodule Sovite.Core.Repo.Schemas.IPAddressCount do
   @moduledoc """
   How many messages went out from one source address of an IP pool on
   one day (UTC), for warm-up schedules and daily limits, see
-  `Sovite.Core.IPPools`.
+  `Sovite.Core.MTA.IPPools`.
   """
 
   use Ecto.Schema

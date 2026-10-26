@@ -20,8 +20,8 @@ defmodule Sovite.Core.Supervisor do
     * `:config_path` - path to the config file. Ignored when `:config` is
       given. Defaults to `Sovite.Core.Config.default_path/0`.
     * `:name` - the supervisor's registered name. Defaults to this module.
-    * `:queue_manager` - extra `Sovite.Core.QueueManager` options, such
-      as `:name` (defaults to `Sovite.Core.QueueManager`) or `:resolver`.
+    * `:queue_manager` - extra `Sovite.Core.MTA.QueueManager` options, such
+      as `:name` (defaults to `Sovite.Core.MTA.QueueManager`) or `:resolver`.
 
   ## Children
 
@@ -43,6 +43,14 @@ defmodule Sovite.Core.Supervisor do
   (`Sovite.Core.Web`, the UI and admin API), the systemd watchdog, and last
   `Sovite.Core.Control`, which reloads the configuration on `SIGHUP` and
   drains the server when it stops.
+
+  ## Parts of the stack
+
+  The MTA's children (everything above but the log file handler, the
+  database, the certificate store and ACME client, the cluster's
+  membership and shared state, the metrics, the trace exporter, the
+  admin API, the watchdog, and `Sovite.Core.Control`) start only with
+  `stack.mta`. The filter and mailbox parts have nothing to start yet.
 
   ## Reloading
 
@@ -75,21 +83,24 @@ defmodule Sovite.Core.Supervisor do
     Cluster,
     Config,
     Control,
+    Logging,
+    Metrics,
+    Repo,
+    Telemetry,
+    Tracing,
+    Web
+  }
+
+  alias Sovite.Core.MTA.{
     DMARCReports,
     Greylist,
     IPPools,
-    Logging,
     MailAuth,
-    Metrics,
     MTASTS,
     Outbound,
     QueueManager,
-    Repo,
     SMTPHandler,
-    Telemetry,
-    TLSReports,
-    Tracing,
-    Web
+    TLSReports
   }
 
   alias Sovite.Queue.Spool
@@ -97,7 +108,7 @@ defmodule Sovite.Core.Supervisor do
 
   @cert_store Sovite.Core.CertStore
   @penalty Sovite.Core.AuthPenalty
-  @mta_sts Sovite.Core.MTASTS
+  @mta_sts Sovite.Core.MTA.MTASTS
   @rate_limit Sovite.Core.RateLimit
   @screen_cache Sovite.Core.ScreenCache
   @suspensions Sovite.Core.Suspensions
@@ -160,24 +171,46 @@ defmodule Sovite.Core.Supervisor do
   def runtime(config, args) do
     manager_opts = Keyword.put_new(args.manager_opts, :name, QueueManager)
 
+    Map.merge(
+      %{
+        args: args,
+        supervisor: args.supervisor,
+        instance: args.instance,
+        config_path: args.config_path,
+        manager_opts: manager_opts,
+        resolver: manager_opts[:resolver] || Config.resolver(config),
+        repo: Repo.ref(config.database),
+        cert_store: if(Config.tls_enabled?(config), do: @cert_store),
+        outbound: Outbound.opts(config, @rate_limit, @suspensions),
+        control: args.names.control,
+        metrics: if(config.metrics.enabled and config.admin.enabled, do: args.names.metrics),
+        tracing: if(config.tracing.enabled, do: args.names.tracing),
+        started_at: args.started_at,
+        inherited: inherited_sockets()
+      },
+      mta_runtime(Config.part?(config, :mta), config, manager_opts)
+    )
+  end
+
+  # The MTA's processes, nil on a node that does not run it.
+  defp mta_runtime(false, _config, _manager_opts) do
     %{
-      args: args,
-      supervisor: args.supervisor,
-      instance: args.instance,
-      config_path: args.config_path,
-      manager_opts: manager_opts,
+      mta: false,
+      queue_manager: nil,
+      penalty: nil,
+      mta_sts: nil,
+      rate_limit: nil,
+      suspensions: nil,
+      ip_pools: nil
+    }
+  end
+
+  defp mta_runtime(true, config, manager_opts) do
+    %{
+      mta: true,
       queue_manager: manager_opts[:name],
-      resolver: manager_opts[:resolver] || Config.resolver(config),
-      repo: Repo.ref(config.database),
       penalty: if(Config.auth_enabled?(config), do: @penalty),
-      cert_store: if(Config.tls_enabled?(config), do: @cert_store),
       mta_sts: if(config.mta_sts.enabled, do: @mta_sts),
-      outbound: Outbound.opts(config, @rate_limit, @suspensions),
-      control: args.names.control,
-      metrics: if(config.metrics.enabled and config.admin.enabled, do: args.names.metrics),
-      tracing: if(config.tracing.enabled, do: args.names.tracing),
-      started_at: args.started_at,
-      inherited: inherited_sockets(),
       rate_limit: @rate_limit,
       suspensions: @suspensions,
       ip_pools: if(config.ip_pool != [], do: IPPools)
@@ -201,21 +234,23 @@ defmodule Sovite.Core.Supervisor do
         Keyword.drop(runtime.manager_opts, [:resolver])
 
     (Logging.child_specs(config.log) ++
-       [
-         {Repo, {config.database, elem(runtime.repo, 1)}},
-         {DomainCache, repo: runtime.repo}
-       ] ++
+       [{Repo, {config.database, elem(runtime.repo, 1)}}] ++
+       mta_only(runtime, [{DomainCache, repo: runtime.repo}]) ++
        pool_specs(config, runtime) ++
        security_specs(config, runtime) ++
-       [{QueueManager, QueueManager.opts(config, runtime.repo) ++ manager_opts}] ++
+       mta_only(runtime, [{QueueManager, QueueManager.opts(config, runtime.repo) ++ manager_opts}]) ++
        Cluster.child_specs(config, runtime) ++
-       report_specs(config, runtime) ++
-       Enum.map(config.listener, &listener(&1, config, runtime)) ++
-       policy_specs(config, runtime) ++
+       mta_only(runtime, report_specs(config, runtime)) ++
+       mta_only(runtime, Enum.map(config.listener, &listener(&1, config, runtime))) ++
+       mta_only(runtime, policy_specs(config, runtime)) ++
        operations_specs(config, runtime) ++
        [{Control, runtime: runtime, config: config}])
     |> Enum.map(&Supervisor.child_spec(&1, []))
   end
+
+  # The MTA's children start only when this node runs the MTA ([stack]).
+  defp mta_only(%{mta: true}, specs), do: specs
+  defp mta_only(_runtime, _specs), do: []
 
   ## Indirect starts
 
@@ -267,14 +302,18 @@ defmodule Sovite.Core.Supervisor do
         else: []
       ) ++
       Web.child_specs(config, runtime) ++
-      [{Sovite.Systemd.Watchdog, check: fn -> is_map(QueueManager.stats(manager)) end}]
+      [{Sovite.Systemd.Watchdog, check: watchdog_check(manager)}]
   end
+
+  # Without the MTA, there is no queue manager that could hang.
+  defp watchdog_check(nil), do: fn -> true end
+  defp watchdog_check(manager), do: fn -> is_map(QueueManager.stats(manager)) end
 
   # The failed-login counter, the anti-abuse processes, the certificate
   # store and ACME client, and the MTA-STS policy cache.
   defp security_specs(config, runtime) do
     if(runtime.penalty, do: [penalty_spec(config)], else: []) ++
-      abuse_specs(config, runtime) ++
+      mta_only(runtime, abuse_specs(config, runtime)) ++
       if(runtime.cert_store, do: tls_specs(config), else: []) ++
       if(runtime.mta_sts, do: [mta_sts_spec(config, runtime)], else: [])
   end

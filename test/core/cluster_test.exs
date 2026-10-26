@@ -8,7 +8,7 @@ defmodule Sovite.Core.ClusterTest do
   import ExUnit.CaptureIO
 
   alias Sovite.Core.{CLI, Cluster}
-  alias Sovite.Core.Cluster.Queue
+  alias Sovite.Core.MTA.Cluster.Queue
   alias Sovite.Queue.{Envelope, ID, Spool}
   alias Sovite.Test.{ClusterPeers, FakeMTA}
 
@@ -232,14 +232,17 @@ defmodule Sovite.Core.ClusterTest do
 
     # Held, so that nobody delivers it.
     id = spool(a)
-    assert :ok = call(a, Sovite.Core.QueueManager, :hold, [Sovite.Core.QueueManager, id])
+    assert :ok = call(a, Sovite.Core.MTA.QueueManager, :hold, [Sovite.Core.MTA.QueueManager, id])
 
     ClusterPeers.eventually(fn -> call(b, Queue, :status, []).copies == %{"a@127.0.0.1" => 1} end)
 
     # Delivered messages lose their copies.
     done = spool(a)
     ClusterPeers.eventually(fn -> call(b, Queue, :status, []).copies == %{"a@127.0.0.1" => 2} end)
-    assert :ok = call(a, Sovite.Core.QueueManager, :delete, [Sovite.Core.QueueManager, done])
+
+    assert :ok =
+             call(a, Sovite.Core.MTA.QueueManager, :delete, [Sovite.Core.MTA.QueueManager, done])
+
     ClusterPeers.eventually(fn -> call(b, Queue, :status, []).copies == %{"a@127.0.0.1" => 1} end)
 
     :peer.stop(a.peer)
@@ -271,9 +274,14 @@ defmodule Sovite.Core.ClusterTest do
     connected(a, b)
 
     held = spool(a)
-    assert :ok = call(a, Sovite.Core.QueueManager, :hold, [Sovite.Core.QueueManager, held])
+
+    assert :ok =
+             call(a, Sovite.Core.MTA.QueueManager, :hold, [Sovite.Core.MTA.QueueManager, held])
+
     waiting = spool(a, ["x@nowhere.invalid"])
-    assert :ok = call(a, Sovite.Core.QueueManager, :hold, [Sovite.Core.QueueManager, waiting])
+
+    assert :ok =
+             call(a, Sovite.Core.MTA.QueueManager, :hold, [Sovite.Core.MTA.QueueManager, waiting])
 
     assert {:ok, %{handed_over: 2, failed: 0}} = call(a, Cluster, :leave, [])
     assert queued?(b, :hold, held)
@@ -309,7 +317,7 @@ defmodule Sovite.Core.ClusterTest do
     # owner.
     for node <- [a, b] do
       id = spool(node)
-      call(node, Sovite.Core.QueueManager, :notify, [Sovite.Core.QueueManager, id])
+      call(node, Sovite.Core.MTA.QueueManager, :notify, [Sovite.Core.MTA.QueueManager, id])
     end
 
     # (The second may reuse the owner's connection.)
@@ -339,7 +347,12 @@ defmodule Sovite.Core.ClusterTest do
     }
 
     :ok = call(a, ClusterPeers, :write_message, [a.queue, envelope])
-    call(a, Sovite.Core.QueueManager, :notify, [Sovite.Core.QueueManager, envelope.queue_id])
+
+    call(a, Sovite.Core.MTA.QueueManager, :notify, [
+      Sovite.Core.MTA.QueueManager,
+      envelope.queue_id
+    ])
+
     assert_receive {:fake_mta, ^mta, {:peer, {127, 0, 0, 5}}}, 10_000
     assert_receive {:fake_mta, ^mta, {:message, %{rcpt_to: ["b@example.net"]}}}, 10_000
   end

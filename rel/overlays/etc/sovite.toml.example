@@ -4,6 +4,14 @@
 # with `sovitectl config check`. Every setting is optional; the values below
 # are the defaults. See docs/configuration.md for the full reference.
 
+[stack]
+# The parts of the mail stack this node runs. A part that is off starts
+# nothing and opens no port. Changing them needs a restart.
+mta = true
+# The filter (2.0) and the mailbox server (3.0) are not there yet.
+filter = true
+mailbox = true
+
 [server]
 # Fully qualified name used in the SMTP greeting, EHLO, and Received: headers.
 # Defaults to the system hostname, which is often not fully qualified.

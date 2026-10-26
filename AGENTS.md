@@ -26,6 +26,7 @@ Sovite's own data lives in its database through Ecto (`Sovite.Core.Repo`). SQLit
 
 ## Code
 
+- The stack has three parts (see `STRUCTURE.md`): the MTA in `lib/core/mta/` (`Sovite.Core.MTA.*`), and later the filter in `lib/core/filter/` and the mailbox in `lib/core/mailbox/`. Code that more than one part uses (config, database, supervision, cluster, CLI and web UI shells, logging, telemetry) stays in `lib/core/`. All parts share one database and one schema.
 - `lib/<component>/` folders are reusable libraries (see `STRUCTURE.md`):
   - They never reference `Sovite.Core`; `scripts/check_boundaries.sh` enforces this.
   - They report through telemetry instead of logging.

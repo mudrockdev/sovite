@@ -143,6 +143,40 @@ defmodule Sovite.Core.OperationsTest do
     end
   end
 
+  describe "parts of the stack" do
+    test "a node without the MTA opens no MTA port, and still runs the admin API", context do
+      context = start_mta(context, "[stack]\nmta = false")
+
+      # No listener, queue manager, or other MTA process.
+      assert Control.listener_connections(context.supervisor) == []
+
+      refute Enum.any?(Supervisor.which_children(context.supervisor), fn {id, _, _, _} ->
+               id in [Sovite.Core.MTA.QueueManager, Sovite.Core.Repo.Tables.DomainCache]
+             end)
+
+      assert {200, body} = http(context, :get, "/api/status")
+      status = JSON.decode!(body)
+      assert status["stack"] == %{"mta" => false, "filter" => true, "mailbox" => true}
+      refute Map.has_key?(status, "queue")
+
+      assert {404, body} = http(context, :get, "/api/queue")
+      assert JSON.decode!(body)["error"] =~ "the MTA is off"
+
+      assert {200, metrics} = http(context, :get, "/metrics")
+      refute metrics =~ "sovite_queue_messages"
+
+      output = capture_io(fn -> assert cli(context, ["status"]) == 0 end)
+      assert output =~ "parts: filter, mailbox"
+      refute output =~ "queue:"
+
+      # Turning a part on or off needs a restart.
+      File.write!(context.path, toml(context, "[stack]\nmta = true"))
+
+      assert {:error, {:restart_required, ["stack"]}} =
+               Control.reload(control(context.supervisor))
+    end
+  end
+
   describe "web server" do
     test "needs the token, and serves status, config, and metrics", context do
       context = start_mta(context)

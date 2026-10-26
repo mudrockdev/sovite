@@ -169,6 +169,7 @@ defmodule Sovite.MixProject do
         Metrics: [~r/^Sovite\.Metrics/],
         Tracing: [~r/^Sovite\.Tracing/],
         Systemd: [~r/^Sovite\.Systemd/],
+        MTA: [~r/^Sovite\.Core\.MTA/],
         Core: [~r/^Sovite\.Core/, Sovite]
       ]
     ]

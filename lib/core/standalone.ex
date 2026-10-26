@@ -20,7 +20,8 @@ defmodule Sovite.Core.Standalone do
   no arguments, it keeps the VM running for the server.
   """
 
-  alias Sovite.Core.{CLI, Sendmail}
+  alias Sovite.Core.CLI
+  alias Sovite.Core.MTA.Sendmail
 
   @version Mix.Project.config()[:version]
 

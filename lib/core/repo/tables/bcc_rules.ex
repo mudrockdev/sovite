@@ -1,14 +1,14 @@
 defmodule Sovite.Core.Repo.Tables.BccRules do
   @moduledoc """
   BCC rules stored in Sovite's database, managed with `sovitectl bcc`
-  (see `Sovite.Core.Recipients.bcc/3`).
+  (see `Sovite.Core.MTA.Recipients.bcc/3`).
 
-  As a `Sovite.Core.Lookup` table, the handle names the kind (`:sender`
+  As a `Sovite.Core.MTA.Lookup` table, the handle names the kind (`:sender`
   or `:recipient`) and a lookup returns every copy address for a
   pattern, joined with `", "`.
   """
 
-  @behaviour Sovite.Core.Lookup
+  @behaviour Sovite.Core.MTA.Lookup
 
   import Ecto.Query, only: [from: 2]
 
@@ -45,7 +45,7 @@ defmodule Sovite.Core.Repo.Tables.BccRules do
   def list(repo),
     do: Repo.run(repo, & &1.all(from(r in BccRule, order_by: [r.kind, r.pattern, r.address])))
 
-  @impl Sovite.Core.Lookup
+  @impl Sovite.Core.MTA.Lookup
   def lookup(%{repo: repo, kind: kind}, key) do
     query =
       from(r in BccRule,

@@ -1,7 +1,7 @@
 defmodule Sovite.Core.Repo.Tables.IPAddressCounts do
   @moduledoc """
   Messages sent per source address and day, for the warm-up schedules
-  and daily limits of `Sovite.Core.IPPools`.
+  and daily limits of `Sovite.Core.MTA.IPPools`.
   """
 
   import Ecto.Query, only: [from: 2]

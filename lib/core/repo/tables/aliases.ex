@@ -2,11 +2,11 @@ defmodule Sovite.Core.Repo.Tables.Aliases do
   @moduledoc """
   Aliases stored in Sovite's database, managed with `sovitectl alias`.
 
-  As a `Sovite.Core.Lookup` table, a lookup returns the
+  As a `Sovite.Core.MTA.Lookup` table, a lookup returns the
   destinations of an enabled alias, joined with `", "`.
   """
 
-  @behaviour Sovite.Core.Lookup
+  @behaviour Sovite.Core.MTA.Lookup
 
   import Ecto.Query, only: [from: 2]
 
@@ -91,7 +91,7 @@ defmodule Sovite.Core.Repo.Tables.Aliases do
     end)
   end
 
-  @impl Sovite.Core.Lookup
+  @impl Sovite.Core.MTA.Lookup
   def lookup(%{repo: repo}, key) do
     query =
       from(d in AliasDestination,

@@ -23,14 +23,14 @@ defmodule Sovite.Core.Config.Schema do
   #   :url                     - an absolute URL; with {:url, schemes} the scheme must be listed
   #   :sender_pattern          - an address, "@domain", or "*"
   #   :tls_destination         - a domain or an address literal ("[192.0.2.1]"), lower-cased
-  #   :restriction             - a check name, see Sovite.Core.Restrictions
-  #   :transport               - a Sovite.Core.Transport map, from "smtp", "lmtp:unix:/path", ...
+  #   :restriction             - a check name, see Sovite.Core.MTA.Restrictions
+  #   :transport               - a Sovite.Core.MTA.Transport map, from "smtp", "lmtp:unix:/path", ...
   #   :content_filter          - "" (none) or an smtp/lmtp transport with a next hop, kept as text
   #   :milter_address          - %{text, address}, from "inet:host:port", "inet:port@host", "unix:/path"
   #   :delimiter               - address extension delimiter characters, such as "+" or "+-"
   #   :hide_subdomain          - a domain, or "!domain" for an exception
   #   :maildir_template        - an absolute path with {user}, {domain}, {address} placeholders
-  #   :pipe_name               - letters, digits, "_", "-"; see Sovite.Core.Transport.pipe_name?/1
+  #   :pipe_name               - letters, digits, "_", "-"; see Sovite.Core.MTA.Transport.pipe_name?/1
   #   :name                    - a name for a [[tenant]] or [[ip_pool]]: letters, digits, "_", "-"
   #   :node_name               - a cluster node name, "name@host", kept as text
   #   :cluster_peer            - a cluster peer, "name@host" or "name@host:port", kept as text
@@ -56,7 +56,7 @@ defmodule Sovite.Core.Config.Schema do
 
   alias Sovite.Abuse.DNSBL
   alias Sovite.Core.Config.Error
-  alias Sovite.Core.{Restrictions, SenderCheck, Transport}
+  alias Sovite.Core.MTA.{Restrictions, SenderCheck, Transport}
   alias Sovite.LDAP.Filter
   alias Sovite.Message.Received
 

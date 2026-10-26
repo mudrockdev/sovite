@@ -3,9 +3,10 @@
 	import { api } from '#lib/api.ts';
 	import ErrorBanner from '#lib/components/ErrorBanner.svelte';
 	import { bytes, dateTime, duration } from '#lib/format.ts';
-	import { queueLabel } from '#lib/labels.ts';
+	import { partLabel, queueLabel } from '#lib/labels.ts';
 	import { m } from '#lib/paraglide/messages.js';
-	import { queueNames, type Status } from '#lib/types.ts';
+	import { stack } from '#lib/stack.svelte.ts';
+	import { parts, queueNames, type Status } from '#lib/types.ts';
 
 	let status = $state<Status | null>(null);
 	let error = $state<unknown>(null);
@@ -13,6 +14,7 @@
 	async function load() {
 		try {
 			status = await api.status();
+			stack.parts = status.stack;
 			error = null;
 		} catch (e) {
 			error = e;
@@ -44,23 +46,26 @@
 		</div>
 	{/if}
 
-	<section aria-label={m.queue()} class="mb-6">
-		<div class="stats w-full stats-vertical bg-base-100 shadow-sm sm:stats-horizontal">
-			{#each queueNames as queue (queue)}
-				<a href={resolve(`/queue?queue=${queue}`)} class="stat hover:bg-base-200">
-					<div class="stat-title">{queueLabel[queue]()}</div>
-					<div
-						class={[
-							'stat-value tabular-nums',
-							queue === 'corrupt' && status.queue.corrupt > 0 && 'text-error'
-						]}
-					>
-						{status.queue[queue]}
-					</div>
-				</a>
-			{/each}
-		</div>
-	</section>
+	{#if status.queue}
+		{@const counts = status.queue}
+		<section aria-label={m.queue()} class="mb-6">
+			<div class="stats w-full stats-vertical bg-base-100 shadow-sm sm:stats-horizontal">
+				{#each queueNames as queue (queue)}
+					<a href={resolve(`/queue?queue=${queue}`)} class="stat hover:bg-base-200">
+						<div class="stat-title">{queueLabel[queue]()}</div>
+						<div
+							class={[
+								'stat-value tabular-nums',
+								queue === 'corrupt' && counts.corrupt > 0 && 'text-error'
+							]}
+						>
+							{counts[queue]}
+						</div>
+					</a>
+				{/each}
+			</div>
+		</section>
+	{/if}
 
 	<div class="grid gap-6 lg:grid-cols-2">
 		<section class="card bg-base-100 shadow-sm">
@@ -71,6 +76,13 @@
 					<dd>{status.hostname}</dd>
 					<dt class="text-base-content/60">{m.version()}</dt>
 					<dd>{status.version}</dd>
+					<dt class="text-base-content/60">{m.parts()}</dt>
+					<dd>
+						{parts
+							.filter((part) => status?.stack[part])
+							.map((part) => partLabel[part]())
+							.join(', ') || m.none()}
+					</dd>
 					<dt class="text-base-content/60">{m.uptime()}</dt>
 					<dd>{duration(status.uptime)}</dd>
 					<dt class="text-base-content/60">{m.started()}</dt>
@@ -98,15 +110,17 @@
 
 		<section class="card bg-base-100 shadow-sm">
 			<div class="card-body">
-				<h2 class="card-title">{m.deliveries()}</h2>
-				<dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-					<dt class="text-base-content/60">{m.deliveries_running()}</dt>
-					<dd class="tabular-nums">{status.deliveries.running}</dd>
-					<dt class="text-base-content/60">{m.deliveries_ready()}</dt>
-					<dd class="tabular-nums">{status.deliveries.ready}</dd>
-				</dl>
+				{#if status.deliveries}
+					<h2 class="card-title">{m.deliveries()}</h2>
+					<dl class="mb-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+						<dt class="text-base-content/60">{m.deliveries_running()}</dt>
+						<dd class="tabular-nums">{status.deliveries.running}</dd>
+						<dt class="text-base-content/60">{m.deliveries_ready()}</dt>
+						<dd class="tabular-nums">{status.deliveries.ready}</dd>
+					</dl>
+				{/if}
 
-				<h2 class="mt-4 card-title">{m.runtime()}</h2>
+				<h2 class="card-title">{m.runtime()}</h2>
 				<dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
 					<dt class="text-base-content/60">{m.memory()}</dt>
 					<dd class="tabular-nums">{bytes(status.vm.memory)}</dd>

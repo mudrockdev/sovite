@@ -1,7 +1,7 @@
 defmodule Sovite.Core.Repo.Schemas.Domain do
   @moduledoc """
   A domain this server handles, and its class (see
-  `Sovite.Core.Routing`): `:local`, `:aliased`, `:hosted`, or `:relay`.
+  `Sovite.Core.MTA.Routing`): `:local`, `:aliased`, `:hosted`, or `:relay`.
   """
 
   use Ecto.Schema

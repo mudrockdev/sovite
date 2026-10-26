@@ -1,7 +1,7 @@
 defmodule Sovite.Core.Repo.Tables.MTASTSPolicies do
   @moduledoc """
   The MTA-STS policies of recipient domains, cached by
-  `Sovite.Core.MTASTS`: one per domain.
+  `Sovite.Core.MTA.MTASTS`: one per domain.
   """
 
   import Ecto.Query, only: [from: 2]

@@ -1,7 +1,7 @@
 defmodule Sovite.Test.FailingTable do
-  @moduledoc "A `Sovite.Core.Lookup` table that always fails, for testing temporary errors."
+  @moduledoc "A `Sovite.Core.MTA.Lookup` table that always fails, for testing temporary errors."
 
-  @behaviour Sovite.Core.Lookup
+  @behaviour Sovite.Core.MTA.Lookup
 
   def new, do: {__MODULE__, nil}
 

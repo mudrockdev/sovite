@@ -8,16 +8,23 @@ Every part of the codebase can be used as a library for other projects. The code
 
 ```
 lib/
-  sovite.ex          # Base application: starts the full MTA
-  core/              # Sovite-only parts (the MTA itself)
+  sovite.ex          # Base application: starts the stack
+  core/              # Sovite-only code: what the parts share
+    mta/             # the MTA part (Postfix replacement)
+    filter/          # the filter part (Rspamd replacement, 2.0)
+    mailbox/         # the mailbox part (Dovecot replacement, 3.0)
   <component>/       # Reusable components, one folder each
 ```
 
 | Location | Purpose | Reusable? |
 |---|---|---|
-| `lib/sovite.ex` | Application entry point. Starts the MTA supervision tree from `core/`. | No |
-| `lib/core/` | Everything that only makes sense inside the Sovite MTA: config file, wiring, orchestration, CLI. | No |
+| `lib/sovite.ex` | Application entry point. Starts the supervision tree from `core/`. | No |
+| `lib/core/` | What every part shares: the config file, the database, the supervision tree, config reload and draining, the cluster, the CLI (`sovitectl`) and web UI shells, logging, telemetry, metrics, traces, certificates, and tenants. | No |
+| `lib/core/mta/` | The MTA part: receiving, queueing, routing, and delivering mail, and everything around it. | No |
+| `lib/core/filter/`, `lib/core/mailbox/` | The filter and mailbox parts, when they come (see `ROADMAP.md`). | No |
 | `lib/<component>/` | Self-contained building blocks (SMTP, DKIM, SPF, ...) usable by any Elixir project. | Yes |
+
+The parts share one database and one schema. Each table belongs to one part, or to all of them, and a part reaches another part's data only through that part's interface, never its tables or internals.
 
 ---
 
@@ -73,7 +80,8 @@ Everything lives under `Sovite.*` to avoid module name clashes in projects that 
 
 | Folder | Namespace | Contents |
 |---|---|---|
-| `core/` | `Sovite.Core` | Config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas), routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), email authentication of received and sent mail (SPF, DKIM, ARC, DMARC, SRS) and DMARC reports, transport security policies (DANE, MTA-STS cache, REQUIRETLS) and TLS-RPT reports, anti-abuse (postscreen-like client screen, greylisting, rate limits, suspension of compromised accounts), milters, policy servers, after-queue content filters, bounce service, CLI (`sovitectl`), `sendmail` compatibility, Postfix config migration, operations (web UI and admin API on Plug and Cowboy, metrics and trace definitions, config reload, graceful drain, systemd, queue inspection, message traces and reports from the logs), clustering (shared configuration, shared rate limits, bans, and greylisting, queue copies and takeover, placement of deliveries), tenants, and outbound IP pools with warm-up schedules |
+| `core/` | `Sovite.Core` | What the parts share: config file schema/loading/reload, supervision tree, database (Ecto repo, migrations, schemas, table modules), CLI (`sovitectl`), operations (web UI and admin API on Plug and Cowboy, metrics and trace definitions, config reload, graceful drain, systemd), clustering (membership, the shared configuration, shared rate limits, bans, and greylisting), certificates (ACME), and tenants |
+| `core/mta/` | `Sovite.Core.MTA` | The MTA: the SMTP session handler, routing (domain classes, aliases, address rewriting, transports, next-hop selection), restriction chains, submission fixes, the queue manager and delivery orchestration (per-destination concurrency; SMTP, LMTP, Maildir, and pipe transports), email authentication of received and sent mail (SPF, DKIM, ARC, DMARC, SRS) and DMARC reports, transport security policies (DANE, MTA-STS cache, REQUIRETLS) and TLS-RPT reports, anti-abuse (postscreen-like client screen, greylisting, rate limits, suspension of compromised accounts), milters, policy servers, after-queue content filters, bounce service, `sendmail` compatibility, Postfix config migration, queue inspection, message traces and reports from the logs, queue copies and takeover in a cluster, placement of deliveries, and outbound IP pools with warm-up schedules |
 
 New components are added as new folders, placed in the lowest layer their dependencies allow.
 
@@ -87,34 +95,44 @@ lib/core/
     schemas/         # one typed Ecto schema per table (Sovite.Core.Repo.Schemas.*)
     tables/          # one module per table that reads and writes it (Sovite.Core.Repo.Tables.*)
     data.ex          # helpers shared by the table modules
+  config.ex          # Sovite.Core.Config: loading, validating, and storing the config file
   config/            # config schema and cross-key checks
-  cli/               # sovitectl commands
-  delivery.ex        # Sovite.Core.Delivery: runs one job, SMTP here
-  delivery/          # LMTP, local (Maildir and pipe), TLS policies, and the shared transaction/result code
-  mail_auth.ex       # Sovite.Core.MailAuth: SPF/DKIM/ARC/DMARC checks, signing, sealing
-  dmarc_reports.ex   # Sovite.Core.DMARCReports: aggregate report sender
-  mta_sts.ex         # Sovite.Core.MTASTS: MTA-STS policies of recipient domains, cached
-  tls_reports.ex     # Sovite.Core.TLSReports: TLS-RPT report sender
-  screen.ex          # Sovite.Core.Screen: anti-abuse checks of SMTP clients
-  greylist.ex        # Sovite.Core.Greylist: greylisting, stored in the database
-  outbound.ex        # Sovite.Core.Outbound: suspends users whose mail fails too often
-  milters.ex         # Sovite.Core.Milters: the milters of an SMTP session
-  policy_service.ex  # Sovite.Core.PolicyService: check_policy_service in the restriction chains
-  sendmail.ex        # Sovite.Core.Sendmail: sendmail(1), mailq(1), newaliases(1)
+  sovite_supervisor.ex # Sovite.Core.Supervisor: the supervision tree
   control.ex         # Sovite.Core.Control: config reload, graceful drain, systemd notifications, status
+  cli.ex, cli/       # sovitectl and its commands
   web.ex             # Sovite.Core.Web: the web server (Plug and Cowboy): UI, admin API, protections
   web/               # its router, API, pages, and security plugs
   cluster.ex         # Sovite.Core.Cluster: runs as a cluster node; the shared configuration
-  cluster/           # sharing anti-abuse state, queue copies and takeover, which node delivers what
+  cluster/           # the shared configuration, sharing anti-abuse state
   tenants.ex         # Sovite.Core.Tenants: tenants, their limits and keys
-  ip_pools.ex        # Sovite.Core.IPPools: outbound IP pools and warm-up schedules
+  acme.ex            # Sovite.Core.ACME: ACME certificates
   metrics.ex         # Sovite.Core.Metrics: the Prometheus metrics
   tracing.ex         # Sovite.Core.Tracing: the OpenTelemetry spans
-  queue_info.ex      # Sovite.Core.QueueInfo: reading the queue for sovitectl and the API
-  route_info.ex      # Sovite.Core.RouteInfo: how an address is routed, for sovitectl route
-  log_reader.ex      # Sovite.Core.LogReader: reading Sovite's logs back, for trace.ex and log_report.ex
-  postfix/           # reading Postfix's main.cf, master.cf, and tables, for sovitectl migrate postfix
-  ...                # routing, rewriting, restrictions, queue manager
+  logging.ex         # Sovite.Core.Logging: the [log] section, log files, syslog
+  log_reader.ex      # Sovite.Core.LogReader: reading Sovite's logs back
+  telemetry.ex       # Sovite.Core.Telemetry: the event catalog, logged by default
+  mta/
+    smtp_handler.ex  # Sovite.Core.MTA.SMTPHandler: the SMTP session's policy and spooling
+    queue_manager.ex # Sovite.Core.MTA.QueueManager: schedules queued mail
+    delivery.ex      # Sovite.Core.MTA.Delivery: runs one job, SMTP here
+    delivery/        # LMTP, local (Maildir and pipe), TLS policies, and the shared transaction/result code
+    mail_auth.ex     # Sovite.Core.MTA.MailAuth: SPF/DKIM/ARC/DMARC checks, signing, sealing
+    dmarc_reports.ex # Sovite.Core.MTA.DMARCReports: aggregate report sender
+    mta_sts.ex       # Sovite.Core.MTA.MTASTS: MTA-STS policies of recipient domains, cached
+    tls_reports.ex   # Sovite.Core.MTA.TLSReports: TLS-RPT report sender
+    screen.ex        # Sovite.Core.MTA.Screen: anti-abuse checks of SMTP clients
+    greylist.ex      # Sovite.Core.MTA.Greylist: greylisting, stored in the database
+    outbound.ex      # Sovite.Core.MTA.Outbound: suspends users whose mail fails too often
+    milters.ex       # Sovite.Core.MTA.Milters: the milters of an SMTP session
+    policy_service.ex # Sovite.Core.MTA.PolicyService: check_policy_service in the restriction chains
+    sendmail.ex      # Sovite.Core.MTA.Sendmail: sendmail(1), mailq(1), newaliases(1)
+    ip_pools.ex      # Sovite.Core.MTA.IPPools: outbound IP pools and warm-up schedules
+    queue_info.ex    # Sovite.Core.MTA.QueueInfo: reading the queue for sovitectl and the API
+    route_info.ex    # Sovite.Core.MTA.RouteInfo: how an address is routed, for sovitectl route
+    trace.ex, log_report.ex # message traces and traffic reports from the logs
+    cluster/         # queue copies and takeover, which node delivers what
+    postfix/         # reading Postfix's main.cf, master.cf, and tables, for sovitectl migrate postfix
+    ...              # routing, rewriting, recipients, restrictions, bounces
 ```
 
 Every database table has its own migration, schema, and table module. Code outside `core/repo/`, including `sovitectl`, reaches the database only through the table modules (see `AGENTS.md`).

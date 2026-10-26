@@ -2,7 +2,7 @@ defmodule Sovite.Core.Repo.Schemas.TLSReportEntry do
   @moduledoc """
   The TLS outcome of one outgoing SMTP session to a domain's MX host,
   kept until the next TLS-RPT report (RFC 8460) for the domain
-  (`Sovite.Core.TLSReports`).
+  (`Sovite.Core.MTA.TLSReports`).
   """
 
   use Ecto.Schema

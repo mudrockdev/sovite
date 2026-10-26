@@ -3,11 +3,11 @@ defmodule Sovite.Core.Repo.Tables.Transports do
   Transports stored in Sovite's database, managed with
   `sovitectl transport`.
 
-  As a `Sovite.Core.Lookup` table, a lookup returns the transport
-  for a pattern; `Sovite.Core.Router` tries the patterns in order.
+  As a `Sovite.Core.MTA.Lookup` table, a lookup returns the transport
+  for a pattern; `Sovite.Core.MTA.Router` tries the patterns in order.
   """
 
-  @behaviour Sovite.Core.Lookup
+  @behaviour Sovite.Core.MTA.Lookup
 
   import Ecto.Query, only: [from: 2]
 
@@ -36,7 +36,7 @@ defmodule Sovite.Core.Repo.Tables.Transports do
   @spec list(Repo.t()) :: [Transport.t()]
   def list(repo), do: Repo.run(repo, & &1.all(from(t in Transport, order_by: t.pattern)))
 
-  @impl Sovite.Core.Lookup
+  @impl Sovite.Core.MTA.Lookup
   def lookup(%{repo: repo}, key) do
     query = from(t in Transport, where: t.pattern == ^Data.fold(key), select: t.transport)
     Data.lookup(repo, & &1.one(query))

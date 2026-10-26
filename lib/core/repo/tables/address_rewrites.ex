@@ -1,14 +1,14 @@
 defmodule Sovite.Core.Repo.Tables.AddressRewrites do
   @moduledoc """
   Address rewrites stored in Sovite's database, managed with `sovitectl
-  rewrite` (see `Sovite.Core.Rewrite`).
+  rewrite` (see `Sovite.Core.MTA.Rewrite`).
 
-  As a `Sovite.Core.Lookup` table, the handle names the kind of rewrite
+  As a `Sovite.Core.MTA.Lookup` table, the handle names the kind of rewrite
   to find (`:sender`, `:recipient`, or `:both`) and a lookup returns the
   replacement.
   """
 
-  @behaviour Sovite.Core.Lookup
+  @behaviour Sovite.Core.MTA.Lookup
 
   import Ecto.Query, only: [from: 2]
 
@@ -50,7 +50,7 @@ defmodule Sovite.Core.Repo.Tables.AddressRewrites do
   def list(repo),
     do: Repo.run(repo, & &1.all(from(r in AddressRewrite, order_by: [r.kind, r.pattern])))
 
-  @impl Sovite.Core.Lookup
+  @impl Sovite.Core.MTA.Lookup
   def lookup(%{repo: repo, kind: kind}, key) do
     query =
       from(r in AddressRewrite,

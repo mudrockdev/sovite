@@ -1,13 +1,13 @@
 defmodule Sovite.Core.CLI.Migrate do
   @moduledoc false
   # sovitectl migrate postfix: converts a Postfix configuration with
-  # Sovite.Core.Postfix.Migration and writes sovite.toml, import.sh, and
+  # Sovite.Core.MTA.Postfix.Migration and writes sovite.toml, import.sh, and
   # report.txt.
 
   import Sovite.Core.CLI.Helpers
 
   alias Sovite.Core.Config
-  alias Sovite.Core.Postfix.Migration
+  alias Sovite.Core.MTA.Postfix.Migration
 
   @commands ~w(migrate)
 

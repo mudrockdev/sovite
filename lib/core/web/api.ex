@@ -9,19 +9,19 @@ defmodule Sovite.Core.Web.API do
   | Request | |
   |---|---|
   | `GET /api/status` | Version, uptime, listeners, queue sizes (`Sovite.Core.Control.status/1`) |
-  | `GET /api/queue` | Queued messages; `?queue=deferred` for one queue, `?limit=n` (`Sovite.Core.QueueInfo.list/2`) |
-  | `GET /api/queue/ID` | One message (`Sovite.Core.QueueInfo.show/2`) |
+  | `GET /api/queue` | Queued messages; `?queue=deferred` for one queue, `?limit=n` (`Sovite.Core.MTA.QueueInfo.list/2`) |
+  | `GET /api/queue/ID` | One message (`Sovite.Core.MTA.QueueInfo.show/2`) |
   | `POST /api/queue/flush` | Retry every deferred message |
-  | `POST /api/queue/ID/retry`, `hold`, `release`, `delete`, `requeue` | See `Sovite.Core.QueueManager` |
+  | `POST /api/queue/ID/retry`, `hold`, `release`, `delete`, `requeue` | See `Sovite.Core.MTA.QueueManager` |
   | `GET /api/config` | The running settings, secrets hidden (`Sovite.Core.Config.Settings`) |
   | `POST /api/config/reload` | Reload the config file |
-  | `GET /api/route?address=A&sender=S` | How `A` is routed (`Sovite.Core.RouteInfo`) |
-  | `GET /api/trace?id=ID` | A message's log lines (`Sovite.Core.Trace`), with `[log] directory` |
+  | `GET /api/route?address=A&sender=S` | How `A` is routed (`Sovite.Core.MTA.RouteInfo`) |
+  | `GET /api/trace?id=ID` | A message's log lines (`Sovite.Core.MTA.Trace`), with `[log] directory` |
   | `GET /api/cluster` | The cluster's nodes and the copies of their queues (`Sovite.Core.Cluster`) |
   | `POST /api/cluster/config` | Send `{"content": TOML}` to every node as the shared configuration |
   | `POST /api/cluster/join` | Join the cluster of `{"peer": "name@host:port"}` |
   | `POST /api/cluster/leave` | Hand the queue to the other nodes, and leave the cluster |
-  | `GET /api/ip_pools` | The IP pools: messages sent today from each address, and today's limits (`Sovite.Core.IPPools`) |
+  | `GET /api/ip_pools` | The IP pools: messages sent today from each address, and today's limits (`Sovite.Core.MTA.IPPools`) |
   | `GET /metrics` | Prometheus metrics (`Sovite.Core.Metrics`), with `metrics.enabled` |
 
   Responses are JSON (`/metrics` is the Prometheus text format). Errors
@@ -31,22 +31,12 @@ defmodule Sovite.Core.Web.API do
 
   use Plug.Router
 
-  alias Sovite.Core.Cluster.Queue
   alias Sovite.Core.Config.Settings
+  alias Sovite.Core.MTA.Cluster.Queue
   alias Sovite.Core.Web.Security
 
-  alias Sovite.Core.{
-    Cluster,
-    Config,
-    Control,
-    IPPools,
-    LogReader,
-    QueueInfo,
-    QueueManager,
-    RouteInfo,
-    Routing,
-    Trace
-  }
+  alias Sovite.Core.{Cluster, Config, Control, LogReader}
+  alias Sovite.Core.MTA.{IPPools, QueueInfo, QueueManager, RouteInfo, Routing, Trace}
 
   alias Sovite.Metrics.Prometheus
 
@@ -60,6 +50,7 @@ defmodule Sovite.Core.Web.API do
 
   plug(Security, :same_origin)
   plug(Security, {:authenticate, :api})
+  plug(:mta_part)
   plug(:fetch_query_params)
   plug(:match)
   plug(:dispatch)
@@ -138,7 +129,8 @@ defmodule Sovite.Core.Web.API do
   get "/cluster" do
     if cluster?(conn) do
       status = Cluster.status(remote: true)
-      ok(conn, Map.merge(status, %{enabled: true, queue: Queue.status()}))
+      queue = if web(conn).queue_manager, do: Queue.status(), else: %{}
+      ok(conn, Map.merge(status, %{enabled: true, queue: queue}))
     else
       ok(conn, %{enabled: false})
     end
@@ -246,6 +238,17 @@ defmodule Sovite.Core.Web.API do
       _ -> {:error, 413, "the request body is too large"}
     end
   end
+
+  # The MTA's routes answer only on nodes that run it ([stack]).
+  @mta_routes ~w(queue route trace ip_pools)
+
+  defp mta_part(%{path_info: [route | _]} = conn, _opts) when route in @mta_routes do
+    if web(conn).queue_manager,
+      do: conn,
+      else: Security.error(conn, 404, "the MTA is off on this node ([stack] mta = false)")
+  end
+
+  defp mta_part(conn, _opts), do: conn
 
   defp web(conn), do: conn.assigns.web
   defp config(conn), do: Config.get(web(conn).instance)

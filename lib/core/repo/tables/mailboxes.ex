@@ -3,11 +3,11 @@ defmodule Sovite.Core.Repo.Tables.Mailboxes do
   Mailboxes of virtual mailbox domains, stored in Sovite's database and
   managed with `sovitectl mailbox`.
 
-  As a `Sovite.Core.Lookup` table, a lookup finds enabled mailboxes and
+  As a `Sovite.Core.MTA.Lookup` table, a lookup finds enabled mailboxes and
   returns their address.
   """
 
-  @behaviour Sovite.Core.Lookup
+  @behaviour Sovite.Core.MTA.Lookup
 
   import Ecto.Query, only: [from: 2]
 
@@ -53,7 +53,7 @@ defmodule Sovite.Core.Repo.Tables.Mailboxes do
     end
   end
 
-  @impl Sovite.Core.Lookup
+  @impl Sovite.Core.MTA.Lookup
   def lookup(%{repo: repo}, key) do
     query =
       from(m in Mailbox, where: m.address == ^Data.fold(key) and m.enabled, select: m.address)

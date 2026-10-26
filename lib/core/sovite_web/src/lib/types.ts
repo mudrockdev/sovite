@@ -3,17 +3,24 @@
 export const queueNames = ['incoming', 'active', 'deferred', 'hold', 'corrupt'] as const;
 export type QueueName = (typeof queueNames)[number];
 
+/** The parts of the stack a node runs (`[stack]`). */
+export const parts = ['mta', 'filter', 'mailbox'] as const;
+export type Part = (typeof parts)[number];
+export type Stack = Record<Part, boolean>;
+
 export type Status = {
 	version: string;
 	hostname: string;
+	stack: Stack;
 	started_at: string;
 	uptime: number;
 	config_path: string | null;
 	last_reload: { at: string; result: string } | null;
 	draining: boolean;
 	listeners: { id: string; connections: number }[];
-	queue: Record<QueueName, number>;
-	deliveries: { running: number; ready: number };
+	/** Only on nodes that run the MTA. */
+	queue?: Record<QueueName, number>;
+	deliveries?: { running: number; ready: number };
 	vm: { memory: number; processes: number; otp_release: string };
 };
 

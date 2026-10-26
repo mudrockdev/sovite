@@ -5,14 +5,14 @@ defmodule Sovite.Core.Repo.Tables.SenderRelays do
   relay host, the source address to connect from, and the credentials
   for the relay host.
 
-  As a `Sovite.Core.Lookup` table, the handle names the field a lookup
+  As a `Sovite.Core.MTA.Lookup` table, the handle names the field a lookup
   returns: `:relayhost`, `:source_address`, or `:credentials`
   (`username:password`).
 
   A field that is not set is "not found".
   """
 
-  @behaviour Sovite.Core.Lookup
+  @behaviour Sovite.Core.MTA.Lookup
 
   import Ecto.Query, only: [from: 2]
 
@@ -43,7 +43,7 @@ defmodule Sovite.Core.Repo.Tables.SenderRelays do
   @spec list(Repo.t()) :: [SenderRelay.t()]
   def list(repo), do: Repo.run(repo, & &1.all(from(s in SenderRelay, order_by: s.sender)))
 
-  @impl Sovite.Core.Lookup
+  @impl Sovite.Core.MTA.Lookup
   def lookup(%{repo: repo, field: field}, key) do
     Data.lookup(repo, fn module ->
       case module.get_by(SenderRelay, sender: Data.fold(key)) do

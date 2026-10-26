@@ -12,8 +12,8 @@ defmodule Sovite.Core.Repo.Schemas.SenderRelay do
 
   import Ecto.Changeset
 
+  alias Sovite.Core.MTA.Transport
   alias Sovite.Core.Repo.Data
-  alias Sovite.Core.Transport
 
   @type t :: %__MODULE__{}
 

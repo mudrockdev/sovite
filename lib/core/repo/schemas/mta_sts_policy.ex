@@ -1,7 +1,7 @@
 defmodule Sovite.Core.Repo.Schemas.MTASTSPolicy do
   @moduledoc """
   The cached MTA-STS policy of a domain Sovite delivers to (RFC 8461
-  §5.1), kept by `Sovite.Core.MTASTS` until `expires_at`.
+  §5.1), kept by `Sovite.Core.MTA.MTASTS` until `expires_at`.
   """
 
   use Ecto.Schema

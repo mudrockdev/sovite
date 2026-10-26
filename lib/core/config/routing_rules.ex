@@ -4,7 +4,7 @@ defmodule Sovite.Core.Config.RoutingRules do
   # routing settings of [delivery].
 
   alias Sovite.Core.Config.Error
-  alias Sovite.Core.Restrictions
+  alias Sovite.Core.MTA.Restrictions
 
   @spec errors(map()) :: [Error.t()]
   def errors(values) do

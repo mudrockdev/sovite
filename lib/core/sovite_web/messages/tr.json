@@ -179,5 +179,9 @@
 	"ip_helo": "EHLO adı",
 	"ip_sent_today": "Bugün gönderilen",
 	"ip_limit_today": "Bugünkü sınır",
-	"ip_no_limit": "sınır yok"
+	"ip_no_limit": "sınır yok",
+	"parts": "Parçalar",
+	"part_mta": "MTA",
+	"part_filter": "Filtre",
+	"part_mailbox": "Posta kutusu"
 }

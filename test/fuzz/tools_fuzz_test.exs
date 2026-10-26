@@ -8,8 +8,9 @@ defmodule Sovite.ToolsFuzzTest do
 
   alias Sovite.Abuse.{Cache, Penalty, RateLimit}
   alias Sovite.Core.Cluster.Sync
-  alias Sovite.Core.{Config, LogReader, LogReport}
-  alias Sovite.Core.Postfix.Migration
+  alias Sovite.Core.{Config, LogReader}
+  alias Sovite.Core.MTA.LogReport
+  alias Sovite.Core.MTA.Postfix.Migration
   alias Sovite.Test.Fuzz
 
   @moduletag :fuzz

@@ -47,6 +47,9 @@ defmodule Sovite.Core.CLI do
   @dns_commands CLI.DNS.commands()
   @migrate_commands CLI.Migrate.commands()
   @ops_commands CLI.Ops.commands()
+  # The commands that work on this node's MTA: refused, and left out of
+  # the help, where the config turns it off ([stack]).
+  @mta_commands ~w(queue route trace report ip-pool)
 
   @usage """
   Usage: sovitectl [--config PATH] COMMAND
@@ -78,8 +81,24 @@ defmodule Sovite.Core.CLI do
 
   @doc "Runs the command in `argv` and returns its exit status."
   @spec run([String.t()]) :: non_neg_integer()
-  def run(["--config", path | rest]), do: run(rest, path)
-  def run(argv), do: run(argv, Config.default_path())
+  def run(["--config", path | rest]), do: part_run(rest, path)
+  def run(argv), do: part_run(argv, Config.default_path())
+
+  defp part_run([command | _] = argv, path) when command in @mta_commands do
+    if mta_off?(path),
+      do: fail("#{command}: the MTA is off on this node ([stack] mta = false)"),
+      else: run(argv, path)
+  end
+
+  defp part_run(argv, path), do: run(argv, path)
+
+  # A config that cannot be read is reported by the command itself.
+  defp mta_off?(path) do
+    case Config.load(path) do
+      {:ok, config} -> not Config.part?(config, :mta)
+      {:error, _errors} -> false
+    end
+  end
 
   defp run(["config", "check"], path), do: config_check(path)
   defp run(["config", "check", path], _default), do: config_check(path)
@@ -177,8 +196,8 @@ defmodule Sovite.Core.CLI do
     0
   end
 
-  defp run([help], _path) when help in ["help", "--help", "-h"] do
-    IO.write(@usage)
+  defp run([help], path) when help in ["help", "--help", "-h"] do
+    IO.write(if mta_off?(path), do: without_mta(@usage), else: @usage)
     0
   end
 
@@ -188,6 +207,26 @@ defmodule Sovite.Core.CLI do
     IO.write(:stderr, @usage)
     64
   end
+
+  # The help without the MTA's commands, and the lines that continue
+  # their descriptions.
+  defp without_mta(usage) do
+    {lines, _skipping} =
+      usage
+      |> String.split("\n")
+      |> Enum.flat_map_reduce(false, fn line, skipping ->
+        cond do
+          mta_line?(line) -> {[], true}
+          skipping and line =~ ~r/\A {6,}\S/ -> {[], true}
+          true -> {[line], false}
+        end
+      end)
+
+    Enum.join(lines, "\n")
+  end
+
+  defp mta_line?(line),
+    do: Enum.any?(@mta_commands, &String.starts_with?(line, "  #{&1} "))
 
   defp scheme([]), do: {:ok, :scram_sha256}
   defp scheme(["scram-sha-256"]), do: {:ok, :scram_sha256}

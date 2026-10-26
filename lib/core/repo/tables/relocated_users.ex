@@ -4,11 +4,11 @@ defmodule Sovite.Core.Repo.Tables.RelocatedUsers do
   `sovitectl moved`. Mail for them is rejected with `5.1.6` and
   their new location.
 
-  As a `Sovite.Core.Lookup` table, a lookup returns the new
+  As a `Sovite.Core.MTA.Lookup` table, a lookup returns the new
   location.
   """
 
-  @behaviour Sovite.Core.Lookup
+  @behaviour Sovite.Core.MTA.Lookup
 
   import Ecto.Query, only: [from: 2]
 
@@ -37,7 +37,7 @@ defmodule Sovite.Core.Repo.Tables.RelocatedUsers do
   @spec list(Repo.t()) :: [RelocatedUser.t()]
   def list(repo), do: Repo.run(repo, & &1.all(from(r in RelocatedUser, order_by: r.address)))
 
-  @impl Sovite.Core.Lookup
+  @impl Sovite.Core.MTA.Lookup
   def lookup(%{repo: repo}, key) do
     query =
       from(r in RelocatedUser, where: r.address == ^Data.fold(key), select: r.new_location)

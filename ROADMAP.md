@@ -24,7 +24,7 @@ This document lists the features to build, the standards to implement, and the o
 - **Observable.** Every message has a traceable lifecycle; metrics and structured logs come built in.
 - **Simple configuration.** One readable config file with validation and clear error messages, plus migration helpers for Postfix, Rspamd, and Dovecot configurations.
 - **Modular whole stack.** The MTA, filter, and mailbox parts live in one application, share one config file, one CLI, one web UI, and one cluster, and are each optional (all on by default). Parts talk to each other through defined internal interfaces, so each can also run on its own nodes.
-- **Isolation between parts.** Each part has its own database (its own connection, credentials, tables, and migrations), so a part that is compromised or misconfigured cannot read another's data: the filter never sees passwords, and the MTA hands mail to the mailbox part but never reads the mail store.
+- **One database, separate parts.** All parts share Sovite's one database and one schema (SQLite by default, PostgreSQL or MySQL), with typed tables and migrations as today. Parts are kept apart in the code instead: each part reads and writes only its own tables, and reaches another part's data only through that part's internal interface, so the filter never sees passwords and the MTA hands mail to the mailbox part without reading the mail store.
 
 ### Non-goals
 
@@ -288,16 +288,16 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 15 — Modular Stack (groundwork for 2.0)
 
-- [ ] `[stack]` switches for the three parts, `mta`, `filter`, and `mailbox`, all on by default; a part that is off starts nothing and opens no port
-- [ ] One database per part (`[mta.database]`, `[filter.database]`, `[mailbox.database]`): own repo, credentials, tables, and migrations; least-privilege database users documented for PostgreSQL and MySQL; SQLite files with separate ownership
+- [x] `[stack]` switches for the three parts, `mta`, `filter`, and `mailbox`, all on by default; a part that is off starts nothing and opens no port
+- [ ] Table ownership: each table belongs to one part (or is shared), and only that part's table modules use it; checked like the component boundaries
 - [ ] Internal interfaces between parts (MTA → filter: scan; MTA → mailbox: deliver, quota, user lookup; mailbox → MTA: submit), in-process when parts share a node, over the cluster's mutual TLS when they do not
 - [ ] Fallbacks when a part is off: the MTA uses milters (Rspamd) instead of the filter, and LMTP and the Dovecot auth protocol instead of the mailbox part
 - [ ] Node roles in a cluster: which parts each node runs (for example MTA-only edge nodes, filter nodes, mailbox nodes)
-- [ ] Shared identity: one user directory (database, LDAP, or OAuth) for every part, kept in the mailbox part's database, readable by the others only through the internal interface
-- [ ] `sovitectl` and the web UI show and manage only the parts that are on
-- [ ] Repository layout and boundary checks for the new parts (`lib/core/filter/`, `lib/core/mailbox/`, reusable components below them)
+- [ ] Shared identity: one user directory (database, LDAP, or OAuth) for every part, owned by the mailbox part, used by the others only through the internal interface
+- [x] `sovitectl` and the web UI show and manage only the parts that are on
+- [ ] Repository layout and boundary checks for the parts: the MTA in `lib/core/mta/` (`Sovite.Core.MTA.*`), the new parts in `lib/core/filter/` and `lib/core/mailbox/`, shared code (config, database, cluster, CLI and web UI shells) in `lib/core/`, reusable components in `lib/<component>/`
 
-**Done when:** each part can be turned off without the others breaking, the MTA runs with external Rspamd and Dovecot in their place, and no part can read another part's database.
+**Done when:** each part can be turned off without the others breaking, the MTA runs with external Rspamd and Dovecot in their place, and no part uses another part's tables except through its interface.
 
 ### Phase 16 — Filter Engine Core
 
@@ -315,7 +315,7 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 
 ### Phase 17 — Statistics & Reputation
 
-- [ ] Bayesian classifier (OSB tokenization, as Rspamd and CRM114): global, per-tenant, and per-user statistics; token storage in the filter database with expiry
+- [ ] Bayesian classifier (OSB tokenization, as Rspamd and CRM114): global, per-tenant, and per-user statistics; token storage in Sovite's database, in the filter part's tables, with expiry
 - [ ] Learning: `sovitectl filter learn spam|ham`, the web UI, autolearning by score, and from users moving mail to and from Junk (with the mailbox part, Phase 23)
 - [ ] Fuzzy hashes: shingles of text and images, hashes of attachments; fuzzy storage shared by the cluster; compatible import of public fuzzy feeds
 - [ ] Reputation: IP, ASN, domain, URL, DKIM domain, and sender reputation from local history, with decay; shared by the cluster
@@ -351,7 +351,7 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 ### Phase 20 — Mail Store (groundwork for 3.0)
 
 - [ ] Storage engine: one file per message (Maildir-compatible layout) plus indexes and caches per mailbox, `fsync` discipline as strict as the queue's, crash recovery
-- [ ] Mailbox metadata in the mailbox database: mailboxes, UIDs, `UIDVALIDITY`, flags, keywords, `MODSEQ`, sizes
+- [ ] Mailbox metadata in the mailbox part's tables: mailboxes, UIDs, `UIDVALIDITY`, flags, keywords, `MODSEQ`, sizes
 - [ ] Quotas per user, per domain, and per tenant (storage and message count), checked by the MTA at `RCPT` time
 - [ ] Delivery from the MTA part in-process (no LMTP hop), with the LMTP server kept for other MTAs
 - [ ] Optional encryption at rest per user (keys derived from the user's password, as Dovecot's `mail_crypt`)
@@ -616,7 +616,7 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 - **Chaos tests**: kill nodes and processes during delivery; corrupt queue files; DNS timeouts and SERVFAIL.
 - **Load tests**: sustained throughput, connection storms, large messages, many recipients.
 - **Fuzzing** of all network-facing parsers, and of every parser of message content (MIME, HTML, archives, Sieve scripts).
-- **Part isolation tests**: each combination of parts on and off; database users that cannot reach other parts' tables.
+- **Part isolation tests**: each combination of parts on and off; boundary checks that no part uses another part's tables or internals.
 
 ---
 
@@ -631,6 +631,6 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 | **0.5 — "It's complete"** | 10, 11, 12 | SMTPUTF8, full ESMTP, operations tooling |
 | **0.6 — "It scales"** | 13 | Clustering, multi-tenant |
 | **1.0 — "Production ready"** | 14 | Audited, benchmarked, documented, stable formats: a Postfix replacement |
-| **1.x — "It's modular"** | 15 | Parts that turn on and off, a database per part, node roles |
+| **1.x — "It's modular"** | 15 | Parts that turn on and off, clear part boundaries, node roles |
 | **2.0 — "It replaces Rspamd"** | 16, 17, 18, 19 | Built-in spam, phishing, and malware filtering, usable by other MTAs too |
 | **3.0 — "It replaces Dovecot"** | 20, 21, 22, 23, 24, 25 | Mail storage, IMAP, POP3, Sieve, replication: the whole stack |

@@ -1,5 +1,5 @@
 defmodule Sovite.HandlerFuzzTest do
-  # Fuzzing of Sovite's own SMTP handler (Sovite.Core.SMTPHandler)
+  # Fuzzing of Sovite's own SMTP handler (Sovite.Core.MTA.SMTPHandler)
   # behind the protocol session: recipient checks, aliases, SRS, header
   # fixes and rewriting, SPF, DKIM, and DMARC, and spooling. Whatever a
   # client sends, the session must not crash, nothing may be left half
@@ -8,7 +8,8 @@ defmodule Sovite.HandlerFuzzTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  alias Sovite.Core.{Config, SMTPHandler}
+  alias Sovite.Core.Config
+  alias Sovite.Core.MTA.SMTPHandler
   alias Sovite.DKIM.SigningKey
   alias Sovite.Message.Headers
   alias Sovite.Queue.Spool

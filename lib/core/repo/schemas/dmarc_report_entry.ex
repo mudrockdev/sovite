@@ -1,7 +1,7 @@
 defmodule Sovite.Core.Repo.Schemas.DMARCReportEntry do
   @moduledoc """
   The DMARC evaluation of one received message, kept until the next
-  aggregate report for its policy domain (`Sovite.Core.DMARCReports`).
+  aggregate report for its policy domain (`Sovite.Core.MTA.DMARCReports`).
   """
 
   use Ecto.Schema
