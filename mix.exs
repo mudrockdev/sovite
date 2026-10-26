@@ -41,7 +41,7 @@ defmodule Sovite.MixProject do
     [
       licenses: ["AGPL-3.0"],
       links: %{"GitHub" => "https://github.com/mudrockdev/sovite"},
-      files: ~w(lib mix.exs README.md LICENSE*),
+      files: ~w(lib priv/rules mix.exs README.md LICENSE*),
       # The web UI's sources, packages, and build: releases ship the
       # build as priv/web; the library does not need them.
       exclude_patterns: [~r"^lib/core/sovite_web"]

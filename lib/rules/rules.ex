@@ -160,7 +160,9 @@ defmodule Sovite.Rules do
     * `:raw` - the message as it came, for `match = "body"`.
     * `:envelope` - `%{ip, hostname, helo, from, rcpts, user}`, strings
       (and a list of them for `rcpts`), any of them missing.
-    * `:symbols` - symbols found by code: names, or `{name, options}`.
+    * `:symbols` - symbols found by code: names, `{name, options}`, or
+      `{name, options, score}`, the score for a symbol the rules do not
+      declare (otherwise 0).
     * `:flags` - the flags of the message, for `is:` in expressions.
     * `:maps` - the maps of `file_maps/1`, loaded: `%{name => map}`. Those
       missing are empty.
@@ -212,15 +214,19 @@ defmodule Sovite.Rules do
 
   defp external(state, symbols) do
     Enum.reduce(symbols, state, fn symbol, state ->
-      {name, options} = if is_tuple(symbol), do: symbol, else: {symbol, []}
+      {name, options, score} = external_symbol(symbol)
 
       case state.rules.declared do
         %{^name => %{enabled: false}} -> state
         %{^name => entry} -> hit(state, entry, options)
-        %{} -> hit(state, %{name: name, score: 0.0, group: nil, description: nil}, options)
+        %{} -> hit(state, %{name: name, score: score, group: nil, description: nil}, options)
       end
     end)
   end
+
+  defp external_symbol({name, options, score}), do: {name, options, score / 1}
+  defp external_symbol({name, options}), do: {name, options, 0.0}
+  defp external_symbol(name), do: {name, [], 0.0}
 
   defp run_rules(state, rules) do
     Enum.reduce_while(rules, state, fn

@@ -3,6 +3,10 @@ defmodule Sovite.Core.Filter.RuleFiles do
   Reads the rule files of `[filter] rules` (files, or directories whose
   `*.toml` files are read in name order) and compiles them into a
   `Sovite.Rules` rule set.
+
+  Sovite's built-in rules (`priv/rules/*.toml`: the symbols of its own
+  checks, see `Sovite.Core.Filter.Checks`) are read first, so the files
+  of `[filter] rules` can change them.
   """
 
   alias Sovite.Rules
@@ -14,7 +18,12 @@ defmodule Sovite.Core.Filter.RuleFiles do
   @spec flags() :: [String.t()]
   def flags, do: @flags
 
-  @doc "The rule files of `paths`, in order."
+  @doc "The built-in rule files, in order."
+  @spec builtin() :: [Path.t()]
+  def builtin,
+    do: :sovite |> :code.priv_dir() |> Path.join("rules/*.toml") |> Path.wildcard() |> Enum.sort()
+
+  @doc "The rule files of `paths`, after the built-in ones, in order."
   @spec files([Path.t()]) :: {:ok, [Path.t()]} | {:error, [String.t()]}
   def files(paths) do
     {files, errors} =
@@ -25,7 +34,7 @@ defmodule Sovite.Core.Filter.RuleFiles do
         end
       end)
 
-    if errors == [], do: {:ok, Enum.uniq(files)}, else: {:error, errors}
+    if errors == [], do: {:ok, Enum.uniq(builtin() ++ files)}, else: {:error, errors}
   end
 
   defp expand(path) do

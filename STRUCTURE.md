@@ -122,7 +122,7 @@ lib/core/
   address.ex         # Sovite.Core.Address: splitting addresses, Maildir folders
   stack.ex           # Sovite.Core.Stack: which parts run where
   stack/             # the parts' interfaces: Sovite.Core.Stack.Mailbox (the user directory, delivery to the store)
-  filter/            # the filter part: rule files, the server that keeps rules and maps loaded, scans, actions
+  filter/            # the filter part: rule files, the server that keeps rules and maps loaded, scans, actions, Sovite's checks as symbols (their scores in priv/rules/)
   mailbox/           # the mailbox part: its user directory, the Maildir store, and the server other nodes deliver to
   mta/
     smtp_handler.ex  # Sovite.Core.MTA.SMTPHandler: the SMTP session's policy and spooling

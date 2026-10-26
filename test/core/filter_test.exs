@@ -115,7 +115,7 @@ defmodule Sovite.Core.FilterTest do
     regex = "PILLS"
     """)
 
-    assert capture_log(fn -> check(pid) end) =~ "rules reloaded, 1 symbols"
+    assert capture_log(fn -> check(pid) end) =~ ~r"rules reloaded, \d+ symbols"
     assert names(instance) == ["CAPS"]
 
     # Also when the configuration is reloaded.
@@ -126,6 +126,21 @@ defmodule Sovite.Core.FilterTest do
 
     stop_supervised!(Server)
     assert Filter.scan(instance, @message) == {:error, :not_running}
+  end
+
+  test "scans count Sovite's own checks", %{tmp_dir: dir} do
+    File.write!(Path.join(dir, "local.toml"), "[[symbol]]\nname = \"R_SPF_FAIL\"\nscore = 4.0\n")
+    {instance, _pid} = start(dir)
+
+    checks = %{spf: %Sovite.SPF.Result{result: :fail, domain: "example.com"}, dkim: []}
+
+    assert {:ok, result} = Filter.scan(instance, @message, checks: checks, symbols: ["OTHER"])
+
+    assert Enum.map(result.symbols, &{&1.name, &1.score}) == [
+             {"R_SPF_FAIL", 4.0},
+             {"R_DKIM_NA", 0.0},
+             {"OTHER", 0.0}
+           ]
   end
 
   test "the part starts only when this node runs it", %{tmp_dir: dir} do

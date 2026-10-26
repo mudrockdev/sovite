@@ -1,0 +1,208 @@
+# Sovite's built-in rules: the symbols of its own checks, with scores
+# close to Rspamd's defaults. Read before the files of [filter] rules,
+# which can change any key of these entries by name, or turn one off
+# with `enabled = false`. See docs/filter.md.
+
+[[group]]
+name = "spf"
+description = "SPF (RFC 7208) of the MAIL FROM domain"
+
+[[group]]
+name = "dkim"
+description = "DKIM signatures (RFC 6376)"
+
+[[group]]
+name = "dmarc"
+description = "DMARC (RFC 7489) of the From: domain"
+
+[[group]]
+name = "arc"
+description = "ARC chains (RFC 8617)"
+
+[[group]]
+name = "rdns"
+description = "Reverse DNS of the client"
+
+[[group]]
+name = "policies"
+description = "The MTA's greylisting, rate limits, and access rules"
+
+# SPF.
+
+[[symbol]]
+name = "R_SPF_ALLOW"
+group = "spf"
+score = -0.2
+description = "SPF passed"
+
+[[symbol]]
+name = "R_SPF_FAIL"
+group = "spf"
+score = 1.0
+description = "SPF failed: the domain does not allow the client to send its mail"
+
+[[symbol]]
+name = "R_SPF_SOFTFAIL"
+group = "spf"
+score = 0.0
+description = "SPF soft-failed: the domain probably does not allow the client"
+
+[[symbol]]
+name = "R_SPF_NEUTRAL"
+group = "spf"
+score = 0.0
+description = "SPF neutral: the domain says nothing about the client"
+
+[[symbol]]
+name = "R_SPF_NA"
+group = "spf"
+score = 0.0
+description = "The domain has no SPF record"
+
+[[symbol]]
+name = "R_SPF_DNSFAIL"
+group = "spf"
+score = 0.0
+description = "SPF could not be checked: a DNS error"
+
+[[symbol]]
+name = "R_SPF_PERMFAIL"
+group = "spf"
+score = 0.0
+description = "The domain's SPF record is broken"
+
+# DKIM.
+
+[[symbol]]
+name = "R_DKIM_ALLOW"
+group = "dkim"
+score = -0.2
+description = "A DKIM signature verified"
+
+[[symbol]]
+name = "R_DKIM_REJECT"
+group = "dkim"
+score = 1.0
+description = "A DKIM signature did not verify"
+
+[[symbol]]
+name = "R_DKIM_TEMPFAIL"
+group = "dkim"
+score = 0.0
+description = "A DKIM signature could not be checked: a DNS error"
+
+[[symbol]]
+name = "R_DKIM_PERMFAIL"
+group = "dkim"
+score = 0.0
+description = "A DKIM signature or its key is broken"
+
+[[symbol]]
+name = "R_DKIM_NA"
+group = "dkim"
+score = 0.0
+description = "No DKIM signature"
+
+# DMARC.
+
+[[symbol]]
+name = "DMARC_POLICY_ALLOW"
+group = "dmarc"
+score = -0.5
+description = "DMARC passed"
+
+[[symbol]]
+name = "DMARC_POLICY_REJECT"
+group = "dmarc"
+score = 2.0
+description = "DMARC failed, and the domain asks to reject such mail"
+
+[[symbol]]
+name = "DMARC_POLICY_QUARANTINE"
+group = "dmarc"
+score = 1.5
+description = "DMARC failed, and the domain asks to quarantine such mail"
+
+[[symbol]]
+name = "DMARC_POLICY_SOFTFAIL"
+group = "dmarc"
+score = 0.1
+description = "DMARC failed, and the domain asks for nothing (p=none, or not sampled)"
+
+[[symbol]]
+name = "DMARC_NA"
+group = "dmarc"
+score = 0.0
+description = "The From: domain has no DMARC policy"
+
+[[symbol]]
+name = "DMARC_DNSFAIL"
+group = "dmarc"
+score = 0.0
+description = "DMARC could not be checked: a DNS error"
+
+[[symbol]]
+name = "DMARC_BAD_POLICY"
+group = "dmarc"
+score = 0.5
+description = "The From: domain is not a domain, or its DMARC record is broken"
+
+# ARC.
+
+[[symbol]]
+name = "ARC_ALLOW"
+group = "arc"
+score = -1.0
+description = "The ARC chain verified"
+
+[[symbol]]
+name = "ARC_REJECT"
+group = "arc"
+score = 1.0
+description = "The ARC chain is broken"
+
+[[symbol]]
+name = "ARC_NA"
+group = "arc"
+score = 0.0
+description = "No ARC chain"
+
+# Reverse DNS.
+
+[[symbol]]
+name = "RDNS_NONE"
+group = "rdns"
+score = 2.0
+description = "The client's address has no reverse DNS name"
+
+[[symbol]]
+name = "RDNS_UNCONFIRMED"
+group = "rdns"
+score = 1.0
+description = "The client's reverse DNS names do not resolve back to its address"
+
+[[symbol]]
+name = "RDNS_DNSFAIL"
+group = "rdns"
+score = 0.0
+description = "The client's reverse DNS could not be checked: a DNS error"
+
+# The MTA's policies.
+
+[[symbol]]
+name = "GREYLIST_PASSED"
+group = "policies"
+score = 0.0
+description = "The client came back after it was greylisted"
+
+[[symbol]]
+name = "RATELIMITED"
+group = "policies"
+score = 0.0
+description = "The sender or client went over a rate limit"
+
+[[symbol]]
+name = "ACCESS_OK"
+group = "policies"
+score = 0.0
+description = "An access rule allowed the client, HELO name, sender, or recipient"

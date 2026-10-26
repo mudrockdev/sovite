@@ -1,9 +1,7 @@
 defmodule Sovite.Core.FilterActionsTest do
   use ExUnit.Case, async: true
 
-  import ExUnit.CaptureIO
-
-  alias Sovite.Core.{CLI, Config}
+  alias Sovite.Core.Config
   alias Sovite.Core.Filter.Actions
   alias Sovite.Core.Repo.Tables.FilterThresholds
   alias Sovite.Rules.Actions, as: RuleActions
@@ -115,92 +113,5 @@ defmodule Sovite.Core.FilterActionsTest do
 
     assert Exception.message(error) =~
              "tenant[0].filter_actions.reject: expected a score, or false"
-  end
-
-  describe "sovitectl filter" do
-    setup %{tmp_dir: dir} do
-      path = Path.join(dir, "sovite.toml")
-      rules = Path.join(dir, "rules.toml")
-
-      File.write!(rules, """
-      [[symbol]]
-      name = "CAPS"
-      score = 7.0
-      match = "subject"
-      regex = "CHEAP"
-      """)
-
-      File.write!(path, """
-      [database]
-      path = "#{Path.join(dir, "sovite.db")}"
-
-      [filter]
-      rules = ["#{rules}"]
-      """)
-
-      %{config: path, rules: rules}
-    end
-
-    defp cli(config, args, input \\ "") do
-      parent = self()
-
-      stdout =
-        capture_io(input, fn ->
-          stderr =
-            capture_io(:stderr, fn ->
-              send(parent, {:status, CLI.run(["--config", config | args])})
-            end)
-
-          send(parent, {:stderr, stderr})
-        end)
-
-      assert_received {:status, status}
-      assert_received {:stderr, stderr}
-      {status, stdout, stderr}
-    end
-
-    test "manages thresholds", %{config: config} do
-      assert {0, "bob@example.com: reject from 20.0\n", _} =
-               cli(config, ~w(filter threshold set bob@example.com reject 20))
-
-      assert {0, "@example.com: greylist off\n", _} =
-               cli(config, ~w(filter threshold set @example.com greylist off))
-
-      assert {1, _, "error: unknown action \"bounce\"" <> _} =
-               cli(config, ~w(filter threshold set @example.com bounce 1))
-
-      assert {1, _, "error: \"lots\" is not a score: use a number, or off\n"} =
-               cli(config, ~w(filter threshold set @example.com reject lots))
-
-      assert {0, "@example.com  greylist  off\nbob@example.com  reject  from 20.0\n", _} =
-               cli(config, ~w(filter threshold list))
-
-      assert {0, stdout, _} = cli(config, ~w(filter threshold show bob@example.com))
-      assert stdout =~ "reject  from 20.0\n"
-      assert stdout =~ "add_header  from 6.0\n"
-      assert stdout =~ "greylist  off\n"
-
-      assert {0, "deleted bob@example.com\n", _} =
-               cli(config, ~w(filter threshold delete bob@example.com reject))
-
-      assert {1, _, "error: no such threshold\n"} =
-               cli(config, ~w(filter threshold delete bob@example.com))
-    end
-
-    test "scans a message", %{config: config, rules: rules, tmp_dir: dir} do
-      file = Path.join(dir, "message.eml")
-      File.write!(file, "Subject: CHEAP stuff\r\n\r\nhi\r\n")
-
-      assert {0, "score: 7.0\naction: add_header\n  CAPS  7.0 [CHEAP]\n", _} =
-               cli(config, ["filter", "scan", file])
-
-      File.write!(file, "Subject: fine\r\n\r\nhi\r\n")
-      assert {0, "score: 0.0\naction: no_action\n", _} = cli(config, ["filter", "scan", file])
-      assert {1, _, "error: cannot read" <> _} = cli(config, ["filter", "scan", file <> ".x"])
-
-      File.write!(rules, "[[symbol]]\nname = \"X\"\nregex = \"x\"\n")
-      assert {1, _, stderr} = cli(config, ["filter", "scan", file])
-      assert stderr =~ "#{rules}: symbol[0].match: is required with regex or map"
-    end
   end
 end

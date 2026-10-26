@@ -5,14 +5,15 @@ defmodule Sovite.Core.Filter do
   So far it is the rule engine: messages are taken apart by
   `Sovite.Analyzer` and scored by the rules of `[filter] rules`
   (`Sovite.Rules`), which `Sovite.Core.Filter.Server` keeps loaded, and
-  reloads with the maps they read when the files change. Actions, the
-  checks as symbols, and scanning in the MTA's session follow (see
-  `ROADMAP.md`).
+  reloads with the maps they read when the files change. Sovite's own
+  checks count as symbols (`Sovite.Core.Filter.Checks`), and the score
+  decides an action (`Sovite.Core.Filter.Actions`). Scanning in the
+  MTA's session follows (see `ROADMAP.md`).
   """
 
   alias Sovite.Analyzer
   alias Sovite.Core.Config
-  alias Sovite.Core.Filter.{RuleFiles, Server}
+  alias Sovite.Core.Filter.{Checks, RuleFiles, Server}
   alias Sovite.Rules
 
   @doc """
@@ -47,7 +48,9 @@ defmodule Sovite.Core.Filter do
   @doc """
   Scans a message with the loaded rules. Options are those of
   `Sovite.Rules.scan/3`, but `:maps` and `:timeout`, which come from the
-  configuration. `{:error, :not_running}` when the part is not.
+  configuration, and `:checks`, results of Sovite's own checks
+  (`Sovite.Core.Filter.Checks`), whose symbols come before those of
+  `:symbols`. `{:error, :not_running}` when the part is not.
   """
   @spec scan(term(), binary(), keyword()) :: {:ok, Rules.result()} | {:error, :not_running}
   def scan(instance, message, opts \\ []) when is_binary(message) do
@@ -56,7 +59,17 @@ defmodule Sovite.Core.Filter do
         {:error, :not_running}
 
       loaded ->
-        opts = Keyword.merge(opts, raw: message, maps: loaded.maps, timeout: loaded.timeout)
+        {checks, opts} = Keyword.pop(opts, :checks, %{})
+        symbols = Checks.symbols(checks) ++ Keyword.get(opts, :symbols, [])
+
+        opts =
+          Keyword.merge(opts,
+            raw: message,
+            symbols: symbols,
+            maps: loaded.maps,
+            timeout: loaded.timeout
+          )
+
         {:ok, Rules.scan(loaded.rules, Analyzer.analyze(message), opts)}
     end
   end

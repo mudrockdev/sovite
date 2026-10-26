@@ -436,13 +436,23 @@ defmodule Sovite.Core.CLI.Ops do
 
   defp report_args(files, opts), do: {:ok, opts, files}
 
-  defp report_date("today"), do: {:ok, Date.utc_today()}
-  defp report_date("yesterday"), do: {:ok, Date.add(Date.utc_today(), -1)}
+  # "today" in the times of the log lines: local, unless utc_log is set.
+  defp report_date("today"), do: {:ok, log_today()}
+  defp report_date("yesterday"), do: {:ok, Date.add(log_today(), -1)}
 
   defp report_date(date) do
     case Date.from_iso8601(date) do
       {:ok, date} -> {:ok, date}
       {:error, _} -> :error
+    end
+  end
+
+  defp log_today do
+    if Application.get_env(:logger, :utc_log, false) do
+      Date.utc_today()
+    else
+      {date, _time} = :calendar.local_time()
+      Date.from_erl!(date)
     end
   end
 

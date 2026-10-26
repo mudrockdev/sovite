@@ -7,7 +7,7 @@ defmodule Sovite.Core.CLI.Filter do
 
   alias Sovite.Analyzer
   alias Sovite.Core.Config
-  alias Sovite.Core.Filter.{Actions, RuleFiles}
+  alias Sovite.Core.Filter.{Actions, Checks, RuleFiles}
   alias Sovite.Core.Repo.Tables.FilterThresholds
   alias Sovite.Rules
   alias Sovite.Rules.Actions, as: RuleActions
@@ -21,7 +21,10 @@ defmodule Sovite.Core.CLI.Filter do
                                      add_header, greylist
     filter threshold delete PATTERN [ACTION]
     filter threshold show ADDRESS    The thresholds that apply to mail for ADDRESS
-    filter scan [FILE]               Scan a message (FILE or standard input) with the rules of [filter]
+    filter scan [--ip IP] [--helo NAME] [--from ADDRESS] [--checks] [FILE]
+                                     Scan a message (FILE or standard input) with the rules of [filter].
+                                     With an envelope or --checks, also run SPF, DKIM, ARC, DMARC,
+                                     DNS lists, and reverse DNS
   """
 
   def usage, do: @usage
@@ -59,9 +62,16 @@ defmodule Sovite.Core.CLI.Filter do
   def run(["filter", "threshold", "show", address], path),
     do: with_config(path, fn config -> with_repo(path, &show(config, &1, address)) end)
 
-  def run(["filter", "scan" | file], path) when length(file) <= 1 do
-    with {:ok, message} <- read_message(file) do
-      with_config(path, &scan(&1, message))
+  def run(["filter", "scan" | args], path) do
+    switches = [ip: :string, helo: :string, from: :string, checks: :boolean]
+
+    case OptionParser.parse(args, strict: switches) do
+      {opts, file, []} when length(file) <= 1 ->
+        with {:ok, message} <- read_message(file),
+             do: with_config(path, &scan(&1, message, opts))
+
+      _ ->
+        :usage
     end
   end
 
@@ -145,15 +155,23 @@ defmodule Sovite.Core.CLI.Filter do
     end
   end
 
-  defp scan(config, message) do
+  defp scan(config, message, opts) do
     # Scans report through telemetry.
     {:ok, _} = Application.ensure_all_started(:telemetry)
+    envelope = Map.new(Keyword.take(opts, [:ip, :helo, :from]))
 
     case RuleFiles.load(config.filter.rules, RuleFiles.flags()) do
       {:ok, rules} ->
+        checks =
+          if envelope != %{} or opts[:checks],
+            do: Checks.run(message, envelope, Checks.opts(config, Config.resolver(config))),
+            else: %{}
+
         result =
           Rules.scan(rules, Analyzer.analyze(message),
             raw: message,
+            envelope: envelope,
+            symbols: Checks.symbols(checks),
             maps: maps(rules),
             timeout: config.filter.timeout
           )

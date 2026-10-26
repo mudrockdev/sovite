@@ -133,6 +133,24 @@ They combine with `!` (not), `&` (and), `|` (or), and parentheses. `!` binds tig
 
 Every name must exist: a symbol, composite, or group that is not defined, or a composite that depends on itself, is an error.
 
+## Sovite's checks
+
+Sovite's own checks count as symbols. When the MTA hands mail to the filter it passes the results of the checks it did in the SMTP session; for a message from elsewhere (`sovitectl filter scan --ip ...`), the filter does them itself, as `[spf]`, `[dkim]`, `[arc]`, and `[dmarc]` turn them on, with the DNS lists of `[screen]`.
+
+Their scores are in Sovite's built-in rules (`priv/rules/10-checks.toml` in the release), which are read before the files of `[filter] rules`, so those can change them (see below).
+
+| Check | Symbols | Default scores |
+|---|---|---|
+| SPF of the `MAIL FROM` domain | `R_SPF_ALLOW`, `R_SPF_FAIL`, `R_SPF_SOFTFAIL`, `R_SPF_NEUTRAL`, `R_SPF_NA` (no record), `R_SPF_DNSFAIL`, `R_SPF_PERMFAIL` (a broken record) | -0.2, 1.0, others 0 |
+| DKIM, one symbol for each kind of result among the signatures | `R_DKIM_ALLOW`, `R_DKIM_REJECT`, `R_DKIM_TEMPFAIL`, `R_DKIM_PERMFAIL`, `R_DKIM_NA` (no signature) | -0.2, 1.0, others 0 |
+| DMARC of the `From:` domain | `DMARC_POLICY_ALLOW`, `DMARC_POLICY_REJECT`, `DMARC_POLICY_QUARANTINE`, `DMARC_POLICY_SOFTFAIL` (a failure the policy asks nothing for), `DMARC_NA`, `DMARC_DNSFAIL`, `DMARC_BAD_POLICY` | -0.5, 2.0, 1.5, 0.1, 0, 0, 0.5 |
+| ARC | `ARC_ALLOW`, `ARC_REJECT`, `ARC_NA` | -1.0, 1.0, 0 |
+| DNS lists of `[screen]` | `RBL_<ZONE>` for an IP block list, `RWL_<ZONE>` for an allow list (a negative `weight`), `RHSBL_<ZONE>` and `RHSWL_<ZONE>` for domain lists. The zone is upper-cased, with `_` for other characters: `RBL_ZEN_SPAMHAUS_ORG`. | the list's `weight` |
+| Reverse DNS of the client | `RDNS_NONE`, `RDNS_UNCONFIRMED` (names that do not resolve back to it), `RDNS_DNSFAIL` | 2.0, 1.0, 0 |
+| The MTA's policies | `GREYLIST_PASSED` (came back after greylisting), `RATELIMITED` (over a rate limit), `ACCESS_OK` (an access rule allowed the client, `HELO` name, sender, or a recipient) | 0 |
+
+What a check found is kept with its symbol: the domain and the SPF mechanism that matched, the DKIM domains, the DNS list's answers, ...
+
 ## Changing the rules of other files
 
 Entries are merged by name across files, in the order of `[filter] rules`: a later entry changes only the keys it sets. A local file can change a score, or turn a rule off, without copying it:
@@ -181,3 +199,9 @@ A message for several recipients gets the least severe of their actions, so that
 ## Trying the rules
 
 `sovitectl filter scan message.eml` (or a message on standard input) scans a message with the rules of `[filter] rules` and prints its score, its action under `[filter.actions]`, and the symbols found with what they matched. The rules are read from their files, so this works before they are taken by the server.
+
+With `--ip`, `--helo`, and `--from` (the client and `MAIL FROM` the message came with), or `--checks`, it also does [Sovite's checks](#sovites-checks), with the DNS resolver of `[dns]`:
+
+```sh
+sovitectl filter scan --ip 192.0.2.9 --helo mail.example.com --from alice@example.com message.eml
+```
