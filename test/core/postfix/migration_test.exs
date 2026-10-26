@@ -277,7 +277,7 @@ defmodule Sovite.Core.Postfix.MigrationTest do
           nil,
           %{
             "/etc/postfix/tls_policy" =>
-              "[relay.example]:587 secure\n[192.0.2.1] encrypt\nbad_key! may\nok.example rubbish\n"
+              "[relay.example]:587 secure\n[192.0.2.1] encrypt\nbad_key! may\nok.example rubbish\nblank.example\n"
           }
         )
 
@@ -290,6 +290,7 @@ defmodule Sovite.Core.Postfix.MigrationTest do
       message = message(result, "smtp_tls_policy_maps", :attention)
       assert message =~ "bad_key!: not a domain or [host]"
       assert message =~ "ok.example: rubbish is not a level"
+      assert message =~ "blank.example: no security level"
       assert message =~ "mysql"
       assert entry(result, "smtp_tls_CApath", :attention)
 
@@ -624,7 +625,7 @@ defmodule Sovite.Core.Postfix.MigrationTest do
             "/c2" => "192.0.2.1 REJECT\n",
             "/h" => "localhost REJECT\n[192.0.2.1] HOLD\n.example.com WARN look\nbad_helo! OK\n",
             "/r" =>
-              "abuse@ OK\nuser@example.com 450 later\nexample.org DISCARD\n.example.net FILTER smtp:x\n"
+              "abuse@ OK\nuser@example.com 450 later\nexample.org DISCARD\n.example.net FILTER smtp:x\nblank.example\n"
           }
         )
 
@@ -643,6 +644,7 @@ defmodule Sovite.Core.Postfix.MigrationTest do
       assert text =~ "an earlier table has this key already"
       assert text =~ "bad_helo!"
       assert text =~ "FILTER is not an action Sovite has"
+      assert text =~ "no action"
       assert text =~ "add the rules with sovitectl access set"
       assert result.parsed.restrictions.rcpt == ["recipient_access", "sender_access"]
     end
@@ -996,7 +998,8 @@ defmodule Sovite.Core.Postfix.MigrationTest do
             "/rc" => "@old.example @new.example\n",
             "/bcc" =>
               "a@example.com copy@example.com\nb@example.com not-an-address\nbad! x@y.z\n",
-            "/relocated" => "gone@example.com new@example.org\nbad! x\nempty@example.com\n",
+            "/relocated" =>
+              "gone@example.com new@example.org\nbad! x\nempty@example.com\nnul@example.com a\0b@example.org\n",
             "/transport" =>
               "* keep:[relay.example]\nexample.org error:5.1.1 nope\nbad! smtp\nexample.net unknownthing:\nexample.info lmtp:unix:private/lmtp\n"
           }
@@ -1010,6 +1013,9 @@ defmodule Sovite.Core.Postfix.MigrationTest do
       assert ["rewrite", "set", "recipient", "@old.example", "@new.example"] in commands
       assert ["bcc", "add", "recipient", "a@example.com", "copy@example.com"] in commands
       assert ["moved", "set", "gone@example.com", "new@example.org"] in commands
+      # A shell would cut a NUL byte's argument.
+      refute Enum.any?(commands, &(is_list(&1) and "nul@example.com" in &1))
+      assert inspect(result.entries) =~ "a value has a NUL byte"
       assert ["transport", "set", "*", "smtp:[relay.example]"] in commands
       assert ["transport", "set", "example.org", "error:5.1.1 nope"] in commands
 

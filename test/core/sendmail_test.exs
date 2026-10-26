@@ -63,6 +63,11 @@ defmodule Sovite.Core.SendmailTest do
              ~r/\ASubject: report\r\nTo: someone@example.net\r\nFrom: <cron@example.com>\r\nDate: .+\r\nMessage-ID: <.+@example.com>\r\n\r\nAll good.\r\n\z/
   end
 
+  test "ends lines in CRLF, whatever they ended in", context do
+    assert {0, ""} = sendmail(context, ["root"], "Subject: x\n\nlf\ncrlf\r\nbare\rcr\n")
+    assert message(context.mta).data =~ ~r/\r\n\r\nlf\r\ncrlf\r\nbare\r\ncr\r\n\z/
+  end
+
   test "internationalized mail is sent with SMTPUTF8", context do
     mta =
       start_supervised!({FakeMTA, owner: self(), extensions: ["8BITMIME", "SMTPUTF8"]}, id: :utf8)
@@ -121,6 +126,8 @@ defmodule Sovite.Core.SendmailTest do
     assert {75, _} = sendmail(refusing, ["temp@example.net"], "x\n")
     assert {65, "sendmail: no recipients\n"} = sendmail(context, [], "x\n")
     assert {64, "sendmail: unknown option -Z\n"} = sendmail(context, ["-Z"], "")
+    # Arguments need not be UTF-8.
+    assert {64, "sendmail: unknown option -?t\n"} = sendmail(context, [<<"-", 0x80, "t">>], "")
     assert {64, "sendmail: -bs is not supported\n"} = sendmail(context, ["-bs"], "")
     assert {64, "sendmail: option -f needs a value\n"} = sendmail(context, ["-f"], "")
 

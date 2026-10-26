@@ -305,5 +305,11 @@ defmodule Sovite.Core.Postfix.ParsersTest do
       assert TomlWriter.wrap("", 7) == [""]
       assert TomlWriter.string("\b\f\r\n\u007f") == ~S("\b\f\r\n\u007F")
     end
+
+    test "keeps comments valid, whatever they quote" do
+      toml = TomlWriter.render([{:comment, <<"master.cf: caf", 0xE9, " \x01\tx">>}])
+      assert toml == "# master.cf: caf\uFFFD \tx\n"
+      assert {:ok, %{}} = Toml.decode(toml)
+    end
   end
 end

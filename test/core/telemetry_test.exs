@@ -43,13 +43,14 @@ defmodule Sovite.Core.TelemetryTest do
     measurements = %{duration: System.convert_time_unit(15, :millisecond, :native)}
     metadata = %{session_id: "S1", command: "EHLO", reply_code: 250}
 
-    assert capture_log([level: :info], fn ->
+    # Only this event's line: other tests' processes may log too.
+    refute capture_log([level: :info], fn ->
              :telemetry.execute(
                [:sovite, :smtp, :server, :command, :stop],
                measurements,
                metadata
              )
-           end) == ""
+           end) =~ "smtp.server.command.stop: command=EHLO"
 
     log =
       capture_log([level: :debug], fn ->

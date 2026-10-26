@@ -81,6 +81,10 @@ defmodule Sovite.AuthResultsTest do
 
       value = AuthResults.value("mx", [result])
       assert value == ~s{mx;\r\n\tx=y (c d) reason="a  b" p.v="e  f"}
+
+      # Nor bytes that are not UTF-8, as in a forged signature's a= tag.
+      result = %{method: "dkim", result: "permerror", properties: [{"header.a", <<0x80, "rsa">>}]}
+      assert AuthResults.value("mx", [result]) == ~s{mx;\r\n\tdkim=permerror header.a="?rsa"}
     end
 
     test "quotes an authserv-id that is not a token" do

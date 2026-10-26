@@ -411,6 +411,10 @@ defmodule Sovite.Core.ConfigTest do
   test "reports TOML syntax errors" do
     assert {:error, [error]} = Config.parse("[server\n")
     assert Exception.message(error) =~ "invalid TOML"
+
+    # The TOML decoder would crash the caller on these.
+    assert {:error, [error]} = Config.parse(<<"[server]\n# caf", 0xE9, "\n">>)
+    assert Exception.message(error) == "invalid TOML: not UTF-8 (line 2)"
   end
 
   test "does not create atoms from unknown keys" do

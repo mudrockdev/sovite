@@ -57,9 +57,13 @@ defmodule Sovite.Core.Postfix.TomlWriter do
 
   defp comment_lines(nil, _prefix), do: []
 
+  # Comments quote main.cf and master.cf: they must stay UTF-8 without
+  # control characters other than tab.
   defp comment_lines(text, prefix) do
     (prefix <> text)
+    |> String.replace_invalid()
     |> String.replace(~r/[\r\n]+/, " ")
+    |> String.replace(~r/[\x00-\x08\x0b-\x1f\x7f]/, " ")
     |> wrap(76)
     |> Enum.map(&String.trim_trailing("# " <> &1))
   end

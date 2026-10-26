@@ -95,8 +95,10 @@ defmodule Sovite.AuthResults do
 
   defp quote_string(text), do: ~s(") <> escape(text, ~c"\\\"") <> ~s(")
 
+  # Values come from messages and DNS: control characters become spaces,
+  # and bytes that are not UTF-8 become "?".
   defp escape(text, specials) do
-    for <<c <- text>>, into: "" do
+    for <<c <- String.replace_invalid(text, "?")>>, into: "" do
       cond do
         c in specials -> <<?\\, c>>
         c < 0x20 or c == 0x7F -> " "

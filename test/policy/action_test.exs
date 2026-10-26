@@ -37,6 +37,10 @@ defmodule Sovite.Policy.ActionTest do
 
       assert Action.parse("REJECT 5.7.1 Go away") == {:ok, {:reject, "5.7.1 Go away"}}
 
+      # Texts go into replies: no control characters, and UTF-8.
+      assert Action.parse(<<"REJECT a\rb", 0, "c caf", 0xE9>>) == {:ok, {:reject, "a b c caf?"}}
+      assert Action.parse(<<"450 4.7.1 a\rb">>) == {:ok, {:reply, 450, "4.7.1", "a b"}}
+
       assert Action.parse("defer_if_permit Service temporarily unavailable") ==
                {:ok, {:defer_if_permit, "Service temporarily unavailable"}}
     end
@@ -74,7 +78,17 @@ defmodule Sovite.Policy.ActionTest do
 
       assert Action.parse("prepend X-Greylist:") == {:ok, {:prepend, "X-Greylist:"}}
 
-      for action <- ["PREPEND", "PREPEND not a header", "PREPEND X Foo: bar", "PREPEND :bar"] do
+      assert Action.parse("PREPEND X-Name: Jörg\tx") == {:ok, {:prepend, "X-Name: Jörg\tx"}}
+
+      for action <- [
+            "PREPEND",
+            "PREPEND not a header",
+            "PREPEND X Foo: bar",
+            "PREPEND :bar",
+            "PREPEND X-A: b\rX-B: c",
+            <<"PREPEND X-A: b", 0>>,
+            <<"PREPEND X-A: caf", 0xE9>>
+          ] do
         assert Action.parse(action) == {:error, :invalid_action}, action
       end
     end
@@ -96,7 +110,15 @@ defmodule Sovite.Policy.ActionTest do
 
       assert Action.parse("filter amavis:") == {:ok, {:filter, "amavis:"}}
 
-      for action <- ["FILTER", "FILTER nocolon", "FILTER :dest", "FILTER a b:c"] do
+      for action <- [
+            "FILTER",
+            "FILTER nocolon",
+            "FILTER :dest",
+            "FILTER a b:c",
+            "FILTER a\tb:c",
+            <<"FILTER ", 0xF3, "mtp:[127.0.0.1]:10025">>,
+            "FILTER smtp:host\rx"
+          ] do
         assert Action.parse(action) == {:error, :invalid_action}, action
       end
     end

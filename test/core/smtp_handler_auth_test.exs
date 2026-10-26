@@ -68,7 +68,10 @@ defmodule Sovite.Core.SMTPHandlerAuthTest do
     socket = "/tmp/sovite-dovecot-#{System.unique_integer([:positive])}.sock"
 
     start_supervised!(
-      {FakeDovecot, path: socket, owner: self(), users: %{"carol" => "pw", "tempfail" => "x"}}
+      {FakeDovecot,
+       path: socket,
+       owner: self(),
+       users: %{"carol" => "pw", "tempfail" => "x", "a\x01nb" => "pw"}}
     )
 
     on_exit(fn -> File.rm(socket) end)
@@ -85,6 +88,9 @@ defmodule Sovite.Core.SMTPHandlerAuthTest do
              SMTPClient.command(client, plain("tempfail", "x"))
 
     assert_receive {:dovecot, :auth, ["AUTH", "1", "PLAIN", "service=smtp", "rip=127.0.0.1" | _]}
+
+    # Dovecot's \001n is a line break: not an identity to believe.
+    assert {:ok, {454, _}} = SMTPClient.command(client, plain("a\x01nb", "pw"))
 
     assert {:ok, {334, _}} = SMTPClient.command(client, "AUTH LOGIN")
     assert {:ok, {334, ["UGFzc3dvcmQ6"]}} = SMTPClient.command(client, Base.encode64("carol"))

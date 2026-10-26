@@ -95,11 +95,38 @@ defmodule Sovite.Core.Postfix.State do
   def put_tables(state, array, tables),
     do: %{state | arrays: Map.put(state.arrays, array, tables)}
 
-  @doc "Adds import commands under a heading, if there are any."
-  def commands(state, _heading, []), do: state
+  @doc """
+  Adds import commands under a heading, if there are any. A command with
+  a NUL byte in an argument is reported instead: a shell would cut the
+  argument there.
+  """
+  def commands(state, heading, commands) do
+    {broken, commands} = Enum.split_with(commands, &nul?/1)
 
-  def commands(state, heading, commands),
-    do: %{state | commands: state.commands ++ [{:comment, heading} | commands]}
+    state =
+      Enum.reduce(broken, state, fn command, state ->
+        report(
+          state,
+          :attention,
+          heading,
+          nil,
+          "Not imported: a value has a NUL byte (#{inspect(shown(command))}). Fix the table and add it by hand."
+        )
+      end)
+
+    if commands == [],
+      do: state,
+      else: %{state | commands: state.commands ++ [{:comment, heading} | commands]}
+  end
+
+  defp nul?(command), do: command |> arguments() |> Enum.any?(&String.contains?(&1, <<0>>))
+
+  defp arguments({:stdin, password, args}), do: [password | args]
+  defp arguments(args), do: args
+
+  # Passwords are not shown.
+  defp shown({:stdin, _password, args}), do: args
+  defp shown(args), do: args
 
   @doc "Adds a report line."
   def report(state, level, setting, value, message) do

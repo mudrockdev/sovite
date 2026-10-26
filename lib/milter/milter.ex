@@ -115,6 +115,7 @@ defmodule Sovite.Milter do
 
   alias Sovite.Milter.Packet
   alias Sovite.SMTP.Reply
+  alias Sovite.Validators
 
   @version 6
   @all_actions 0x1FF
@@ -244,14 +245,17 @@ defmodule Sovite.Milter do
   @typedoc """
   How the milter broke the protocol: a `Sovite.Milter.Packet.error()`,
   a response that does not belong at this step, a protocol version below
-  2, a modification of an action it did not negotiate, or a malformed
-  reply code.
+  2, a modification of an action it did not negotiate, a modification
+  that would break the message or the envelope (a header name that is
+  not one, a line break that is not folding, an address that is not a
+  mailbox), or a malformed reply code.
   """
   @type protocol_error ::
           Packet.error()
           | {:unexpected_response, byte()}
           | {:unsupported_version, non_neg_integer()}
           | {:action_not_negotiated, Packet.action()}
+          | {:invalid_modification, atom()}
           | {:malformed_reply_code, String.t()}
 
   @typedoc "Why a call failed. The connection is closed."
@@ -803,10 +807,38 @@ defmodule Sovite.Milter do
   defp modification(_milter, _response), do: :final
 
   defp allowed(milter, action, modification) do
-    if (milter.actions &&& Packet.action_mask([action])) != 0,
-      do: {:ok, modification},
-      else: {:error, {:protocol, {:action_not_negotiated, action}}}
+    cond do
+      (milter.actions &&& Packet.action_mask([action])) == 0 ->
+        {:error, {:protocol, {:action_not_negotiated, action}}}
+
+      valid_modification?(modification) ->
+        {:ok, modification}
+
+      true ->
+        {:error, {:protocol, {:invalid_modification, elem(modification, 0)}}}
+    end
   end
+
+  # Header fields must stay single fields, and addresses must be
+  # mailboxes: they go into the message and the envelope.
+  defp valid_modification?({:add_header, name, value}), do: field?(name, value)
+  defp valid_modification?({:insert_header, _index, name, value}), do: field?(name, value)
+  defp valid_modification?({:change_header, _index, name, value}), do: field?(name, value)
+  defp valid_modification?({:delete_header, _index, name}), do: field_name?(name)
+
+  defp valid_modification?({:add_recipient, address, _args}),
+    do: Validators.mailbox?(address, utf8: true)
+
+  defp valid_modification?({:change_sender, address, _args}),
+    do: address == "" or Validators.mailbox?(address, utf8: true)
+
+  defp valid_modification?(_modification), do: true
+
+  defp field_name?(name), do: name =~ ~r/\A[\x21-\x39\x3b-\x7e]+\z/
+
+  # Line breaks only as folding: CRLF and whitespace.
+  defp field?(name, value),
+    do: field_name?(name) and not (value =~ ~r/\r\n(?![ \t])|\r(?!\n)|(?<!\r)\n|\x00/)
 
   defp header_value(milter, value) do
     value = String.replace(value, ~r/\r?\n/, "\r\n")

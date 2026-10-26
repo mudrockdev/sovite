@@ -874,9 +874,16 @@ defmodule Sovite.Core.SMTPHandler do
     state.auth.opts ++ [client: client]
   end
 
+  # The identity goes into queue files, replies, and logs: a backend that
+  # gives one with control characters or bytes that are not UTF-8 (from
+  # a token server or Dovecot) is not believed.
   defp auth_result({:ok, identity}, state) do
-    auth_event(:success, state, state.mechanism, identity, nil)
-    {:ok, identity, %{state | identity: identity, sasl: nil}}
+    if String.valid?(identity) and not String.match?(identity, ~r/[\x00-\x1f\x7f]/) do
+      auth_event(:success, state, state.mechanism, identity, nil)
+      {:ok, identity, %{state | identity: identity, sasl: nil}}
+    else
+      auth_result({:error, :temporary, nil}, state)
+    end
   end
 
   defp auth_result({:challenge, data, sasl}, state), do: {:challenge, data, %{state | sasl: sasl}}

@@ -629,6 +629,33 @@ defmodule Sovite.MilterTest do
                {:error, {:protocol, {:action_not_negotiated, :change_sender}}}
     end
 
+    test "refuses modifications that would break the message or the envelope" do
+      for {modification, kind} <- [
+            {{:add_header, "X-A", "b\r\nX-Injected: yes"}, :add_header},
+            {{:add_header, "X-A", "b\rc"}, :add_header},
+            {{:add_header, "X A", "b"}, :add_header},
+            {{:change_header, 1, "Subject:", "b"}, :change_header},
+            {{:add_recipient, "<a@b\r\n.example>"}, :add_recipient},
+            {{:add_recipient, <<"<caf", 0xE9, "@example.com>">>}, :add_recipient},
+            {{:change_sender, "<not an address>", nil}, :change_sender}
+          ] do
+        milter = fake_milter(modifications: [modification])
+
+        assert Milter.end_of_message(milter) ==
+                 {:error, {:protocol, {:invalid_modification, kind}}},
+               inspect(modification)
+      end
+
+      # Folding is fine, and so is the null sender.
+      milter =
+        fake_milter(
+          modifications: [{:add_header, "X-A", "b\r\n\tc"}, {:change_sender, "<>", nil}]
+        )
+
+      assert {:ok, :accept, [{:add_header, "X-A", " b\r\n\tc"}, {:change_sender, "", []}], _} =
+               Milter.end_of_message(milter)
+    end
+
     test "refuses responses that do not belong" do
       milter = fake_milter(replies: %{end_of_message: [:skip]})
       assert Milter.end_of_message(milter) == {:error, {:protocol, {:unexpected_response, ?s}}}

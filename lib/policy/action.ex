@@ -28,7 +28,9 @@ defmodule Sovite.Policy.Action do
 
   An optional `text` is `nil` when absent. It may start with an RFC 3463
   enhanced status code (`REJECT 5.7.1 Go away`), which is left in the
-  text. Text after `OK` and `DUNNO` is ignored.
+  text. Text after `OK` and `DUNNO` is ignored. Texts go into replies and
+  logs: control characters other than tab become spaces, and bytes that
+  are not UTF-8 become `?`. A `PREPEND` header with either is refused.
 
   For `4NN` and `5NN` replies, `code` is from 400 to 599 and `enhanced`
   an enhanced status code of the same class (`"5.7.1"` for `550`), or
@@ -80,7 +82,8 @@ defmodule Sovite.Policy.Action do
 
   @keywords Map.new(Map.merge(@texts, @arguments), fn {word, kind} -> {kind, word} end)
 
-  @header ~r/\A[\x21-\x39\x3b-\x7e]+:/
+  # A field name, and a value without control characters other than tab.
+  @header ~r/\A[\x21-\x39\x3b-\x7e]+:[^\x00-\x08\x0a-\x1f\x7f]*\z/u
   @enhanced ~r/\A([245])\.\d{1,3}\.\d{1,3}\z/
 
   @doc """
@@ -124,22 +127,24 @@ defmodule Sovite.Policy.Action do
   end
 
   defp argument(:prepend, header) do
-    if Regex.match?(@header, header), do: {:ok, {:prepend, header}}, else: :error
+    if String.valid?(header) and Regex.match?(@header, header),
+      do: {:ok, {:prepend, header}},
+      else: :error
   end
 
   defp argument(kind, address) when kind in [:redirect, :bcc] do
     if Sovite.Validators.mailbox?(address, utf8: true), do: {:ok, {kind, address}}, else: :error
   end
 
+  # transport:destination, printable ASCII; the destination may have
+  # spaces (Postfix allows them in some next hops), the transport not.
   defp argument(:filter, destination) do
-    case :binary.split(destination, ":") do
-      [transport, _next_hop] when transport != "" ->
-        if String.contains?(transport, [" ", "\t"]),
-          do: :error,
-          else: {:ok, {:filter, destination}}
-
-      _ ->
-        :error
+    with [transport, _next_hop] when transport != "" <- :binary.split(destination, ":"),
+         true <- destination =~ ~r/\A[\x20-\x7e]+\z/,
+         false <- String.contains?(transport, " ") do
+      {:ok, {:filter, destination}}
+    else
+      _ -> :error
     end
   end
 
@@ -160,7 +165,12 @@ defmodule Sovite.Policy.Action do
   end
 
   defp text(""), do: nil
-  defp text(text), do: text
+
+  defp text(text) do
+    text
+    |> String.replace_invalid("?")
+    |> String.replace(~r/[\x00-\x08\x0a-\x1f\x7f]/, " ")
+  end
 
   # The first word, and the rest without its leading whitespace.
   defp split(string) do

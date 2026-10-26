@@ -849,10 +849,16 @@ defmodule Sovite.Core.Postfix.Checks do
   end
 
   defp code_action(code, text, value) do
-    if code =~ ~r/\A[45]\d\d\z/,
-      do: {:ok, code, text},
-      else:
+    cond do
+      code =~ ~r/\A[45]\d\d\z/ ->
+        {:ok, code, text}
+
+      String.trim(value) == "" ->
+        {:error, "no action"}
+
+      true ->
         {:error,
          "#{String.split(value) |> hd()} is not an action Sovite has (ACCEPT, CONTINUE, REJECT, DEFER, DISCARD, HOLD, WARN, or a 4NN/5NN reply)"}
+    end
   end
 end

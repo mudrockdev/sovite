@@ -911,7 +911,12 @@ defmodule Sovite.Core.Config do
   end
 
   defp decode(contents) do
-    case Toml.decode(contents) do
+    # The TOML decoder crashes, in a process linked to the caller, on
+    # bytes that are not UTF-8.
+    case String.valid?(contents) && Toml.decode(contents) do
+      false ->
+        {:error, [%Error{reason: "invalid TOML: not UTF-8 (line #{invalid_line(contents)})"}]}
+
       {:ok, map} ->
         {:ok, map}
 
@@ -921,6 +926,12 @@ defmodule Sovite.Core.Config do
       {:error, reason} ->
         {:error, [%Error{reason: "invalid TOML: #{inspect(reason)}"}]}
     end
+  end
+
+  defp invalid_line(contents) do
+    [first | _] = String.chunk(contents, :valid)
+    valid = if String.valid?(first), do: first, else: ""
+    length(:binary.matches(valid, "\n")) + 1
   end
 
   @doc """

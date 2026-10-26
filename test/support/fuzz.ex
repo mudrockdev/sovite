@@ -90,6 +90,53 @@ defmodule Sovite.Test.Fuzz do
     result
   end
 
+  @doc """
+  A TCP server on 127.0.0.1 for one connection, in a task: returns
+  `{port, task}`. It sends `parts` one by one, each after waiting
+  briefly for the client (`first: :wait`, the default), or before it
+  (`first: :send`, for protocols where the server speaks first), then
+  closes the connection.
+  """
+  def serve(parts, opts \\ []) do
+    first = Keyword.get(opts, :first, :wait)
+    serve_with(&exchange(&1, parts, first))
+  end
+
+  @doc "Like `serve/2`, with `handle` given the accepted socket."
+  def serve_with(handle, listen_opts \\ []) do
+    {:ok, listen} =
+      :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}] ++ listen_opts)
+
+    {:ok, port} = :inet.port(listen)
+
+    task =
+      Task.async(fn ->
+        with {:ok, socket} <- :gen_tcp.accept(listen, 2_000), do: handle.(socket)
+        :gen_tcp.close(listen)
+      end)
+
+    {port, task}
+  end
+
+  defp exchange(socket, parts, :send) do
+    Enum.each(parts, fn part ->
+      :gen_tcp.send(socket, part)
+      :gen_tcp.recv(socket, 0, 5)
+    end)
+
+    :gen_tcp.close(socket)
+  end
+
+  defp exchange(socket, parts, :wait) do
+    Enum.each(parts, fn part ->
+      :gen_tcp.recv(socket, 0, 50)
+      :gen_tcp.send(socket, part)
+    end)
+
+    :gen_tcp.recv(socket, 0, 20)
+    :gen_tcp.close(socket)
+  end
+
   defp mutate(_mutation, <<>>), do: <<>>
 
   defp mutate({:flip, at, bit}, binary) do

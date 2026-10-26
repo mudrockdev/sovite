@@ -13,6 +13,7 @@ defmodule Sovite.SMTPFuzzTest do
   alias Sovite.SMTP.{Command, DataDecoder, DSNParams, Params, Reply, XText}
   alias Sovite.SMTP.Server.Session
   alias Sovite.Test.Fuzz
+  alias Sovite.Test.Fuzz.SMTP, as: FuzzSMTP
 
   @moduletag :fuzz
   # `mix fuzz` runs each property many times.
@@ -99,51 +100,8 @@ defmodule Sovite.SMTPFuzzTest do
     def verify_token(_user, _token, _opts), do: {:error, :invalid}
   end
 
-  @mail [
-    "MAIL FROM:<a@example.com>",
-    "MAIL FROM:<a@example.com> SIZE=100 BODY=8BITMIME",
-    "MAIL FROM:<> RET=HDRS ENVID=QQ314159",
-    "MAIL FROM:<\"j d\"@example.com> MT-PRIORITY=3 BY=120;R",
-    "MAIL FROM:<pelé@exämple.com> SMTPUTF8 AUTH=<>",
-    "MAIL FROM:<a@example.com> BODY=BINARYMIME"
-  ]
-
-  @rcpt [
-    "RCPT TO:<b@example.net>",
-    "RCPT TO:<@a.example,@b.example:b@example.net> NOTIFY=SUCCESS,FAILURE ORCPT=rfc822;b@example.net",
-    "RCPT TO:<Postmaster> RRVS=2014-04-03T23:01:00Z;C",
-    "RCPT TO:<user@[IPv6:2001:db8::1]>",
-    "RCPT TO:<ünïcode@exämple.com> NOTIFY=NEVER"
-  ]
-
-  @commands @mail ++
-              @rcpt ++
-              [
-                "EHLO client.example",
-                "HELO [192.0.2.1]",
-                "LHLO client.example",
-                "MAIL FROM:<a@example.com> REQUIRETLS HOLDFOR=60",
-                "DATA",
-                "BDAT 0 LAST",
-                "BDAT 18446744073709551616",
-                "RSET",
-                "QUIT",
-                "NOOP x",
-                "VRFY alice",
-                "HELP mail",
-                "STARTTLS",
-                "AUTH PLAIN AGFsaWNlAHNlY3JldA==",
-                "AUTH LOGIN YWxpY2U=",
-                "AUTH SCRAM-SHA-256 =",
-                "XCLIENT ADDR=192.0.2.1 NAME=[UNAVAILABLE] HELO=x+2Ey",
-                "XFORWARD NAME=host.example ADDR=IPV6:2001:db8::1 PROTO=ESMTP",
-                "ETRN @example.com",
-                "ETRN #queue",
-                "GET / HTTP/1.1",
-                "Host: example.com"
-              ]
-
-  @command_tokens ["<", ">", ":", "=", " ", "\"", "\\", "@", ",", "FROM:", "TO:", "[IPv6:", "é"]
+  @commands FuzzSMTP.commands()
+  @command_tokens FuzzSMTP.tokens()
 
   describe "command lines" do
     property "parse to a command or an error, and never let CR, LF, or NUL through" do
@@ -188,7 +146,7 @@ defmodule Sovite.SMTPFuzzTest do
   describe "sessions" do
     property "reply to any input with well-formed replies, however it is split" do
       check all(
-              script <- script(),
+              script <- FuzzSMTP.script(),
               chunks <- Fuzz.chunked(script),
               max_runs: Fuzz.runs()
             ) do
@@ -209,7 +167,7 @@ defmodule Sovite.SMTPFuzzTest do
       opts = opts ++ [bare_line_endings: :normalize, max_line_length: 512, tarpit_after: 1]
 
       check all(
-              script <- script(),
+              script <- FuzzSMTP.script(),
               chunks <- Fuzz.chunked(script),
               max_runs: Fuzz.runs()
             ) do
@@ -430,80 +388,6 @@ defmodule Sovite.SMTPFuzzTest do
   defp clean?(term) when is_tuple(term), do: term |> Tuple.to_list() |> clean?()
   defp clean?(term) when is_list(term), do: Enum.all?(term, &clean?/1)
   defp clean?(_term), do: true
-
-  # Sessions that get somewhere: a greeting, perhaps AUTH, transactions
-  # with DATA or BDAT, and stray commands, with some lines mutated.
-  defp script do
-    gen all(
-          hello <- line(["EHLO client.example", "LHLO client.example", "HELO client.example"]),
-          auth <- list_of(auth(), max_length: 1),
-          transactions <- list_of(transaction(), max_length: 3),
-          stray <- list_of(Fuzz.input(@commands, @command_tokens), max_length: 3),
-          parts <-
-            shuffle_some([hello] ++ List.flatten(auth) ++ List.flatten(transactions), stray),
-          ending <- frequency([{6, constant("\r\n")}, {1, constant("\n")}])
-        ) do
-      Enum.map_join(parts, fn
-        {:raw, bytes} -> bytes
-        line -> line <> ending
-      end)
-    end
-  end
-
-  defp line(seeds),
-    do: frequency([{5, member_of(seeds)}, {1, Fuzz.mutated(seeds, @command_tokens)}])
-
-  defp auth do
-    one_of([
-      constant(["AUTH PLAIN AGFsaWNlAHNlY3JldA=="]),
-      constant(["AUTH LOGIN", "YWxpY2U=", "c2VjcmV0"]),
-      constant(["AUTH PLAIN", "*"]),
-      list_of(line(["AUTH SCRAM-SHA-256 biwsbj1hbGljZSxyPWFiYw==", "Yz1iaXdzLHI9YWJj", "*"]),
-        max_length: 3
-      )
-    ])
-  end
-
-  defp transaction do
-    body =
-      Fuzz.input([
-        "Subject: x\r\n\r\nbody\r\n",
-        ".\r\n..\r\n",
-        "a\r\n" <> String.duplicate("b", 80)
-      ])
-
-    gen all(
-          mail <- line(Enum.filter(@commands, &String.starts_with?(&1, "MAIL"))),
-          rcpts <-
-            list_of(line(Enum.filter(@commands, &String.starts_with?(&1, "RCPT"))),
-              min_length: 1,
-              max_length: 3
-            ),
-          content <- body,
-          kind <- member_of([:data, :bdat, :bdat_chunks])
-        ) do
-      [mail | rcpts] ++ content(kind, content)
-    end
-  end
-
-  defp content(:data, content), do: ["DATA", {:raw, content <> "\r\n.\r\n"}]
-  defp content(:bdat, content), do: ["BDAT #{byte_size(content)} LAST", {:raw, content}]
-
-  defp content(:bdat_chunks, content) do
-    half = div(byte_size(content), 2)
-    <<first::binary-size(^half), second::binary>> = content
-    ["BDAT #{half}", {:raw, first}, "BDAT #{byte_size(second)} LAST", {:raw, second}]
-  end
-
-  # The parts in order, with the stray ones in random places.
-  defp shuffle_some(parts, stray) do
-    gen all(places <- list_of(integer(0..length(parts)), length: length(stray))) do
-      places
-      |> Enum.zip(stray)
-      |> Enum.sort_by(&elem(&1, 0), :desc)
-      |> Enum.reduce(parts, fn {at, line}, parts -> List.insert_at(parts, at, line) end)
-    end
-  end
 
   defp session_opts do
     [

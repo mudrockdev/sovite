@@ -552,8 +552,13 @@ defmodule Sovite.Core.Postfix.Security do
   # Keys are domains, or "[host]" and "[host]:port" of next hops: Sovite
   # matches the host name, or an address literal.
   defp policy_entry({key, value}, {pairs, problems}) do
-    [level | _attributes] = String.split(value)
+    case String.split(value) do
+      [level | _attributes] -> policy_entry(key, level, {pairs, problems})
+      [] -> {pairs, [{key, "no security level"} | problems]}
+    end
+  end
 
+  defp policy_entry(key, level, {pairs, problems}) do
     destination =
       case Transport.parse_host(key, 25) do
         {:ok, %{host: host}} -> {:ok, host}

@@ -100,9 +100,13 @@ defmodule Sovite.Core.Sendmail do
   end
 
   defp usage(message) do
-    IO.puts(:stderr, "sendmail: #{message}")
+    error("sendmail: #{message}")
     @ex_usage
   end
+
+  # Arguments and addresses need not be UTF-8, and standard error only
+  # takes UTF-8.
+  defp error(text), do: IO.puts(:stderr, String.replace_invalid(text, "?"))
 
   ## Options
 
@@ -287,13 +291,17 @@ defmodule Sovite.Core.Sendmail do
     end)
   end
 
-  # Lines end in CRLF, whatever they ended in. Without -i, a line with a
-  # single dot ends the message.
+  # Lines end in CRLF, whatever they ended in: LF, CRLF, or a bare CR,
+  # which the server would refuse. Without -i, a line with a single dot
+  # ends the message.
   defp next_line(input, dots) do
     case IO.binread(input, :line) do
       data when is_binary(data) ->
         line = data |> String.trim_trailing("\n") |> String.trim_trailing("\r")
-        if dots and line == ".", do: :eof, else: {:ok, line <> "\r\n"}
+
+        if dots and line == ".",
+          do: :eof,
+          else: {:ok, String.replace(line, "\r", "\r\n") <> "\r\n"}
 
       _eof_or_error ->
         :eof
@@ -394,7 +402,7 @@ defmodule Sovite.Core.Sendmail do
       end)
 
     for {rcpt, _stage, reply} <- refused,
-        do: IO.puts(:stderr, "sendmail: #{rcpt}: #{Reply.to_string(reply)}")
+        do: error("sendmail: #{rcpt}: #{Reply.to_string(reply)}")
 
     cond do
       accepted != [] -> 0
