@@ -45,6 +45,7 @@ defmodule Sovite.Core.Config.Schema do
   #   {:map, key_type, value_type} - a table with arbitrary keys; errors name the key
   #   {:integer, min, max}
   #   {:float, min, max}       - a number, integers too, kept as a float
+  #   :threshold               - a filter action's score, as a float, or false (off)
   #   :syslog_address          - {:unix, path} from an absolute path, or {:udp, host, port}
   #                              from "host", "host:port", or "[ipv6]:port"
   #   {:enum, [atom]}          - the input string must equal one of the atom names
@@ -179,6 +180,13 @@ defmodule Sovite.Core.Config.Schema do
     do: {:ok, value / 1}
 
   defp cast({:float, min, max}, value), do: type_error("a number from #{min} to #{max}", value)
+
+  defp cast(:threshold, false), do: {:ok, false}
+
+  defp cast(:threshold, value) when is_number(value) and abs(value) <= 1_000_000,
+    do: {:ok, value / 1}
+
+  defp cast(:threshold, value), do: type_error("a score, or false", value)
 
   defp cast(:syslog_address, "/" <> _ = path), do: {:ok, {:unix, path}}
 

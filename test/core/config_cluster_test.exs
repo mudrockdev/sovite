@@ -3,6 +3,7 @@ defmodule Sovite.Core.ConfigClusterTest do
   use ExUnit.Case, async: true
 
   alias Sovite.Core.Config
+  alias Sovite.Rules.Actions
 
   @moduletag :tmp_dir
 
@@ -103,7 +104,8 @@ defmodule Sovite.Core.ConfigClusterTest do
              messages: {100, 3_600_000},
              recipients: {1000, 86_400_000},
              max_message_size: 10 * 1024 * 1024,
-             max_recipients: 50
+             max_recipients: 50,
+             filter_actions: Map.new(Actions.actions(), &{&1, nil})
            }
 
     assert [%{name: "shared"}, %{name: "acme", overflow: "shared", address: [address]}] =

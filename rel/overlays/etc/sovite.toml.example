@@ -370,6 +370,18 @@ rules = []
 reload_interval = "1m"
 # How long the rules may take for one message.
 timeout = "5s"
+# The subject of the rewrite_subject action.
+subject = "***SPAM*** {subject}"
+
+[filter.actions]
+# The score from which each action is taken; the most severe one reached
+# wins. false (or unset) never takes it.
+reject = 15
+# soft_reject = 12
+# quarantine = 10
+# rewrite_subject = 8
+add_header = 6
+greylist = 4
 
 [log]
 # One of: debug, info, notice, warning, error

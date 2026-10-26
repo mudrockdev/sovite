@@ -34,6 +34,8 @@ defmodule Sovite.Core.Config do
     {:codes, {:list, :dnsbl_code}, default: []}
   ]
 
+  @threshold_fields for action <- Sovite.Rules.Actions.actions(), do: {action, :threshold, []}
+
   @schema [
     # The parts of the stack this node runs. Only the MTA exists so far.
     {:stack,
@@ -405,7 +407,18 @@ defmodule Sovite.Core.Config do
       [
         {:rules, {:list, :absolute_path}, default: []},
         {:reload_interval, :duration, default: "1m"},
-        {:timeout, :duration, default: "5s"}
+        {:timeout, :duration, default: "5s"},
+        {:subject, :string, default: "***SPAM*** {subject}"},
+        {:actions,
+         {:section,
+          [
+            {:reject, :threshold, default: 15},
+            {:soft_reject, :threshold, []},
+            {:quarantine, :threshold, []},
+            {:rewrite_subject, :threshold, []},
+            {:add_header, :threshold, default: 6},
+            {:greylist, :threshold, default: 4}
+          ]}, []}
       ]}, []},
     {:log,
      {:section,
@@ -469,7 +482,9 @@ defmodule Sovite.Core.Config do
          {:messages, :rate, []},
          {:recipients, :rate, []},
          {:max_message_size, :byte_size, []},
-         {:max_recipients, {:integer, 1, 100_000}, []}
+         {:max_recipients, {:integer, 1, 100_000}, []},
+         # Unset keys are those of [filter.actions].
+         {:filter_actions, {:section, @threshold_fields}, []}
        ]}}, default: []},
     {:ip_pool,
      {:list,
@@ -788,7 +803,13 @@ defmodule Sovite.Core.Config do
           policy: %{timeout: pos_integer(), default_action: String.t()},
           sendmail: %{server: Sovite.Core.MTA.Transport.host(), origin: String.t() | nil},
           bounce: %{double_bounce_recipient: String.t() | nil, size_limit: pos_integer()},
-          filter: %{rules: [Path.t()], reload_interval: pos_integer(), timeout: pos_integer()},
+          filter: %{
+            rules: [Path.t()],
+            reload_interval: pos_integer(),
+            timeout: pos_integer(),
+            subject: String.t(),
+            actions: Sovite.Rules.Actions.thresholds()
+          },
           log: Sovite.Core.Logging.config(),
           admin: %{
             enabled: boolean(),
@@ -838,7 +859,8 @@ defmodule Sovite.Core.Config do
           messages: rate() | nil,
           recipients: rate() | nil,
           max_message_size: pos_integer() | nil,
-          max_recipients: pos_integer() | nil
+          max_recipients: pos_integer() | nil,
+          filter_actions: Sovite.Rules.Actions.thresholds()
         }
 
   @typedoc "An `[[ip_pool]]`: see `Sovite.Core.MTA.IPPools`."

@@ -45,6 +45,7 @@ defmodule Sovite.Core.CLI do
   @cluster_commands CLI.Cluster.commands()
   @data_commands CLI.Data.commands()
   @dns_commands CLI.DNS.commands()
+  @filter_commands CLI.Filter.commands()
   @migrate_commands CLI.Migrate.commands()
   @ops_commands CLI.Ops.commands()
   # The commands that work on this node's MTA: refused, and left out of
@@ -66,6 +67,7 @@ defmodule Sovite.Core.CLI do
     user sender remove NAME PATTERN  Take that permission away
   #{String.trim_trailing(CLI.Data.usage())}
   #{String.trim_trailing(CLI.DNS.usage())}
+  #{String.trim_trailing(CLI.Filter.usage())}
   #{String.trim_trailing(CLI.Ops.usage())}
   #{String.trim_trailing(CLI.Cluster.usage())}
   #{String.trim_trailing(CLI.Migrate.usage())}
@@ -152,6 +154,13 @@ defmodule Sovite.Core.CLI do
 
   defp run([command | _] = argv, path) when command in @dns_commands do
     case CLI.DNS.run(argv, path) do
+      :usage -> usage_error()
+      status -> status
+    end
+  end
+
+  defp run([command | _] = argv, path) when command in @filter_commands do
+    case CLI.Filter.run(argv, path) do
       :usage -> usage_error()
       status -> status
     end

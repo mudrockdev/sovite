@@ -42,7 +42,7 @@ done
 # 3. Tables. A table that is not listed is shared.
 mta_tables="AccessRules AddressRewrites Aliases BccRules DMARCReportEntries GreylistEntries
 IPAddressCounts MTASTSPolicies RelocatedUsers SenderRelays TLSReportEntries Transports"
-filter_tables=""
+filter_tables="FilterThresholds"
 mailbox_tables="Mailboxes Users"
 
 # The files outside the owner that use a table module. Each file is read

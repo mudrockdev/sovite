@@ -1,6 +1,6 @@
 # Filter rules
 
-The filter part (`[stack] filter`) scores messages with rules, the way Rspamd does. Rules find *symbols* in a message, each with a score. The scores add up to the message's score, which will decide what is done with it (the actions come later in 2.0; see [`ROADMAP.md`](../ROADMAP.md)).
+The filter part (`[stack] filter`) scores messages with rules, the way Rspamd does. Rules find *symbols* in a message, each with a score. The scores add up to the message's score, which decides what is done with it: its [action](#actions). (Scanning in the MTA's SMTP session comes later in 2.0; see [`ROADMAP.md`](../ROADMAP.md).)
 
 Rules are in TOML files named by [`[filter] rules`](configuration.md#filter). `sovitectl config check` reads and checks them, and so does a reload. Changed files are read again without a restart (see `reload_interval`).
 
@@ -152,3 +152,32 @@ Within one file, a name may be used once.
 ## Scoring
 
 The message's score is the sum of its symbols' scores, with each group's share kept within its `max_score` and `min_score`. Symbols that composites remove do not count. The rules for one message may take [`[filter] timeout`](configuration.md#filter); the rules after it do not run.
+
+## Actions
+
+A message's score decides its action: the most severe one whose threshold the score reaches.
+
+| Action | What is done |
+|---|---|
+| `reject` | The message is refused. |
+| `soft_reject` | It is refused for now (`451`), so the sender tries again later. |
+| `quarantine` | It is accepted and held instead of delivered. |
+| `rewrite_subject` | It is delivered with its subject marked (`[filter] subject`). |
+| `add_header` | It is delivered with header fields that mark it as spam. |
+| `greylist` | It is refused for now, unless the sender has tried before. |
+| `no_action` | It is delivered as it is. |
+
+The thresholds for mail to an address come from, the first that sets one first:
+
+1. the address's own (`sovitectl filter threshold set bob@example.com reject 20`);
+2. its domain's (`sovitectl filter threshold set @example.com greylist off`);
+3. the tenant that owns its domain (`[tenant.filter_actions]`);
+4. [`[filter.actions]`](configuration.md#filteractions).
+
+Each can set a threshold, or turn an action off. `sovitectl filter threshold show bob@example.com` prints those that apply.
+
+A message for several recipients gets the least severe of their actions, so that no recipient loses mail their own thresholds would keep. Outgoing mail of logged-in users gets the thresholds of the sender's tenant.
+
+## Trying the rules
+
+`sovitectl filter scan message.eml` (or a message on standard input) scans a message with the rules of `[filter] rules` and prints its score, its action under `[filter.actions]`, and the symbols found with what they matched. The rules are read from their files, so this works before they are taken by the server.

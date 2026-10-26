@@ -931,6 +931,22 @@ The filter part (`[stack] filter`), in place of Rspamd. Its rules are in their o
 | `rules` | list of absolute paths | `[]` | Rule files, or directories whose `*.toml` files are read in name order (`10-base.toml` before `50-local.toml`). Files are read in the order given; a later file's entry with the name of an earlier one changes only the keys it sets. `sovitectl config check` and a reload read and check them all. |
 | `reload_interval` | duration | `1m` | How often the rule files, and the map files they name, are checked for changes. Changed files are read again without a restart, and also at every config reload. Rules with errors are not taken: the ones before stay, and the errors are logged. |
 | `timeout` | duration | `5s` | How long the rules may take for one message. Rules after it do not run, and the scan notes `time_limit`. |
+| `subject` | string | `"***SPAM*** {subject}"` | The subject the `rewrite_subject` action gives a message; `{subject}` is its subject. |
+
+### `[filter.actions]`
+
+What the filter does with a message, by its score: the most severe action whose threshold the score reaches. Each key is a score, or `false` for an action that is never taken. See [Actions](filter.md#actions).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `reject` | score or `false` | `15` | Refuse the message. |
+| `soft_reject` | score or `false` | unset | Refuse it for now (`451`); the sender tries again later. |
+| `quarantine` | score or `false` | unset | Accept it and hold it instead of delivering it. |
+| `rewrite_subject` | score or `false` | unset | Deliver it with the subject of `subject`. |
+| `add_header` | score or `false` | `6` | Deliver it with header fields that mark it as spam. |
+| `greylist` | score or `false` | `4` | Refuse it for now unless the sender has tried before. |
+
+Tenants (`[tenant.filter_actions]`), domains, and addresses (`sovitectl filter threshold`) can have their own.
 
 ## `[log]`
 
@@ -1048,6 +1064,10 @@ messages = "10000/1d"
 recipients = "50000/1d"
 max_message_size = "10M"
 max_recipients = 500
+
+[tenant.filter_actions]
+reject = 20
+greylist = false
 ```
 
 | Key | Type | Default | Description |
@@ -1060,6 +1080,7 @@ max_recipients = 500
 | `recipients` | rate | unset | Recipients per period for the whole tenant. |
 | `max_message_size` | size | unset | The largest message: `552 5.3.4` over it, at `MAIL` (with `SIZE`) or after the data. |
 | `max_recipients` | integer | unset | Recipients per message: `452 4.5.3` over it. |
+| `filter_actions` | table | unset | Filter thresholds for the tenant's mail, with the keys of [`[filter.actions]`](#filteractions). Those it leaves unset are those of `[filter.actions]`. |
 
 A message belongs to a tenant when the client logged in as one of its `users`, or with a login in one of its domains, or, for clients that logged in or are in `smtp.trusted_networks`, when the sender's domain is one of its domains. Mail from the internet belongs to no tenant.
 
