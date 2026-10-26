@@ -185,11 +185,13 @@ Tests mirror the source layout:
 test/
   core/
   <component>/
-  support/          # fake DNS, fake remote MTA, SMTP test client
+  fuzz/             # fuzz tests, tagged :fuzz (mix fuzz)
+  support/          # fake DNS, fake remote MTA, SMTP test client, fuzz generators
 ```
 
 - Each reusable component is tested in isolation, with no dependency on `core/`.
 - `core/` tests cover wiring and end-to-end mail flow.
+- `fuzz/` tests feed untrusted input (from clients, servers, DNS, milters, policy servers, authentication backends, local users, and files) to the code that reads it, as random bytes and mutations of real input (`Sovite.Test.Fuzz`). They check that it never crashes, that what it lets through is safe to store and send, and that splitting input differently changes nothing. A failure prints the shrunk input: add it to the module's regular tests when fixing it.
 
 ---
 

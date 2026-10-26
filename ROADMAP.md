@@ -279,7 +279,7 @@ Each phase has a "Definition of Done". A phase is not finished until its interop
 ### Phase 14 — Hardening for 1.0
 
 - [ ] External security audit
-- [ ] Fuzzing campaign on SMTP parser, MIME/header parser, DNS response handling, queue file reader
+- [x] Fuzzing campaign on SMTP parser, MIME/header parser, DNS response handling, queue file reader (`test/fuzz/`, `mix fuzz`; also the SMTP handler and client, milters, policy servers, authentication backends, sendmail, generated messages, the admin API, config files, logs, the Postfix migration, and cluster sync)
 - [ ] Long-running soak tests (weeks) with real traffic mirrors
 - [ ] Performance benchmarks vs Postfix (throughput, latency, memory per connection)
 - [ ] Complete documentation: admin guide, config reference, migration guide, security guide

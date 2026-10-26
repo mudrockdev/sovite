@@ -15,7 +15,10 @@ mix setup           # deps.get
 mix test            # tests, including property tests
 mix lint            # format check, warnings as errors, credo, xref cycles
 mix dialyzer
+mix fuzz            # only the fuzz tests, 10,000 inputs per property
 ```
+
+The fuzz tests (`test/fuzz/`) run in every `mix test` with 100 inputs per property. `mix fuzz` runs them longer; set `FUZZ_RUNS` for more, and name a file to fuzz one area: `FUZZ_RUNS=100000 mix fuzz test/fuzz/smtp_fuzz_test.exs`. They are not scheduled anywhere: run them by hand before a release, or after changing a parser.
 
 The first Dialyzer run builds its PLT and takes a few minutes; later runs are incremental.
 
